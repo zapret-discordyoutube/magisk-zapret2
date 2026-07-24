@@ -177,11 +177,15 @@ sed 's/generation=receipt-test/generation=next-generation/' \
     "$FIXTURE/install-generation.meta" > "$FIXTURE/install-generation.meta.next"
 chmod 0600 "$FIXTURE/install-generation.meta.next"
 mv "$FIXTURE/install-generation.meta.next" "$FIXTURE/install-generation.meta"
+# The generation record only ever changes between transactions (module
+# promotion at reboot); a new transaction starts with an empty meta cache.
+INSTALL_META_CACHED_PATH=""
 assert_fails compiled_validation_receipt_current "$TMP/tcp.argv"
 sed 's/generation=next-generation/generation=receipt-test/' \
     "$FIXTURE/install-generation.meta" > "$FIXTURE/install-generation.meta.next"
 chmod 0600 "$FIXTURE/install-generation.meta.next"
 mv "$FIXTURE/install-generation.meta.next" "$FIXTURE/install-generation.meta"
+INSTALL_META_CACHED_PATH=""
 printf '%s\n' '# receipt input changed' >> "$TMP/tcp.argv"
 assert_fails compiled_validation_receipt_current "$TMP/tcp.argv"
 compile_preset_artifact "$FIXTURE/presets/TCP only.txt" "TCP only.txt" "$TMP/tcp.argv" ||

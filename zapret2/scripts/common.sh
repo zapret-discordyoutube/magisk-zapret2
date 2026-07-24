@@ -302,9 +302,16 @@ path_nlink_is_one() {
 
 INSTALL_META_GENERATION=""
 INSTALL_META_ARCHIVE_SHA256=""
+INSTALL_META_CACHED_PATH=""
 read_install_generation_meta() {
     local path="${1:-$INSTALL_GENERATION_META}" key value version="" module="" generation="" archive="" seen="" size
-    INSTALL_META_GENERATION=""; INSTALL_META_ARCHIVE_SHA256=""
+    # The generation record is written once by the installer and is immutable
+    # for the lifetime of this process; one authenticated read per transaction
+    # is sufficient.
+    if [ -n "$INSTALL_META_CACHED_PATH" ] && [ "$INSTALL_META_CACHED_PATH" = "$path" ]; then
+        return 0
+    fi
+    INSTALL_META_GENERATION=""; INSTALL_META_ARCHIVE_SHA256=""; INSTALL_META_CACHED_PATH=""
     [ -f "$path" ] && [ ! -L "$path" ] && path_uid_is_root "$path" &&
         path_mode_is_0600 "$path" && path_nlink_is_one "$path" || return 1
     size="$(wc -c < "$path" 2>/dev/null)" || return 1
@@ -324,6 +331,7 @@ read_install_generation_meta() {
     is_safe_token "$generation" && [ "${#generation}" -le 128 ] 2>/dev/null || return 1
     is_lower_sha256 "$archive" || return 1
     INSTALL_META_GENERATION="$generation"; INSTALL_META_ARCHIVE_SHA256="$archive"
+    INSTALL_META_CACHED_PATH="$path"
 }
 
 RECOVERY_ARTIFACT_DIAGNOSTIC=""
@@ -378,7 +386,7 @@ stale_owner_clean_ownership_proof() {
 
 caller_holds_exact_lifecycle_lock() {
     case "$LOCK_HELD" in 1|inherited) ;; *) return 1;; esac
-    read_lock_owner && lock_owner_alive || return 1
+    lock_owner_alive || return 1
     [ "$LOCK_FILE_PID" = "$LOCK_OWNER_PID" ] && [ "$LOCK_FILE_START" = "$LOCK_OWNER_START" ] &&
         [ "$LOCK_FILE_TOKEN" = "$LOCK_OWNER_TOKEN" ]
 }
@@ -1393,9 +1401,8 @@ acquire_lifecycle_lock() {
     # owner would deadlock the child behind its own parent transaction. The
     # child may never remove the lock: the original holder owns cleanup.
     if is_safe_token "$token" && is_decimal "$owner_pid" && is_decimal "$owner_start" &&
-       read_lock_owner &&
-       { [ "$LOCK_FILE_KIND" = shell ] || [ "$LOCK_FILE_KIND" = android-mutation ]; } &&
        lock_owner_alive &&
+       { [ "$LOCK_FILE_KIND" = shell ] || [ "$LOCK_FILE_KIND" = android-mutation ]; } &&
        [ "$LOCK_FILE_TOKEN" = "$token" ] &&
        [ "$LOCK_FILE_PID" = "$owner_pid" ] &&
        [ "$LOCK_FILE_START" = "$owner_start" ]; then
@@ -1583,7 +1590,7 @@ uninstall_environment_authorized() {
         [ "${ZAPRET2_UNINSTALL_OWNER_PID:-}" = "$UNINSTALL_FILE_PID" ] &&
         is_decimal "${ZAPRET2_UNINSTALL_OWNER_START:-}" &&
         [ "${ZAPRET2_UNINSTALL_OWNER_START:-}" = "$UNINSTALL_FILE_START" ] &&
-        read_lock_owner && lock_owner_alive &&
+        lock_owner_alive &&
         [ "$LOCK_FILE_PID" = "$UNINSTALL_FILE_PID" ] &&
         [ "$LOCK_FILE_START" = "$UNINSTALL_FILE_START" ]
 }
@@ -2385,12 +2392,6 @@ cleanup_owned_firewall() {
     [ "$result" = 0 ] || rc=1
     if z2_fw_tool_available ip6tables; then
         z2_fw_cleanup_family ip6tables "$baseline_mode" || rc=1
-    fi
-    if [ -e "$OBSOLETE_FIREWALL_WAL" ] || [ -L "$OBSOLETE_FIREWALL_WAL" ]; then
-        state_file_is_secure "$OBSOLETE_FIREWALL_WAL" &&
-            path_mode_is_0600 "$OBSOLETE_FIREWALL_WAL" &&
-            path_nlink_is_one "$OBSOLETE_FIREWALL_WAL" &&
-            rm -f "$OBSOLETE_FIREWALL_WAL" 2>/dev/null || rc=1
     fi
     return "$rc"
 }

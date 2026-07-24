@@ -65,32 +65,43 @@ elif ! ensure_state_dir; then
     exit 1
 fi
 
-# Wait for boot to complete
-until [ "$(getprop sys.boot_completed)" = "1" ]; do
-    sleep 1
-done
-
-# This audit is intentionally before both the disable/autostart gates.  It can
-# only retire proven cross-boot metadata and cannot launch nfqws2 or add rules.
-if ! command -v recover_boot_stale_runtime_state >/dev/null 2>&1 ||
-   ! recover_boot_stale_runtime_state; then
-    log "ERROR: Previous-boot runtime recovery failed: ${BOOT_RECOVERY_DIAGNOSTIC:-unsafe recovery state}"
-    exit 1
+# Wait for boot to complete. resetprop -w blocks on the property instead of
+# forking getprop once a second; fall back to the poll loop without it.
+if command -v resetprop >/dev/null 2>&1; then
+    until [ "$(getprop sys.boot_completed)" = "1" ]; do
+        resetprop -w sys.boot_completed 0 >/dev/null 2>&1 || sleep 1
+    done
+else
+    until [ "$(getprop sys.boot_completed)" = "1" ]; do
+        sleep 1
+    done
 fi
 
+# When autostart will run, zapret-start.sh performs the identical recovery
+# audit under its own lifecycle lock; a second standalone lock/audit cycle
+# here would prove the same facts twice. The standalone recovery pass below
+# is kept for the paths that never reach zapret-start.sh.
 if [ "$MODULE_DISABLED" = 1 ]; then
+    if ! command -v recover_boot_stale_runtime_state >/dev/null 2>&1 ||
+       ! recover_boot_stale_runtime_state; then
+        log "ERROR: Previous-boot runtime recovery failed: ${BOOT_RECOVERY_DIAGNOSTIC:-unsafe recovery state}"
+        exit 1
+    fi
     log "Module disable marker is present; previous-boot recovery completed and startup was skipped"
     exit 0
 fi
+
+# The boot entry point is the only caller allowed to discard an incompatible
+# previous-boot state generation wholesale; zapret-start.sh honours this flag
+# under its own lock.
+ZAPRET2_BOOT_RECOVERY=1
+export ZAPRET2_BOOT_RECOVERY
 
 if ! prepare_lifecycle_log; then
     LOG_READY=0
     /system/bin/log -p w -t "Zapret2" "Lifecycle file logging is unavailable; continuing in logcat only" 2>/dev/null
 fi
 
-if [ "$BOOT_INCOMPATIBLE_STATE_RETIRED" = 1 ]; then
-    log "Incompatible boot-local state was discarded"
-fi
 log "=== Zapret2 service starting ==="
 
 log "Boot completed; starting the network-independent firewall lifecycle"
@@ -141,6 +152,16 @@ if [ "$AUTOSTART" = "1" ]; then
         log "ERROR: Autostart command failed (exit $START_RC)"
     fi
 else
+    # No start transaction will run, so retire previous-boot runtime state in
+    # a standalone recovery pass here.
+    if ! recover_boot_stale_runtime_state; then
+        log "ERROR: Previous-boot runtime recovery failed: ${BOOT_RECOVERY_DIAGNOSTIC:-unsafe recovery state}"
+        log "=== Zapret2 service script failed ==="
+        exit 1
+    fi
+    if [ "$BOOT_INCOMPATIBLE_STATE_RETIRED" = 1 ]; then
+        log "Incompatible boot-local state was discarded"
+    fi
     START_RC=0
     log "Autostart disabled in effective core config ($CORE_CONFIG_SOURCE)"
 fi

@@ -541,6 +541,12 @@ compile_preset_artifact() {
     chmod 0600 "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
     mv -f "$tmp" "$artifact" || { rm -f "$tmp"; return 1; }
     COMPILED_ARGV_FILE="$artifact"
+    # The compiler is now the authority for every metadata field the artifact
+    # carries; publishing them here lets callers skip a full re-parse.
+    COMPILED_PRESET="$logical_name"
+    COMPILED_SOURCE_SHA256="$source_sha"
+    COMPILED_RUNTIME_SHA256="$runtime_sha"
+    COMPILED_METADATA_FOR="$artifact"
 }
 
 compiled_artifact_binding_current() {
@@ -635,6 +641,7 @@ ensure_compiled_artifact() {
 read_compiled_artifact_metadata() {
     local artifact="$1" line stage=0 seen_preset=0 seen_sha=0 seen_runtime_sha=0 seen_tcp=0 seen_udp=0
     local seen_tcp_out=0 seen_tcp_in=0 seen_udp_out=0 seen_udp_in=0 size tab key value
+    COMPILED_METADATA_FOR=""
     COMPILED_PRESET=; COMPILED_SOURCE_SHA256=; COMPILED_RUNTIME_SHA256=; COMPILED_TCP_PORTS=; COMPILED_UDP_PORTS=
     COMPILED_TCP_PKT_OUT=; COMPILED_TCP_PKT_IN=; COMPILED_UDP_PKT_OUT=; COMPILED_UDP_PKT_IN=
     [ -f "$artifact" ] && [ ! -L "$artifact" ] && [ -r "$artifact" ] || return 1
@@ -685,11 +692,16 @@ read_compiled_artifact_metadata() {
     validate_capture_packet_count "$COMPILED_TCP_PKT_IN" || return 1
     validate_capture_packet_count "$COMPILED_UDP_PKT_OUT" || return 1
     validate_capture_packet_count "$COMPILED_UDP_PKT_IN" || return 1
+    COMPILED_METADATA_FOR="$artifact"
 }
 
 run_compiled_artifact() {
     local artifact="$1" mode="$2" line in_args=0
-    read_compiled_artifact_metadata "$artifact" || return 1
+    # Every launch path has already authenticated this exact artifact via a
+    # binding or metadata read in the same process; re-parse only when that
+    # proof is missing. The argv loop below still validates each line.
+    [ "${COMPILED_METADATA_FOR:-}" = "$artifact" ] ||
+        read_compiled_artifact_metadata "$artifact" || return 1
     set --
     while IFS= read -r line || [ -n "$line" ]; do
         if [ "$in_args" -eq 0 ]; then [ "$line" != ARGS ] || in_args=1; continue; fi

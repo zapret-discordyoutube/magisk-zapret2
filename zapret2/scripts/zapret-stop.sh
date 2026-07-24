@@ -72,17 +72,6 @@ stop_interrupted() {
     exit 1
 }
 
-firewall_is_clean() {
-    command -v iptables >/dev/null 2>&1 || return 1
-    owned_family_absent iptables || return 1
-    if command -v ip6tables >/dev/null 2>&1; then
-        owned_family_absent ip6tables || return 1
-    elif [ "${STATUS_FILE_IPV6_ACTIVE:-0}" = 1 ]; then
-        return 1
-    fi
-    return 0
-}
-
 main() {
     ensure_state_dir ||
         stop_error_exit STATE STATE_UNAVAILABLE STOP_STATE 0 \
@@ -151,11 +140,14 @@ main() {
         STOP_ERROR_DOMAIN=FIREWALL; STOP_ERROR_CODE=FIREWALL_CLEANUP_FAILED; STOP_ERROR_STAGE=STOP_FIREWALL
         if [ -n "$errors" ]; then errors="$errors; owned firewall cleanup failed"
         else errors="owned firewall cleanup failed: ${FIREWALL_CLEANUP_PREFLIGHT_ERROR:-ambiguous ownership}; daemon teardown was not attempted"; fi
-    elif ! firewall_is_clean; then
+    elif ! command -v ip6tables >/dev/null 2>&1 && [ "${STATUS_FILE_IPV6_ACTIVE:-0}" = 1 ]; then
+        # z2_fw_apply_cleanup already proved per-family absence as its own
+        # postcondition; the only fact it cannot prove is IPv6 state on a
+        # device that lost its ip6tables frontend.
         rc=1
         STOP_ERROR_DOMAIN=FIREWALL; STOP_ERROR_CODE=POSTCONDITION_FAILED; STOP_ERROR_STAGE=STOP_FIREWALL
         if [ -n "$errors" ]; then errors="$errors; owned firewall artifacts remain"
-        else errors="owned firewall artifacts remain; daemon teardown was not attempted"; fi
+        else errors="IPv6 owned rules cannot be disproved because ip6tables is unavailable; daemon teardown was not attempted"; fi
     else
         firewall_detached=1
     fi
@@ -182,7 +174,10 @@ main() {
     fi
 
     if [ "$rc" -eq 0 ]; then
-        if ! retire_owner_metadata; then
+        # stop_pidfile_process just proved no exact process remains and
+        # removed the publication files itself; asserting their absence is
+        # the whole retirement postcondition without another /proc walk.
+        if [ -e "$PIDFILE" ] || [ -L "$PIDFILE" ] || [ -e "$OWNER_STATE" ] || [ -L "$OWNER_STATE" ]; then
             rc=1
             if [ -n "$errors" ]; then errors="$errors; ownership metadata retained because process identity is ambiguous"
             else errors="ownership metadata retained because process identity is ambiguous"; fi

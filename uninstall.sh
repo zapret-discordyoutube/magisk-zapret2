@@ -454,7 +454,7 @@ publish_uninstall_tombstone() {
         uninstall_tombstone_owner_alive && return 1
     fi
 
-    read_lock_owner && lock_owner_alive || return 1
+    lock_owner_alive || return 1
     [ "$LOCK_FILE_PID" = "$$" ] && [ "$LOCK_FILE_START" = "$self_start" ] || return 1
     state_file_target_is_safe "$UNINSTALL_TOMBSTONE" || return 1
     tmp="$UNINSTALL_TOMBSTONE.tmp.$$.$token"

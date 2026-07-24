@@ -151,8 +151,10 @@ prepare_options() {
     is_safe_preset_file_name "$ACTIVE_PRESET" || return 1
     preset_file="$PRESETS_DIR/$ACTIVE_PRESET"
     state_path_is_managed_file "$COMPILED_ARGV_FILE" || return 1
+    # ensure_compiled_artifact leaves the COMPILED_* metadata populated on
+    # both the cache-hit and the freshly-compiled path.
     ensure_compiled_artifact "$preset_file" "$ACTIVE_PRESET" "$COMPILED_ARGV_FILE" || return 1
-    read_compiled_artifact_metadata "$COMPILED_ARGV_FILE" || return 1
+    [ "$COMPILED_METADATA_FOR" = "$COMPILED_ARGV_FILE" ] || return 1
     PORTS_TCP="$COMPILED_TCP_PORTS"
     PORTS_UDP="$COMPILED_UDP_PORTS"
     TCP_PKT_OUT="$COMPILED_TCP_PKT_OUT"
@@ -165,7 +167,6 @@ prepare_options() {
     preflight_files || return 1
     prepare_private_runtime_file "$STARTUP_LOG" || return 1
     prepare_private_runtime_file "$ERROR_LOG" || return 1
-    compiled_source_binding_current || return 1
     if compiled_validation_receipt_current "$COMPILED_ARGV_FILE"; then
         log_debug "Reusing generation-bound nfqws2 preflight receipt"
     else
@@ -173,7 +174,8 @@ prepare_options() {
         umask 077
         { run_compiled_artifact "$COMPILED_ARGV_FILE" dry-run >/dev/null; printf '%s\n' "$?" > "$rcfile"; } 2>&1 |
             tail -c 32768 > "$capture"
-        dry_rc="$(cat "$rcfile" 2>/dev/null)"
+        dry_rc=""
+        IFS= read -r dry_rc < "$rcfile" 2>/dev/null || dry_rc=""
         rm -f "$rcfile" 2>/dev/null
         is_decimal "$dry_rc" || { rm -f "$capture"; return 1; }
         chmod 0600 "$capture" 2>/dev/null || { rm -f "$capture"; return 1; }
@@ -438,14 +440,8 @@ launch_nfqws2() {
         LAUNCH_ERROR="PID file already exists before launch"
         return 1
     }
-    prepare_private_runtime_file "$STARTUP_LOG" || {
-        LAUNCH_ERROR="startup diagnostic file is unavailable"
-        return 1
-    }
-    prepare_private_runtime_file "$ERROR_LOG" || {
-        LAUNCH_ERROR="error diagnostic file is unavailable"
-        return 1
-    }
+    # prepare_options already provisioned STARTUP_LOG/ERROR_LOG for this
+    # transaction; re-preparing here would truncate the dry-run diagnostics.
     LAUNCH_OWNS_PIDFILE=1
     run_compiled_artifact "$COMPILED_ARGV_FILE" daemon || {
         LAUNCH_ERROR="nfqws2 rejected the compiled launch artifact"
@@ -455,7 +451,9 @@ launch_nfqws2() {
     if [ -n "$LAUNCHED_PID_START" ]; then
         LAUNCHED_ARGV_SHA256="$(proc_cmdline_sha256 "$LAUNCHED_PID" 2>/dev/null)" || LAUNCHED_ARGV_SHA256=""
     fi
-    while [ "$n" -lt 10 ]; do
+    # nfqws2 publishes its pidfile within milliseconds on a healthy start;
+    # poll at 100 ms so a normal launch is not rounded up to whole seconds.
+    while [ "$n" -lt 100 ]; do
         candidate="$LAUNCHED_PID"
         if read_live_pidfile; then candidate="$LIVE_PIDFILE_PID"; else candidate=""; fi
         if [ -n "$candidate" ]; then
@@ -463,7 +461,7 @@ launch_nfqws2() {
             if [ -n "$start" ]; then
                 if ! publish_nfqws_owner "$candidate" "$start" "$QNUM" active; then
                     LAUNCH_ERROR="nfqws2 PID appeared but exact owner publication failed"
-                    n=$((n + 1)); sleep 1
+                    n=$((n + 1)); sleep 0.1
                     continue
                 fi
                 NEW_PID_PUBLISHED=1
@@ -472,7 +470,7 @@ launch_nfqws2() {
                 return 0
             fi
         fi
-        n=$((n + 1)); sleep 1
+        n=$((n + 1)); sleep 0.1
     done
     [ -n "$LAUNCH_ERROR" ] || LAUNCH_ERROR="nfqws2 did not publish a live PID within 10 seconds"
     return 1
@@ -522,11 +520,24 @@ main() {
         start_error_exit LIFECYCLE MODULE_REMOVAL_PENDING START_PREFLIGHT 0 \
             "start blocked because the root manager scheduled the module for removal"
     fi
+    # The boot entry point (service.sh) delegates its recovery authority so
+    # boot needs one lock/audit cycle instead of two. Only under that flag may
+    # an unsafe previous-boot state generation be discarded wholesale.
+    BOOT_STATE_DISCARDED=0
+    if [ "${ZAPRET2_BOOT_RECOVERY:-0}" = 1 ]; then BOOT_STALE_RUNTIME_RECOVERY=1; fi
     if ! audit_recovery_artifacts lifecycle; then
-        release_lifecycle_lock
-        start_error_exit LIFECYCLE RECOVERY_BLOCKED START_RECOVERY 0 \
-            "${RECOVERY_ARTIFACT_DIAGNOSTIC:-recovery artifacts block start}"
+        if [ "${BOOT_STALE_RUNTIME_RECOVERY:-0}" = 1 ] && [ "$RECOVERY_ARTIFACT_CLASS" = unsafe ] &&
+           discard_incompatible_boot_state; then
+            BOOT_STATE_DISCARDED=1
+            DIAGNOSTICS="${DIAGNOSTICS}incompatible boot-local state was discarded; "
+        else
+            BOOT_STALE_RUNTIME_RECOVERY=0
+            release_lifecycle_lock
+            start_error_exit LIFECYCLE RECOVERY_BLOCKED START_RECOVERY 0 \
+                "${RECOVERY_ARTIFACT_DIAGNOSTIC:-recovery artifacts block start}"
+        fi
     fi
+    BOOT_STALE_RUNTIME_RECOVERY=0
     if ! uninstall_tombstone_allows_start; then
         message="start blocked by uninstall serialization: $UNINSTALL_TOMBSTONE_ERROR"
         release_lifecycle_lock
@@ -562,9 +573,10 @@ main() {
 
     if ! prepare_lifecycle_log; then
         LOG_READY=0
-        DIAGNOSTICS="lifecycle log unavailable or unsafe; "
+        DIAGNOSTICS="${DIAGNOSTICS}lifecycle log unavailable or unsafe; "
         if command -v log >/dev/null 2>&1; then log -p w -t Zapret2 "Lifecycle file logging disabled: unsafe or unavailable path" 2>/dev/null; fi
     fi
+    [ "$BOOT_STATE_DISCARDED" != 1 ] || log_msg "Incompatible boot-local state was discarded"
     restore_status_facts
 
     load_config ||
