@@ -96,17 +96,25 @@ class PresetApplicationPerformanceContractTest {
     @Test
     fun packagedNfqwsContract_hasNoRuntimeHelpProbeOrFallbackLauncher() {
         val start = repositoryFile("zapret2/scripts/zapret-start.sh").readText()
+        val builder = repositoryFile("zapret2/scripts/command-builder.sh").readText()
         val prepare = start
             .substringAfter("prepare_options() {")
             .substringBefore("compiled_source_binding_current() {")
         val launch = start
             .substringAfter("launch_nfqws2() {")
             .substringBefore("stop_failed_fallback_launch() {")
+        val runner = builder
+            .substringAfter("run_compiled_artifact() {")
+            .substringBefore("preview_compiled_artifact_machine() {")
 
+        // Preflight proves the packaged launcher by running the compiled artifact itself, and the
+        // daemon argv is owned by that runner instead of a runtime capability probe.
         assertFalse(prepare.contains("--help"))
-        assertTrue(prepare.contains("'--daemon'"))
+        assertTrue(prepare.contains("run_compiled_artifact \"\$COMPILED_ARGV_FILE\" dry-run"))
         assertTrue(launch.contains("run_compiled_artifact \"\$COMPILED_ARGV_FILE\" daemon"))
         assertFalse(launch.contains("run_compiled_artifact \"\$COMPILED_ARGV_FILE\" background"))
+        assertFalse(runner.contains("--help"))
+        assertTrue(runner.contains("\"\$NFQWS2\" --daemon \"--pidfile=\$PIDFILE\""))
     }
 
     @Test

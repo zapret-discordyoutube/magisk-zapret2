@@ -108,6 +108,9 @@ internal data class RuntimeProcessMetrics(
  */
 class Zapret2ModuleRepository @Inject constructor() {
 
+    @Volatile
+    private var observedActiveVersion: String? = null
+
     internal suspend fun reconcileEnvironment(): ModuleEnvironmentSnapshot? {
         val binaryDirectory = ModulePackageContract.selectBinaryDirectory(
             Build.SUPPORTED_ABIS.toList(),
@@ -149,6 +152,13 @@ class Zapret2ModuleRepository @Inject constructor() {
         }
         if (pendingVersion == null && environment.pendingState == PendingModuleState.READY) {
             environment = environment.copy(pendingState = PendingModuleState.PARTIAL)
+        }
+
+        // A different verified generation may speak a newer machine status protocol than the one
+        // the lifecycle boundary negotiated with the previous package.
+        if (activeVersion != observedActiveVersion) {
+            observedActiveVersion = activeVersion
+            ServiceLifecycleController.invalidateStatusProtocolNegotiation()
         }
 
         return environment.copy(

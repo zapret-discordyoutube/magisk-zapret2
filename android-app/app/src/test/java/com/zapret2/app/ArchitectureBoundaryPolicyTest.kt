@@ -50,6 +50,24 @@ class ArchitectureBoundaryPolicyTest {
         }
     }
 
+    /**
+     * [com.zapret2.app.data.RootFileIo] blocks its calling thread for the whole root transport
+     * budget, so a repository must never run one of its file operations on the caller's dispatcher.
+     * Environment reconciliation is started from `viewModelScope`, which is the main dispatcher.
+     */
+    @Test
+    fun privilegedModuleEnvironmentReadsAreDispatchedOffTheCallingScope() {
+        val repository = productionFile("data/Zapret2ModuleRepository.kt").readText()
+        val versionRead = repository
+            .substringAfter("private suspend fun readVerifiedVersion(")
+            .substringBefore("private fun parseExactKeyValues(")
+        val blockingFileOperations = Regex("RootFileIo\\.(?:read|write|ensureDirectory|removeFile)")
+
+        assertEquals(1, blockingFileOperations.findAll(repository).count())
+        assertEquals(1, blockingFileOperations.findAll(versionRead).count())
+        assertTrue(versionRead.contains("withContext(Dispatchers.IO)"))
+    }
+
     @Test
     fun russianAndDefaultStringCatalogsHaveTheSameKeys() {
         val defaultKeys = resourceKeys(resourceFile("values/strings.xml"))

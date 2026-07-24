@@ -1,5 +1,6 @@
 package com.zapret2.app.data
 
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -278,6 +279,73 @@ class ServiceLifecycleControllerTest {
             ),
         )
         assertNull(ServiceLifecycleController.parseLifecycleReceipt(unsuccessful))
+    }
+
+    @Test
+    fun statusObservation_negotiatesTheModuleProtocolOnceAndRetriesTheCascadeAfterItChanges() =
+        runBlocking {
+            ServiceLifecycleController.invalidateStatusProtocolNegotiation()
+            val requested = mutableListOf<Int>()
+            var spokenProtocol = 1
+            val probe: suspend (Int) -> ServiceLifecycleController.CommandResult = { version ->
+                requested += version
+                when (version) {
+                    spokenProtocol -> stoppedPayload(version)
+                    else -> unsupportedProtocolResult()
+                }
+            }
+
+            val negotiated = ServiceLifecycleController.observeNegotiatedStatus(probe)
+            assertTrue(negotiated.fullyStopped)
+            assertEquals(listOf(6, 5, 4, 3, 1), requested)
+
+            requested.clear()
+            assertTrue(ServiceLifecycleController.observeNegotiatedStatus(probe).fullyStopped)
+            assertEquals(listOf(1), requested)
+
+            spokenProtocol = 6
+            requested.clear()
+            val renegotiated = ServiceLifecycleController.observeNegotiatedStatus(probe)
+            assertTrue(renegotiated.fullyStopped)
+            assertEquals(listOf(1, 6), requested)
+
+            requested.clear()
+            assertTrue(ServiceLifecycleController.observeNegotiatedStatus(probe).fullyStopped)
+            assertEquals(listOf(6), requested)
+
+            ServiceLifecycleController.invalidateStatusProtocolNegotiation()
+        }
+
+    @Test
+    fun statusObservation_neverRemembersAProtocolThatAnsweredAnIncompletePayload() = runBlocking {
+        ServiceLifecycleController.invalidateStatusProtocolNegotiation()
+        val requested = mutableListOf<Int>()
+        val probe: suspend (Int) -> ServiceLifecycleController.CommandResult = { version ->
+            requested += version
+            when (version) {
+                5 -> ServiceLifecycleController.CommandResult(
+                    success = false,
+                    stdout = versionFiveStatusLines(
+                        stoppedStatusLines(),
+                        lifecycleState = "idle",
+                        chains = 0,
+                        anchors = 0,
+                    ).dropLast(1),
+                    exitCode = 1,
+                )
+                else -> unsupportedProtocolResult()
+            }
+        }
+
+        val incomplete = ServiceLifecycleController.observeNegotiatedStatus(probe)
+        assertFalse(incomplete.metadataComplete)
+        assertEquals(listOf(6, 5), requested)
+
+        requested.clear()
+        ServiceLifecycleController.observeNegotiatedStatus(probe)
+        assertEquals(listOf(6, 5), requested)
+
+        ServiceLifecycleController.invalidateStatusProtocolNegotiation()
     }
 
     @Test
@@ -913,6 +981,27 @@ class ServiceLifecycleControllerTest {
         overrides.forEach { (key, value) -> values[key] = value }
         return values.map { (key, value) -> "$key=$value" }
     }
+
+    /** The exact contract an installed status script uses to reject a newer machine protocol. */
+    private fun unsupportedProtocolResult() = ServiceLifecycleController.CommandResult(
+        success = false,
+        stderr = listOf("unsupported machine protocol"),
+        exitCode = 2,
+    )
+
+    private fun stoppedPayload(version: Int) = ServiceLifecycleController.CommandResult(
+        success = false,
+        stdout = when (version) {
+            1 -> stoppedStatusLines()
+            else -> versionSixStatusLines(
+                stoppedStatusLines(),
+                lifecycleState = "idle",
+                chains = 0,
+                anchors = 0,
+            )
+        },
+        exitCode = 1,
+    )
 
     private fun healthyStatusLines(): List<String> = listOf(
         "Z2_STATUS=ok",

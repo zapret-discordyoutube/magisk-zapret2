@@ -252,6 +252,9 @@ assert_not_contains "$RUNTIME_TARGET" 'ports_udp='
 
 assert_contains "$ROOT/zapret2/scripts/zapret-start.sh" 'ensure_compiled_artifact'
 assert_contains "$ROOT/zapret2/scripts/zapret-start.sh" 'run_compiled_artifact'
+# The Android app renders this mirror on its logs screen; the module must
+# keep publishing it even though no shell code reads it back.
+assert_contains "$ROOT/zapret2/scripts/zapret-start.sh" '"$CMDLINE_FILE.tmp.$$"'
 assert_not_contains "$ROOT/zapret2/scripts/zapret-start.sh" '@config'
 assert_not_contains "$ROOT/zapret2/scripts/command-builder.sh" 'eval '
 
