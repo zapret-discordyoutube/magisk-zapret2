@@ -102,8 +102,14 @@ main() {
        read_verified_pidfile >/dev/null 2>&1; then
         STOP_RUNTIME_OWNED=1
     fi
-    STOP_QNUM="${STATUS_FILE_QNUM:-${QNUM:-}}"
+    STOP_QNUM="${STATUS_FILE_QNUM:-}"
     [ "$OWNER_STATE_AVAILABLE" != 1 ] || STOP_QNUM="$OWNER_STATE_QNUM"
+    if [ -z "$STOP_QNUM" ]; then
+        # Neither the committed snapshot nor an owner record carries the queue
+        # number (first stop on a fresh boot); fall back to the configured one.
+        load_effective_core_config_readonly >/dev/null 2>&1 || true
+        STOP_QNUM="${QNUM:-}"
+    fi
     log_msg "Stopping Zapret2"
     [ -z "$UNINSTALL_TOMBSTONE_DIAGNOSTIC" ] || log_msg "$UNINSTALL_TOMBSTONE_DIAGNOSTIC"
 
