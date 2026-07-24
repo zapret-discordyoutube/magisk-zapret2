@@ -29,6 +29,18 @@ object ServiceLifecycleController {
     private val appUpdateInProgress = AtomicBoolean(false)
     private val fullRollbackInProgress = AtomicBoolean(false)
 
+    /** Machine status protocols, newest first; older entries exist only for older module packages. */
+    private val statusProtocolCascade = listOf(6, 5, 4, 3, 1)
+
+    /**
+     * Protocol the installed status script last answered with, or null while it is unknown.
+     *
+     * Writes happen under [lifecycleMutex]; the field is volatile so other observers see the
+     * negotiated version instead of replaying the whole cascade.
+     */
+    @Volatile
+    private var negotiatedStatusProtocol: Int? = null
+
     enum class RootAccessState { GRANTED, DENIED, MANAGER_UNAVAILABLE, SHELL_FAILURE, TIMEOUT, BUSY }
 
     enum class LifecycleState {
@@ -635,31 +647,58 @@ object ServiceLifecycleController {
         return if (expectedRunning) healthy else fullyStopped
     }
 
-    private suspend fun getStatusLocked(): ServiceStatus {
-        val current = executeRoot(
-            ModuleMutationCoordinator.inheritLifecycleObservation(buildStatusCommand(version = 6)),
-        )
-        val topologyCompatible = if (current.isUnsupportedMachineProtocol()) {
-            executeRoot(buildStatusCommand(version = 5))
+    private suspend fun getStatusLocked(): ServiceStatus = observeNegotiatedStatus { version ->
+        if (version == statusProtocolCascade.first()) {
+            executeRoot(
+                ModuleMutationCoordinator.inheritLifecycleObservation(buildStatusCommand(version = 6)),
+            )
         } else {
-            current
+            executeRoot(buildStatusCommand(version))
         }
-        val compatible = if (topologyCompatible.isUnsupportedMachineProtocol()) {
-            executeRoot(buildStatusCommand(version = 4))
-        } else {
-            topologyCompatible
+    }
+
+    /**
+     * Observes status through the newest protocol the installed module actually speaks.
+     *
+     * A package that predates the current protocol answers every newer request with the
+     * unsupported-protocol contract, so replaying the whole cascade would spend four rejected
+     * `zapret-status.sh` processes on every refresh. The version that answered is therefore tried
+     * first on later observations. Whenever the remembered version is no longer understood the
+     * negotiation is dropped and the full cascade runs again from the newest protocol, so a package
+     * generation change can only cost one extra observation.
+     */
+    internal suspend fun observeNegotiatedStatus(
+        probe: suspend (Int) -> CommandResult,
+    ): ServiceStatus {
+        negotiatedStatusProtocol?.let { remembered ->
+            val cached = probe(remembered)
+            if (!cached.isUnsupportedMachineProtocol()) return parseStatusCommandResult(cached)
+            negotiatedStatusProtocol = null
         }
-        val legacy = if (compatible.isUnsupportedMachineProtocol()) {
-            executeRoot(buildStatusCommand(version = 3))
-        } else {
-            compatible
+        var unsupported: ServiceStatus? = null
+        statusProtocolCascade.forEach { version ->
+            val result = probe(version)
+            val status = parseStatusCommandResult(result)
+            if (!result.isUnsupportedMachineProtocol()) {
+                // Only a payload that satisfied the strict parser proves which protocol the
+                // installed script speaks; anything else stays unnegotiated and fails closed.
+                if (status.metadataComplete) negotiatedStatusProtocol = version
+                return status
+            }
+            unsupported = status
         }
-        val result = if (legacy.isUnsupportedMachineProtocol()) {
-            executeRoot(buildStatusCommand(version = 1))
-        } else {
-            legacy
-        }
-        return parseStatusCommandResult(result)
+        return checkNotNull(unsupported) { "The status protocol cascade must not be empty" }
+    }
+
+    /**
+     * Drops the negotiated protocol so the next observation re-negotiates from the newest version.
+     *
+     * The installation authority calls this when it observes a different verified module
+     * generation, because a replaced package may speak a newer machine protocol than the one this
+     * process negotiated.
+     */
+    internal fun invalidateStatusProtocolNegotiation() {
+        negotiatedStatusProtocol = null
     }
 
     private fun CommandResult.isUnsupportedMachineProtocol(): Boolean =

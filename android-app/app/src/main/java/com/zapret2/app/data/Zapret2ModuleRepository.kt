@@ -281,11 +281,18 @@ class Zapret2ModuleRepository @Inject constructor() {
         return RuntimeProcessMetrics(memory, threads, uptime)
     }
 
+    /**
+     * [RootFileIo] runs its bounded root command on the calling thread and can block it for the
+     * whole transport budget. Environment reconciliation is started from `viewModelScope`, so this
+     * privileged read belongs on [Dispatchers.IO] like every other blocking repository boundary.
+     */
     private suspend fun readVerifiedVersion(directory: String): String? {
-        val moduleProp = RootFileIo.readSecureRegularText(
-            "$directory/module.prop",
-            ModulePackageContract.MAX_MODULE_PROP_BYTES,
-        ) ?: return null
+        val moduleProp = withContext(Dispatchers.IO) {
+            RootFileIo.readSecureRegularText(
+                "$directory/module.prop",
+                ModulePackageContract.MAX_MODULE_PROP_BYTES,
+            )
+        } ?: return null
         return parseModulePropVersion(moduleProp)
     }
 

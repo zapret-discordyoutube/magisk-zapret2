@@ -149,8 +149,8 @@ P5. **Root-manager canon.** `customize.sh` stages and validates; `service.sh`
 - Update path from 2.1.x: state files (`owner.meta` v8, `runtime.ini`,
   `install-generation.meta`, status snapshot) are unchanged. Obsolete files
   from older versions (`legacy-direct-rules.migrated`, `firewall-teardown.wal`,
-  track journals, `nfqws2.cmdline`) are deleted on sight by boot recovery and
-  uninstall.
+  track journals, legacy rollback snapshots) are deleted on sight by boot
+  recovery and uninstall.
 - Status wire protocols (v1–v6), the error envelope, and all `Z2_*` machine
   outputs are unchanged; the Android app from 2.1.x keeps working against a
   2.2.0 module and vice versa.
