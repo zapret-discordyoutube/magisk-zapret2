@@ -400,7 +400,13 @@ validate_preset_file() {
 }
 
 collect_capture_ports() {
-    local preset_file="$1" output="${STATE_DIR:-${TMPDIR:-/tmp}}/z2-ports.$$" extra ports_valid=1
+    local preset_file="$1" output extra ports_valid=1
+    if [ -n "${STATE_DIR:-}" ] && command -v ensure_state_tmp_dir >/dev/null 2>&1 &&
+       ensure_state_tmp_dir; then
+        output="$STATE_DIR/tmp/z2-ports.$$"
+    else
+        output="${TMPDIR:-/tmp}/z2-ports.$$"
+    fi
     awk '
         function add_interval(family, first, last) {
             if (family == "tcp") {
@@ -901,7 +907,8 @@ if [ "$COMMAND_BUILDER_CLI_MODE" -eq 1 ]; then
         --preflight-preset-machine)
             [ "$#" -eq 4 ] || { printf 'Z2_PRESET_ERROR\tINVALID_ARGUMENTS\n'; exit 2; }
             load_effective_core_config_readonly || { printf 'Z2_PRESET_ERROR\tRUNTIME_UNAVAILABLE\n'; exit 2; }
-            artifact="${STATE_DIR}/preset-preflight.$$"
+            ensure_state_tmp_dir || { printf 'Z2_PRESET_ERROR\tRUNTIME_UNAVAILABLE\n'; exit 2; }
+            artifact="${Z2_STATE_TMP}/preset-preflight.$$"
             if compile_preset_artifact "$3" "$4" "$artifact" && run_compiled_artifact "$artifact" dry-run >/dev/null 2>&1; then
                 rm -f "$artifact"; printf 'Z2_PRESET_VALIDATION\t1\tOK\t%s\n' "$4"; exit 0
             fi
@@ -911,7 +918,8 @@ if [ "$COMMAND_BUILDER_CLI_MODE" -eq 1 ]; then
         --preview-preset-machine)
             [ "$#" -eq 4 ] || { printf 'Z2_PRESET_ERROR\tINVALID_ARGUMENTS\n'; exit 2; }
             load_effective_core_config_readonly || { printf 'Z2_PRESET_ERROR\tRUNTIME_UNAVAILABLE\n'; exit 2; }
-            artifact="${STATE_DIR}/preset-preview.$$"
+            ensure_state_tmp_dir || { printf 'Z2_PRESET_ERROR\tUNSAFE_PREVIEW_TARGET\n'; exit 2; }
+            artifact="${Z2_STATE_TMP}/preset-preview.$$"
             state_file_target_is_safe "$artifact" || { printf 'Z2_PRESET_ERROR\tUNSAFE_PREVIEW_TARGET\n'; exit 2; }
             if compile_preset_artifact "$3" "$4" "$artifact" &&
                 preview_compiled_artifact_machine "$artifact" "$4"; then

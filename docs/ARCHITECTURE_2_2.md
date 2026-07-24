@@ -105,14 +105,20 @@ P5. **Root-manager canon.** `customize.sh` stages and validates; `service.sh`
   `runtime.ini` parse and the dead `audit_owned_firewall_for_cleanup` argument
   are gone.
 - **Purge/uninstall**: `zapret-purge.sh` publishes the `remove` marker *before*
-  invoking `uninstall.sh`, which collapses uninstall to the short
-  manager-remove branch; recovery-artifact audits deduplicated; the duplicate
-  status-snapshot deletion and the local `read_install_generation_meta` shadow
-  in `uninstall.sh` removed; `pm clear` failure after a successful purge is a
-  warning, not a failure exit. Fixes defect 2.
-- **Full rollback**: eight global `sync` calls reduced to one at the commit
-  point (honouring the `common.sh` durability contract); the duplicated
-  firewall audit and triple `/proc` scan collapsed.
+  invoking `uninstall.sh` — the fence commits the twice-confirmed purge, blocks
+  concurrent starts throughout the destruction, and routes uninstall onto the
+  short manager-remove branch (so the tombstone long path with its repeated
+  audits no longer runs during a purge); the duplicate status-snapshot
+  deletion is removed and `pm clear` failure after a successful purge is a
+  warning, not a failure exit. The `read_install_generation_meta` shadow in
+  `uninstall.sh` was kept deliberately: it authenticates against `MODPATH`,
+  not `MODDIR`. Fixes defect 2.
+- **Full rollback**: the duplicated firewall audit collapsed and the retired
+  legacy phase became a pure journal advance kept for resume compatibility.
+  The `sync` barriers were *kept*: they implement the write-ahead ordering of
+  the hosts-preservation transaction, which the `common.sh` durability
+  contract explicitly assigns to the dedicated mutation scripts (the analysis
+  finding that they violated the contract was a misreading).
 - **`customize.sh`**: one validation loop and one filesystem traversal for
   permission normalization (was two loops and three traversals).
 

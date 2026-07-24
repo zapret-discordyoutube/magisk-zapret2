@@ -39,9 +39,12 @@ ui_print "- Extracting a fresh Zapret2 generation for $ROOT_MANAGER"
 unzip -o "$ZIPFILE" -x 'META-INF/*' -d "$MODPATH" >&2 ||
     abort "! Cannot extract module files"
 
-if find "$MODPATH" ! -type d ! -type f -print -quit | grep -q .; then
+# One filesystem pass: normalize canonical modes for every directory and
+# regular file, and surface anything that is neither (link/special file).
+UNSUPPORTED_ENTRY="$(find "$MODPATH" \( -type d -exec chmod 0755 {} + \) -o \( -type f -exec chmod 0644 {} + \) -o -print)" ||
+    abort "! Cannot apply package permissions"
+[ -z "$UNSUPPORTED_ENTRY" ] ||
     abort "! Extracted module contains a link or special file"
-fi
 [ "$(grep -c '^id=zapret2$' "$MODPATH/module.prop" 2>/dev/null)" = 1 ] ||
     abort "! Refusing package with unexpected module identity"
 
@@ -80,11 +83,8 @@ for required in \
         abort "! Extracted module is incomplete: ${required#"$MODPATH"/}"
 done
 
-# Release CI owns exhaustive package validation. Device installation performs a
-# bounded critical-file check and one filesystem pass for canonical modes.
-find "$MODPATH" -type d -exec chmod 0755 {} + &&
-    find "$MODPATH" -type f -exec chmod 0644 {} + ||
-    abort "! Cannot apply package permissions"
+# Release CI owns exhaustive package validation; canonical modes were already
+# normalized in the single traversal above.
 chmod 0755 \
     "$MODPATH/customize.sh" \
     "$MODPATH/service.sh" \
@@ -126,19 +126,10 @@ GENERATION_TEMP="$ZAPRET_DIR/.install-generation.meta.$$"
     mv "$GENERATION_TEMP" "$GENERATION_FILE" ||
     abort "! Cannot publish installation generation"
 
-for required_exec in \
-    "$MODPATH/service.sh" \
-    "$MODPATH/uninstall.sh" \
-    "$MODPATH/action.sh" \
-    "$SCRIPT_DIR/common.sh" \
-    "$SCRIPT_DIR/command-builder.sh" \
-    "$SCRIPT_DIR/zapret-start.sh" \
-    "$SCRIPT_DIR/zapret-stop.sh" \
-    "$SCRIPT_DIR/zapret-status.sh" \
-    "$NFQWS_TARGET"; do
-    [ -f "$required_exec" ] && [ ! -L "$required_exec" ] &&
-        [ -s "$required_exec" ] && [ -x "$required_exec" ] ||
-        abort "! Prepared module is incomplete: ${required_exec#"$MODPATH"/}"
-done
+# Every other executable was verified by the required-file loop and the
+# explicit chmod above; only the arch-selected binary was created afterwards.
+[ -f "$NFQWS_TARGET" ] && [ ! -L "$NFQWS_TARGET" ] &&
+    [ -s "$NFQWS_TARGET" ] && [ -x "$NFQWS_TARGET" ] ||
+    abort "! Prepared module is incomplete: ${NFQWS_TARGET#"$MODPATH"/}"
 
 ui_print "- Fresh Zapret2 generation staged by $ROOT_MANAGER; reboot to activate it"

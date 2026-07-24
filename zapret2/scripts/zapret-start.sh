@@ -146,8 +146,9 @@ preflight_files() {
 }
 
 prepare_options() {
-    local capture="$ERROR_LOG.capture.$$" rcfile="$ERROR_LOG.rc.$$" dry_rc preset_file
+    local capture="$Z2_STATE_TMP/nfqws2.error.capture.$$" rcfile="$Z2_STATE_TMP/nfqws2.error.rc.$$" dry_rc preset_file
     [ -f "$NFQWS2" ] && [ -x "$NFQWS2" ] || return 1
+    ensure_state_tmp_dir || return 1
     is_safe_preset_file_name "$ACTIVE_PRESET" || return 1
     preset_file="$PRESETS_DIR/$ACTIVE_PRESET"
     state_path_is_managed_file "$COMPILED_ARGV_FILE" || return 1

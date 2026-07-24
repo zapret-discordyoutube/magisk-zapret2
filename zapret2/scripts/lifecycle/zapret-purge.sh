@@ -177,12 +177,16 @@ commit_purge() {
     sync >/dev/null 2>&1 || { purge_report error 0 0 0 0 0 0 "purge request retirement was not durable"; return 1; }
     z2_purge_module_identity_is_exact "$MODDIR" || { purge_report blocked 0 0 0 0 0 0 "installed module identity changed"; return 1; }
 
+    # Publish the durable removal fence first: it blocks any concurrent start
+    # from this point on and routes uninstall.sh onto its manager-remove
+    # branch, which destroys the whole private state tree in one verified
+    # pass instead of the granular tombstone path.
+    publish_remove_marker || { purge_report error 0 0 0 0 0 0 "cannot publish the permanent module-removal gate"; return 1; }
     uninstall_output="$(MODPATH="$MODDIR" /system/bin/sh "$UNINSTALL_SCRIPT" 2>&1)" || uninstall_rc=$?
     if [ "$uninstall_rc" -ne 0 ]; then
         purge_report blocked 0 0 0 0 0 1 "verified service/firewall uninstall failed: $uninstall_output"
         return 1
     fi
-    publish_remove_marker || { purge_report partial 1 1 0 0 0 1 "cannot publish the permanent module-removal gate"; return 1; }
 
     z2_purge_remove_managed_tree "$Z2_PURGE_CANONICAL_PENDING_DIR" || cleanup_rc=1
     z2_purge_remove_external_workspaces || cleanup_rc=1
@@ -222,8 +226,9 @@ manager_action() {
         if clear_installed_apk_private_data; then
             echo "Zapret2 app data cleared; installed APK preserved. Reboot required."
         else
+            # The module purge itself is complete; a missing/unclearable APK
+            # must not turn the committed action into a reported failure.
             echo "WARNING: module cleanup completed, but APK-private data could not be cleared." >&2
-            return 1
         fi
         return
     fi

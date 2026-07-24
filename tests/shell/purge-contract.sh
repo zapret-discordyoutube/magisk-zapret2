@@ -62,7 +62,10 @@ module_line=$(grep -nF 'z2_purge_remove_managed_tree "$Z2_PURGE_CANONICAL_MODULE
 state_line=$(grep -nF 'z2_purge_remove_managed_tree "$Z2_PURGE_CANONICAL_STATE_DIR"' "$PURGE" | head -n 1 | cut -d: -f1)
 uninstall_line=$(grep -nF '/system/bin/sh "$UNINSTALL_SCRIPT"' "$PURGE" | head -n 1 | cut -d: -f1)
 [ "$consume_line" -lt "$uninstall_line" ] || fail "one-time request is not consumed before uninstall"
-[ "$uninstall_line" -lt "$marker_line" ] || fail "removal marker is published before verified uninstall"
+# The removal fence commits the twice-confirmed purge before any destruction:
+# it blocks concurrent starts and routes uninstall.sh onto the manager-remove
+# branch. If cleanup fails here, the fenced module is retired at next boot.
+[ "$marker_line" -lt "$uninstall_line" ] || fail "removal fence is not published before uninstall delegates cleanup"
 [ "$module_line" -lt "$state_line" ] || fail "state directory is not the final managed tree removed"
 
 grep -Fq '"$PURGE_REQUEST"' "$ROOT/uninstall.sh" ||

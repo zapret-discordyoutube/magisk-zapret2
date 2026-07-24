@@ -91,6 +91,10 @@ z2_error_clear
 # old /data/local/tmp names are migration inputs only and are never normal
 # lifecycle write/delete targets.
 STATE_DIR="${STATE_DIR:-/data/adb/zapret2-state}"
+# PID-suffixed scratch files live in one disposable subdirectory so recovery
+# logic never has to reason about their names: boot recovery and uninstall
+# may sweep the whole directory, and crash residue can never fence anything.
+Z2_STATE_TMP="$STATE_DIR/tmp"
 PIDFILE="$STATE_DIR/nfqws2.pid"
 OWNER_STATE="$STATE_DIR/owner.meta"
 LOGFILE="$STATE_DIR/nfqws2.log"
@@ -139,7 +143,7 @@ OWNER_STATE_VERSION=8
 OWNER_STATE_V8_FIELD_SEQUENCE="version|pid|starttime|argv_sha256|qnum|exe|generation|boot_id|phase|install_generation|install_archive_sha256|firewall_tag|out_chain|in_chain|ports_tcp|ports_udp|stun_ports|tcp_pkt_out|tcp_pkt_in|udp_pkt_out|udp_pkt_in|desync_mark|ipv4_active|ipv6_active|ipv4_connbytes|ipv4_multiport|ipv4_mark|ipv6_connbytes|ipv6_multiport|ipv6_mark|ipv4_rules|ipv6_rules|ipv4_spec|ipv6_spec|firewall_fingerprint"
 OBSOLETE_FIREWALL_WAL="$STATE_DIR/firewall-teardown.wal"
 
-export STATE_DIR PIDFILE OWNER_STATE LOGFILE LOGFILE_PREVIOUS CMDLINE_FILE COMPILED_ARGV_FILE
+export STATE_DIR Z2_STATE_TMP PIDFILE OWNER_STATE LOGFILE LOGFILE_PREVIOUS CMDLINE_FILE COMPILED_ARGV_FILE
 export COMPILED_VALIDATION_RECEIPT
 export STARTUP_LOG ERROR_LOG DEBUG_LOG RUNTIME_OWNER_MARKER STATUS_SNAPSHOT
 export LIFECYCLE_LOCK LIFECYCLE_LOCK_OWNER LIFECYCLE_LOCK_REAPER
@@ -232,11 +236,30 @@ state_path_is_managed_file() {
         "$STATE_DIR"/*)
             suffix="${1#"$STATE_DIR"/}"
             [ -n "$suffix" ] || return 1
-            case "$suffix" in */*) return 1 ;; esac
+            case "$suffix" in
+                tmp/*)
+                    suffix="${suffix#tmp/}"
+                    [ -n "$suffix" ] || return 1
+                    case "$suffix" in */*) return 1 ;; esac
+                    return 0
+                    ;;
+                */*) return 1 ;;
+            esac
             return 0
             ;;
         *) return 1 ;;
     esac
+}
+
+ensure_state_tmp_dir() {
+    umask 077
+    if [ -e "$Z2_STATE_TMP" ] || [ -L "$Z2_STATE_TMP" ]; then
+        [ -d "$Z2_STATE_TMP" ] && [ ! -L "$Z2_STATE_TMP" ] || return 1
+        path_uid_is_root "$Z2_STATE_TMP" || return 1
+    else
+        mkdir "$Z2_STATE_TMP" 2>/dev/null || [ -d "$Z2_STATE_TMP" ] || return 1
+    fi
+    chmod 0700 "$Z2_STATE_TMP" 2>/dev/null || return 1
 }
 
 state_file_is_secure() {
@@ -464,6 +487,13 @@ retire_obsolete_state_artifacts() {
         { [ -e "$path" ] || [ -L "$path" ]; } || continue
         rm -f "$path" 2>/dev/null || return 1
     done
+    # Previous-boot scratch cannot belong to any live operation; sweeping it
+    # here is limited to the boot boundary so a concurrent app-side preset
+    # preview is never raced during normal runtime audits.
+    if [ "${BOOT_STALE_RUNTIME_RECOVERY:-0}" = 1 ] &&
+       { [ -e "$Z2_STATE_TMP" ] || [ -L "$Z2_STATE_TMP" ]; }; then
+        rm -rf "$Z2_STATE_TMP" 2>/dev/null || return 1
+    fi
     return 0
 }
 

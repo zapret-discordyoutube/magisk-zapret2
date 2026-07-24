@@ -664,7 +664,6 @@ for state_file in \
     "$LOGFILE" \
     "$LOGFILE_PREVIOUS" \
     "$STATUS_SNAPSHOT" \
-    "$IPTABLES_STATUS" \
     "$RUNTIME_OWNER_MARKER" \
     "$LEGACY_MIGRATION_MARKER" \
     "$PURGE_REQUEST"; do
@@ -673,6 +672,16 @@ for state_file in \
         break
     fi
 done
+
+# The scratch directory holds only PID-suffixed ephemeral files; crash
+# residue there is disposable by construction and must never block uninstall.
+if [ -z "$STATE_CLEANUP_ERROR" ] && { [ -e "$Z2_STATE_TMP" ] || [ -L "$Z2_STATE_TMP" ]; }; then
+    if [ -d "$Z2_STATE_TMP" ] && [ ! -L "$Z2_STATE_TMP" ]; then
+        rm -rf "$Z2_STATE_TMP" 2>/dev/null || STATE_CLEANUP_ERROR="scratch directory could not be removed"
+    else
+        rm -f "$Z2_STATE_TMP" 2>/dev/null || STATE_CLEANUP_ERROR="unsafe scratch entry could not be removed"
+    fi
+fi
 
 if [ -n "$STATE_CLEANUP_ERROR" ]; then
     fail_while_locked "$STATE_CLEANUP_ERROR; state directory was preserved"

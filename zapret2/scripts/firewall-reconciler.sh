@@ -109,10 +109,29 @@ z2_fw_diagnostic_is_connbytes_unsupported() {
     esac
 }
 
+z2_fw_ensure_scratch_dir() {
+    if command -v ensure_state_tmp_dir >/dev/null 2>&1; then
+        ensure_state_tmp_dir
+        return
+    fi
+    umask 077
+    if [ -e "$STATE_DIR/tmp" ] || [ -L "$STATE_DIR/tmp" ]; then
+        [ -d "$STATE_DIR/tmp" ] && [ ! -L "$STATE_DIR/tmp" ] || return 1
+    else
+        mkdir "$STATE_DIR/tmp" 2>/dev/null || [ -d "$STATE_DIR/tmp" ] || return 1
+    fi
+    chmod 0700 "$STATE_DIR/tmp" 2>/dev/null || return 1
+}
+
 z2_fw_run_restore() {
     local restore="$1" tool="$2" phase="$3" batch="$4"
     local capture wait_supported=0 attempts=0 rc=1 cleanup_rc=0 detail
-    capture="$STATE_DIR/firewall-restore.${tool}.$$.error"
+    capture="$STATE_DIR/tmp/firewall-restore.${tool}.$$.error"
+    z2_fw_ensure_scratch_dir || {
+        Z2_FW_LAST_FAILURE_CLASS=STATE_UNAVAILABLE
+        Z2_FW_LAST_RESTORE_DETAIL="unavailable firewall scratch directory"
+        return 1
+    }
     Z2_FW_LAST_RESTORE_EXIT=0
     Z2_FW_LAST_RESTORE_DETAIL=""
     Z2_FW_LAST_FAILURE_CLASS=""
@@ -368,7 +387,12 @@ z2_fw_apply_restore() {
     Z2_FW_ERROR_DETAIL=""
     restore="$(z2_fw_restore_command "$tool")" || return 2
     command -v "$restore" >/dev/null 2>&1 || return 3
-    batch="$STATE_DIR/firewall-batch.${tool}.$$"
+    batch="$STATE_DIR/tmp/firewall-batch.${tool}.$$"
+    z2_fw_ensure_scratch_dir || {
+        Z2_FW_FAILURE_CLASS=STATE_UNAVAILABLE
+        Z2_FW_ERROR_DETAIL="unavailable firewall scratch directory"
+        return 1
+    }
     state_path_is_managed_file "$batch" || {
         Z2_FW_FAILURE_CLASS=STATE_UNAVAILABLE
         Z2_FW_ERROR_DETAIL="unsafe firewall batch path"
@@ -631,7 +655,8 @@ z2_fw_apply_cleanup() {
     fi
     restore="$(z2_fw_restore_command "$tool")" || return 2
     command -v "$restore" >/dev/null 2>&1 || return 3
-    batch="$STATE_DIR/firewall-cleanup.${tool}.$$"
+    batch="$STATE_DIR/tmp/firewall-cleanup.${tool}.$$"
+    z2_fw_ensure_scratch_dir || return 1
     state_path_is_managed_file "$batch" || return 1
     [ ! -e "$batch" ] && [ ! -L "$batch" ] || return 1
     umask 077
