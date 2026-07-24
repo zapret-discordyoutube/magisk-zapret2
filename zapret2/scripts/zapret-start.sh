@@ -184,6 +184,16 @@ prepare_options() {
         [ "$dry_rc" -eq 0 ] 2>/dev/null || return 1
         write_compiled_validation_receipt "$COMPILED_ARGV_FILE" || return 1
     fi
+    # The Android app renders this mirror of the exact daemon command line on
+    # its logs screen; no shell code reads it back.
+    {
+        printf '%s\n' "$NFQWS2"
+        printf '%s\n' '--daemon' "--pidfile=$PIDFILE"
+        awk 'found { print } $0 == "ARGS" { found=1 }' "$COMPILED_ARGV_FILE"
+    } > "$CMDLINE_FILE.tmp.$$" || return 1
+    chmod 0600 "$CMDLINE_FILE.tmp.$$" 2>/dev/null && mv -f "$CMDLINE_FILE.tmp.$$" "$CMDLINE_FILE" || {
+        rm -f "$CMDLINE_FILE.tmp.$$"; return 1;
+    }
     return 0
 }
 

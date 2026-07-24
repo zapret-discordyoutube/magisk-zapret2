@@ -96,9 +96,9 @@ P5. **Root-manager canon.** `customize.sh` stages and validates; `service.sh`
 - **Warm-start dedup**: one compiled-artifact binding check at entry plus one
   TOCTOU re-check immediately before daemon launch (was 3); metadata parsed
   once (was 5–6); receipt writer reuses the hashes the checker just computed;
-  `prepare_private_runtime_file` runs once per file; the write-only
-  `nfqws2.cmdline` artifact is no longer produced; pidfile wait polls at
-  100 ms.
+  `prepare_private_runtime_file` runs once per file; pidfile wait polls at
+  100 ms. (`nfqws2.cmdline` is still produced: the shell layer never reads it
+  back, but the Android app renders it on the logs screen.)
 - **Stop dedup**: status facts restored once, owner state read once via the
   cache, `/proc` scanned once, the firewall-absence postcondition of
   `z2_fw_apply_cleanup` is trusted instead of re-proven, the unused

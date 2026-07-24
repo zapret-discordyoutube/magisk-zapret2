@@ -2,6 +2,8 @@ package com.zapret2.app.data
 
 import android.os.Build
 import javax.inject.Inject
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 enum class ModuleInstallState {
     UNKNOWN,

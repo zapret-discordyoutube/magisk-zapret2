@@ -470,16 +470,16 @@ recover_stale_owner_publication() {
 }
 
 # Formats produced by older module generations have no live writers anymore:
-# build/probe track journals, the firewall teardown WAL, the legacy
-# direct-rule migration marker and its snapshot artifacts, and the nfqws2
-# cmdline mirror. Reboot is the migration barrier — current code never
-# coexists with a runtime that still writes them — so the only correct
-# handling is deletion, and only the exact lifecycle-lock owner may do it.
+# build/probe track journals, the firewall teardown WAL, and the legacy
+# direct-rule migration marker with its snapshot artifacts. Reboot is the
+# migration barrier — current code never coexists with a runtime that still
+# writes them — so the only correct handling is deletion, and only the exact
+# lifecycle-lock owner may do it.
 retire_obsolete_state_artifacts() {
     local path restore_noglob=0
     caller_holds_exact_lifecycle_lock || return 0
     case "$-" in *f*) restore_noglob=1; set +f;; esac
-    set -- "$OBSOLETE_FIREWALL_WAL" "$LEGACY_MIGRATION_MARKER" "$CMDLINE_FILE" \
+    set -- "$OBSOLETE_FIREWALL_WAL" "$LEGACY_MIGRATION_MARKER" \
         "$STATE_DIR"/build-track.* "$STATE_DIR"/probe-track.* \
         "$STATE_DIR"/legacy-rollback.*
     [ "$restore_noglob" = 1 ] && set -f
