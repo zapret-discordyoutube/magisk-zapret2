@@ -22,7 +22,6 @@ set -eu
 . "$(dirname "$0")/zapret-start-defs.sh"
 LOG=${Z2_START_TEST_LOG:?}
 log_error() { printf 'log:%s\n' "$1" >> "$LOG"; }
-rollback_legacy_migration() { echo legacy >> "$LOG"; return 0; }
 release_lifecycle_lock() { echo release >> "$LOG"; return 0; }
 write_ok_status() { echo status-ok >> "$LOG"; return 0; }
 set_owner_phase() { return 0; }

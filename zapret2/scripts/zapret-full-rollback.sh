@@ -88,9 +88,6 @@ interrupted() {
             fi
         fi
     fi
-    if [ "${LEGACY_ROLLBACK_ARMED:-0}" = 1 ] || [ "${LEGACY_MARKER_PUBLISH_ATTEMPTED:-0}" = 1 ]; then
-        rollback_legacy_migration >/dev/null 2>&1 || RB_LEGACY_AMBIGUOUS=1
-    fi
     RB_STATUS=partial
     if [ "$RB_ROLLBACK_ARMED" = 1 ]; then
         RB_DIAGNOSTIC="rollback interrupted; durable disable fence and recovery journal retained"
@@ -411,17 +408,16 @@ RB_ROLLBACK_ARMED=1
 if ! phase_at_least process-clean; then
     if ! preflight_owned_process_cleanup; then partial "process ownership is ambiguous; firewall and listener retained: $PROCESS_CLEANUP_PREFLIGHT_ERROR"; fi
 fi
+# The legacy-clean journal phase survives only for resume compatibility with
+# transaction journals written by older releases. The direct-rule migration
+# itself was removed: iptables state does not survive a reboot and updated
+# module code never coexists with rules from an older module generation.
 if ! phase_at_least legacy-clean; then
-    if ! audit_owned_firewall_for_cleanup "$STOP_QNUM"; then partial "persisted firewall generation is ambiguous; firewall and listener retained: $FIREWALL_CLEANUP_PREFLIGHT_ERROR"; fi
-    if ! legacy_migrate_firewall || [ "$LEGACY_MIGRATION_VERIFIED" != 1 ]; then
-        RB_LEGACY_AMBIGUOUS=1
-        partial "legacy firewall ownership is ambiguous; daemon retained: ${LEGACY_MIGRATION_ERROR:-unverified legacy state}"
-    fi
-    write_transaction legacy-clean || failed "cannot advance rollback journal after legacy cleanup"
+    write_transaction legacy-clean || failed "cannot advance rollback journal past the retired legacy phase"
 fi
 
 if ! phase_at_least firewall-clean; then
-    if ! audit_owned_firewall_for_cleanup "$STOP_QNUM"; then partial "persisted firewall generation is ambiguous; firewall and listener retained: $FIREWALL_CLEANUP_PREFLIGHT_ERROR"; fi
+    if ! audit_owned_firewall_for_cleanup; then partial "persisted firewall generation is ambiguous; firewall and listener retained: $FIREWALL_CLEANUP_PREFLIGHT_ERROR"; fi
     if ! cleanup_owned_firewall audited || ! firewall_clean; then partial "verified owned firewall cleanup is incomplete; listener retained"; fi
     write_transaction firewall-clean || failed "cannot advance rollback journal after firewall cleanup"
 else

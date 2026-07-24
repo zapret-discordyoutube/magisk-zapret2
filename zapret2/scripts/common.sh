@@ -118,7 +118,6 @@ ZAPRET2_OUT="ZAPRET2_OUT"
 ZAPRET2_IN="ZAPRET2_IN"
 ZAPRET2_PROBE="ZAPRET2_PROBE"
 IPTABLES_STATUS="$STATUS_SNAPSHOT"
-LEGACY_IPTABLES_STATUS="$ZAPRET_DIR/iptables-status"
 LIFECYCLE_LOCK="$STATE_DIR/lifecycle.lock"
 LIFECYCLE_LOCK_OWNER="$LIFECYCLE_LOCK/owner"
 LIFECYCLE_LOCK_REAPER="$STATE_DIR/lifecycle.lock.reaper"
@@ -138,7 +137,6 @@ INSTALL_GENERATION_VERSION=1
 LEGACY_MIGRATION_MARKER="$STATE_DIR/legacy-direct-rules.migrated"
 OWNER_STATE_VERSION=8
 OWNER_STATE_V8_FIELD_SEQUENCE="version|pid|starttime|argv_sha256|qnum|exe|generation|boot_id|phase|install_generation|install_archive_sha256|firewall_tag|out_chain|in_chain|ports_tcp|ports_udp|stun_ports|tcp_pkt_out|tcp_pkt_in|udp_pkt_out|udp_pkt_in|desync_mark|ipv4_active|ipv6_active|ipv4_connbytes|ipv4_multiport|ipv4_mark|ipv6_connbytes|ipv6_multiport|ipv6_mark|ipv4_rules|ipv6_rules|ipv4_spec|ipv6_spec|firewall_fingerprint"
-TRACK_JOURNAL_VERSION=2
 OBSOLETE_FIREWALL_WAL="$STATE_DIR/firewall-teardown.wal"
 
 export STATE_DIR PIDFILE OWNER_STATE LOGFILE LOGFILE_PREVIOUS CMDLINE_FILE COMPILED_ARGV_FILE
@@ -333,8 +331,7 @@ RECOVERY_ARTIFACT_CLASS="clean"
 RECOVERY_ARTIFACT_FIRST=""
 
 CURRENT_BOOT_ID=""
-STALE_TRACK_FILES=""
-STALE_TRACK_DIAGNOSTIC=""
+STALE_OWNER_DIAGNOSTIC=""
 STALE_OWNER_PUBLICATION_RETIRED=0
 BOOT_RECOVERY_DIAGNOSTIC=""
 BOOT_INCOMPATIBLE_STATE_RETIRED=0
@@ -356,189 +353,8 @@ read_current_boot_id() {
     CURRENT_BOOT_ID="$value"
 }
 
-validate_track_journal_identity() {
-    local path="$1" base expected_mode expected_tool expected_pid identity old_ifs
-    state_file_is_secure "$path" && path_mode_is_0600 "$path" && path_nlink_is_one "$path" || return 1
-    [ "$(wc -c < "$path" 2>/dev/null)" -le 131072 ] 2>/dev/null || return 1
-    base="${path##*/}"
-    case "$base" in
-        build-track.ipv4.*) expected_mode=build; expected_tool=iptables; expected_pid="${base#build-track.ipv4.}" ;;
-        build-track.ipv6.*) expected_mode=build; expected_tool=ip6tables; expected_pid="${base#build-track.ipv6.}" ;;
-        probe-track.ipv4.*) expected_mode=probe; expected_tool=iptables; expected_pid="${base#probe-track.ipv4.}" ;;
-        probe-track.ipv6.*) expected_mode=probe; expected_tool=ip6tables; expected_pid="${base#probe-track.ipv6.}" ;;
-        *) return 1 ;;
-    esac
-    is_decimal "$expected_pid" && [ "$expected_pid" -gt 0 ] 2>/dev/null || return 1
-    identity="$(awk -F '|' -v mode="$expected_mode" -v tool="$expected_tool" -v module="$MODDIR" \
-        -v pid="$expected_pid" -v probe="$ZAPRET2_PROBE" '
-        function derive(chain, tag) {
-            if (length(chain) != 14 || (substr(chain,1,4) != "Z2O_" && substr(chain,1,4) != "Z2I_")) return 0
-            tag=substr(chain,5)
-            if (length(tag) != 10 || tag !~ /^[A-Za-z0-9]+$/) return 0
-            firewall_tag=tag
-            outchain="Z2O_" tag
-            inchain="Z2I_" tag
-            ruleprefix="Z2R_" tag "_"
-            identity_ready=1
-            return 1
-        }
-        function ruleside(chain, suffix) {
-            if (!identity_ready) return ""
-            if (index(chain,ruleprefix)!=1) return ""
-            suffix=substr(chain,length(ruleprefix)+1)
-            if (suffix ~ /^O[1-9][0-9]*$/) return "O"
-            if (suffix ~ /^I[1-9][0-9]*$/) return "I"
-            return ""
-        }
-        NR == 1 { if ($0 != "version=2") exit 1; next }
-        NR == 2 { if ($0 != "mode=" mode) exit 1; next }
-        NR == 3 { if ($0 != "tool=" tool) exit 1; next }
-        NR == 4 { if ($0 != "module_dir=" module) exit 1; next }
-        NR == 5 { split($0,a,"="); if (a[1] != "creator_pid" || a[2] != pid || a[2] !~ /^[1-9][0-9]*$/) exit 1; creator=a[2]; next }
-        NR == 6 { split($0,a,"="); if (a[1] != "creator_starttime" || a[2] !~ /^[0-9]+$/) exit 1; start=a[2]; next }
-        NR == 7 { split($0,a,"="); if (a[1] != "boot_id" || a[2] == "") exit 1; boot=a[2]; next }
-        NR > 7 {
-            if ($1 != "record" || $2 !~ /^[1-9][0-9]*$/ || $2 != expected + 1) exit 1
-            expected=$2
-            if ($3 !~ /^(pending|applied|consuming|consumed)$/) exit 1
-            if (mode == "build" && $4 == "chain") {
-                if (!identity_ready && !derive($5)) exit 1
-                if (NF != 5 || ($5 != outchain && $5 != inchain && ruleside($5)=="")) exit 1
-            } else if (mode == "build" && $4 == "anchor") {
-                if (!identity_ready) exit 1
-                if (NF != 6 || !(($5 == "OUTPUT" && $6 == outchain) || ($5 == "INPUT" && $6 == inchain) ||
-                    ($5 == outchain && ruleside($6)=="O") || ($5 == inchain && ruleside($6)=="I"))) exit 1
-            } else if (mode == "build" && $4 == "rule") {
-                if (!identity_ready) exit 1
-                if (NF != 15 || ruleside($5)=="" || $6 !~ /^(tcp|udp)$/ ||
-                    $8 !~ /^[0-9]+(:[0-9]+)?(,[0-9]+(:[0-9]+)?)*$/ ||
-                    $9 !~ /^[0-9]+$/ || $11 !~ /^[0-9]+$/ ||
-                    $12 !~ /^(0x)?[0-9A-Fa-f]+$/ || $13 !~ /^(0|1)$/ || $14 !~ /^(0|1)$/ || $15 !~ /^(0|1)$/) exit 1
-                if (ruleside($5)=="O" && ($7 != "out" || $10 != "original")) exit 1
-                if (ruleside($5)=="I" && ($7 != "in" || $10 != "reply")) exit 1
-            } else if (mode == "probe" && $4 == "chain") {
-                if (NF != 5 || $5 != probe) exit 1
-            } else if (mode == "probe" && $4 == "probe_rule") {
-                if (NF != 8 || $5 !~ /^(queue_bypass|queue|connbytes|multiport|mark)$/ ||
-                    $6 !~ /^[0-9]+$/ || $7 !~ /^[0-9]+$/ || $8 !~ /^(0x)?[0-9A-Fa-f]+$/) exit 1
-            } else exit 1
-            for (i=5; i<=NF; i++) if ($i == "" || $i !~ /^[A-Za-z0-9_,:.-]+$/) exit 1
-        }
-        END {
-            if (NR < 7) exit 1
-            if (mode == "build") {
-                if (expected > 0 && !identity_ready) exit 1
-                if (!identity_ready) firewall_tag=outchain=inchain="none"
-            } else {
-                firewall_tag="probe"; outchain=inchain=probe
-            }
-            print creator "|" start "|" boot "|" firewall_tag "|" outchain "|" inchain
-        }
-    ' "$path" 2>/dev/null)" || return 1
-    old_ifs="$IFS"; IFS='|'; set -- $identity; IFS="$old_ifs"
-    [ "$#" -eq 6 ] || return 1
-    TRACK_CREATOR_PID="$1"; TRACK_CREATOR_START="$2"; TRACK_BOOT_ID="$3"
-    TRACK_FIREWALL_TAG="$4"; TRACK_OUT_CHAIN="$5"; TRACK_IN_CHAIN="$6"
-    TRACK_JOURNAL_MODE="$expected_mode"
-    TRACK_JOURNAL_TOOL="$expected_tool"
-    is_valid_boot_id "$TRACK_BOOT_ID"
-}
-
-track_journal_is_terminal() {
-    local path="$1"
-    # validate_track_journal_identity() has already authenticated the complete
-    # grammar. A journal with no records, or only atomically published consumed records, no
-    # longer protects an uncommitted firewall mutation. In particular, it is
-    # safe to retire without querying a family whose iptables frontend is
-    # present but unusable on this kernel.
-    awk -F '|' '
-        $1 == "record" && $3 != "consumed" { terminal=0; exit }
-        BEGIN { terminal=1 }
-        END { exit !terminal }
-    ' "$path" 2>/dev/null
-}
-
-track_creator_liveness() {
-    local actual
-    TRACK_CREATOR_LIVENESS=unknown
-    [ -n "$CURRENT_BOOT_ID" ] || read_current_boot_id || return 1
-    if [ "$TRACK_BOOT_ID" != "$CURRENT_BOOT_ID" ]; then
-        TRACK_CREATOR_LIVENESS=stale
-        return 0
-    fi
-    if actual="$(proc_starttime "$TRACK_CREATOR_PID" 2>/dev/null)"; then
-        if [ "$actual" = "$TRACK_CREATOR_START" ]; then
-            TRACK_CREATOR_LIVENESS=live
-        else
-            # The numeric PID was reused; the journal's exact creator identity
-            # is dead even though another process now owns that PID.
-            TRACK_CREATOR_LIVENESS=stale
-        fi
-        return 0
-    fi
-    if [ ! -e "/proc/$TRACK_CREATOR_PID" ] && [ ! -L "/proc/$TRACK_CREATOR_PID" ]; then
-        TRACK_CREATOR_LIVENESS=stale
-    fi
-    return 0
-}
-
-same_boot_track_creator_is_stably_stale() {
-    local path="$1" pid="$TRACK_CREATOR_PID" start="$TRACK_CREATOR_START"
-    local boot="$TRACK_BOOT_ID" mode="$TRACK_JOURNAL_MODE" tool="$TRACK_JOURNAL_TOOL"
-    local tag="$TRACK_FIREWALL_TAG" out="$TRACK_OUT_CHAIN" in="$TRACK_IN_CHAIN"
-    track_creator_liveness || return 1
-    [ "$TRACK_CREATOR_LIVENESS" = stale ] || return 1
-    sleep 1
-    validate_track_journal_identity "$path" || return 1
-    [ "$TRACK_CREATOR_PID" = "$pid" ] && [ "$TRACK_CREATOR_START" = "$start" ] &&
-        [ "$TRACK_BOOT_ID" = "$boot" ] && [ "$TRACK_JOURNAL_MODE" = "$mode" ] &&
-        [ "$TRACK_JOURNAL_TOOL" = "$tool" ] && [ "$TRACK_FIREWALL_TAG" = "$tag" ] &&
-        [ "$TRACK_OUT_CHAIN" = "$out" ] && [ "$TRACK_IN_CHAIN" = "$in" ] || return 1
-    track_creator_liveness || return 1
-    [ "$TRACK_CREATOR_LIVENESS" = stale ]
-}
-
-track_generation_absent() {
-    local listing
-    [ "$TRACK_JOURNAL_MODE" = build ] && [ "$TRACK_FIREWALL_TAG" != none ] || return 1
-    listing="$("$TRACK_JOURNAL_TOOL" -t mangle -S 2>/dev/null)" || return 1
-    printf '%s\n' "$listing" | awk \
-        -v out="$TRACK_OUT_CHAIN" -v inchain="$TRACK_IN_CHAIN" \
-        -v prefix="Z2R_${TRACK_FIREWALL_TAG}_" '
-        $1 == "-N" && ($2 == out || $2 == inchain || index($2,prefix)==1) { found=1 }
-        $1 == "-A" {
-            for (i=3; i<=NF; i++) {
-                if (($i=="-j" || $i=="--jump" || $i=="-g" || $i=="--goto") &&
-                    ($(i+1)==out || $(i+1)==inchain || index($(i+1),prefix)==1)) found=1
-            }
-        }
-        END { exit found ? 1 : 0 }
-    '
-}
-
-authenticated_published_owner_generation_healthy() {
-    read_verified_pidfile || return 1
-    [ "$OWNER_STATE_SCHEMA_VERSION" = "$OWNER_STATE_VERSION" ] || return 1
-    case "$OWNER_STATE_PHASE" in launched|active) ;; *) return 1 ;; esac
-    [ "$OWNER_STATE_IPV4_ACTIVE" = 1 ] || return 1
-    owner_family_generation_healthy iptables ipv4 || return 1
-    if command -v ip6tables >/dev/null 2>&1; then
-        owner_family_generation_healthy ip6tables ipv6 || return 1
-    else
-        [ "$OWNER_STATE_IPV6_ACTIVE" = 0 ] || return 1
-    fi
-    return 0
-}
-
-stale_track_file_is_known() {
-    local wanted="$1" item
-    for item in $STALE_TRACK_FILES; do [ "$item" = "$wanted" ] && return 0; done
-    return 1
-}
-
-stale_track_clean_ownership_proof() {
-    local scope="${1:-generation}" tool family_state canonical_nfqws effective_nfqws candidate checked=""
-    case "$scope" in generation|namespace) ;; *) return 1 ;; esac
+stale_owner_clean_ownership_proof() {
+    local tool family_state canonical_nfqws effective_nfqws candidate checked=""
     effective_nfqws="${AUDIT_NFQWS2_OVERRIDE:-$NFQWS2}"
     scan_exact_owned_nfqws_for_path "$effective_nfqws" >/dev/null 2>&1 || return 1
     [ -z "$OWNED_SCAN_PIDS" ] || return 1
@@ -550,64 +366,13 @@ stale_track_clean_ownership_proof() {
         [ -z "$OWNED_SCAN_PIDS" ] || return 1
         checked="${checked}${candidate}|"
     done
-    for tool in $STALE_TRACK_REQUIRED_TOOLS; do command -v "$tool" >/dev/null 2>&1 || return 1; done
+    for tool in $STALE_OWNER_REQUIRED_TOOLS; do command -v "$tool" >/dev/null 2>&1 || return 1; done
     for tool in iptables ip6tables; do
         command -v "$tool" >/dev/null 2>&1 || continue
-        if [ "$scope" = namespace ]; then
-            zapret2_namespace_present "$tool" >/dev/null 2>&1
-        else
-            owned_family_present "$tool" >/dev/null 2>&1
-        fi
+        owned_family_present "$tool" >/dev/null 2>&1
         family_state=$?
         case "$family_state" in 1) ;; *) return 1;; esac
     done
-    return 0
-}
-
-INSTALLER_TRACKS_RETIRED=0
-
-# Build/probe journals are private write-ahead logs of one serialized runtime
-# lifecycle operation. They are not part of the installed configuration and
-# must never become an ABI gate between an old live module and a newly staged
-# module release. Once customize.sh owns the exact lifecycle lock, no runtime
-# operation can still own or append one of these files. The installer may
-# therefore retire the bounded canonical files without parsing versioned WAL
-# contents or requiring the old release's partially mutated firewall namespace
-# to be empty. Runtime start/stop audits remain strict and keep using the WAL
-# grammar for recovery classification.
-retire_installer_ephemeral_track_journals() {
-    local path base suffix found=0 retired="" restore_noglob=0
-    INSTALLER_TRACKS_RETIRED=0
-    caller_holds_exact_lifecycle_lock || return 1
-    state_dir_is_secure || return 1
-
-    case "$-" in *f*) restore_noglob=1; set +f;; esac
-    set -- "$STATE_DIR"/build-track.* "$STATE_DIR"/probe-track.*
-    [ "$restore_noglob" = 1 ] && set -f
-    for path in "$@"; do
-        { [ -e "$path" ] || [ -L "$path" ]; } || continue
-        found=1
-        base="${path##*/}"
-        case "$base" in
-            build-track.ipv4.*) suffix="${base#build-track.ipv4.}" ;;
-            build-track.ipv6.*) suffix="${base#build-track.ipv6.}" ;;
-            probe-track.ipv4.*) suffix="${base#probe-track.ipv4.}" ;;
-            probe-track.ipv6.*) suffix="${base#probe-track.ipv6.}" ;;
-            *) return 1 ;;
-        esac
-        is_decimal "$suffix" && [ "$suffix" -gt 0 ] 2>/dev/null || return 1
-        state_file_is_secure "$path" && path_mode_is_0600 "$path" &&
-            path_nlink_is_one "$path" || return 1
-        [ "$(wc -c < "$path" 2>/dev/null)" -le 131072 ] 2>/dev/null || return 1
-        retired="${retired}${retired:+ }$path"
-    done
-    [ "$found" = 1 ] || return 0
-
-    for path in $retired; do rm -f "$path" 2>/dev/null || return 1; done
-    for path in $retired; do
-        [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
-    done
-    INSTALLER_TRACKS_RETIRED=1
     return 0
 }
 
@@ -625,55 +390,44 @@ recover_stale_owner_publication() {
     # The owner record is the authenticated commit marker.  A bare pidfile can
     # never prove that a PID belongs to this installation.
     [ -e "$OWNER_STATE" ] && [ ! -L "$OWNER_STATE" ] && read_owner_state || {
-        STALE_TRACK_DIAGNOSTIC="unauthenticated owner publication remains"
+        STALE_OWNER_DIAGNOSTIC="unauthenticated owner publication remains"
         return 1
     }
     if [ -e "$PIDFILE" ] || [ -L "$PIDFILE" ]; then
         [ ! -L "$PIDFILE" ] && state_file_is_secure "$PIDFILE" || {
-            STALE_TRACK_DIAGNOSTIC="unsafe pidfile accompanies owner publication"
+            STALE_OWNER_DIAGNOSTIC="unsafe pidfile accompanies owner publication"
             return 1
         }
         IFS= read -r pidfile_pid < "$PIDFILE" 2>/dev/null || return 1
         is_decimal "$pidfile_pid" && [ "$pidfile_pid" = "$OWNER_STATE_PID" ] || {
-            STALE_TRACK_DIAGNOSTIC="pidfile and owner publication disagree"
+            STALE_OWNER_DIAGNOSTIC="pidfile and owner publication disagree"
             return 1
         }
     fi
-    read_current_boot_id || { STALE_TRACK_DIAGNOSTIC="current boot identity is unavailable"; return 1; }
+    read_current_boot_id || { STALE_OWNER_DIAGNOSTIC="current boot identity is unavailable"; return 1; }
     current_boot="$CURRENT_BOOT_ID"
     if [ "$OWNER_STATE_BOOT_ID" = "$current_boot" ]; then
         verify_nfqws_pid "$OWNER_STATE_PID" "$OWNER_STATE_START" "$OWNER_STATE_ARGV_SHA256" "$OWNER_STATE_QNUM" && return 0
-        STALE_TRACK_DIAGNOSTIC="same-boot owner/PID ambiguity remains"
+        STALE_OWNER_DIAGNOSTIC="same-boot owner/PID ambiguity remains"
         return 1
     fi
-    STALE_TRACK_REQUIRED_TOOLS=iptables
+    STALE_OWNER_REQUIRED_TOOLS=iptables
     [ "$OWNER_STATE_IPV6_ACTIVE" = 1 ] &&
-        STALE_TRACK_REQUIRED_TOOLS="$STALE_TRACK_REQUIRED_TOOLS ip6tables"
-    stale_track_clean_ownership_proof generation || {
-        STALE_TRACK_DIAGNOSTIC="cross-boot owner recovery lacks a clean process/firewall snapshot"
+        STALE_OWNER_REQUIRED_TOOLS="$STALE_OWNER_REQUIRED_TOOLS ip6tables"
+    stale_owner_clean_ownership_proof || {
+        STALE_OWNER_DIAGNOSTIC="cross-boot owner recovery lacks a clean process/firewall snapshot"
         return 1
     }
     # Audits before lock acquisition may classify this state, but only the
     # exact lifecycle-lock owner may retire published metadata.
     caller_holds_exact_lifecycle_lock || return 0
-    if [ -e "$OBSOLETE_FIREWALL_WAL" ] || [ -L "$OBSOLETE_FIREWALL_WAL" ]; then
-        state_file_is_secure "$OBSOLETE_FIREWALL_WAL" &&
-            path_mode_is_0600 "$OBSOLETE_FIREWALL_WAL" &&
-            path_nlink_is_one "$OBSOLETE_FIREWALL_WAL" || {
-                STALE_TRACK_DIAGNOSTIC="obsolete firewall WAL is unsafe"
-                return 1
-            }
-    fi
     if [ "${BOOT_STALE_RUNTIME_RECOVERY:-0}" = 1 ] &&
        { [ -e "$STATUS_SNAPSHOT" ] || [ -L "$STATUS_SNAPSHOT" ]; }; then
         state_file_is_secure "$STATUS_SNAPSHOT" &&
             path_mode_is_0600 "$STATUS_SNAPSHOT" && path_nlink_is_one "$STATUS_SNAPSHOT" || {
-                STALE_TRACK_DIAGNOSTIC="stale status snapshot is unsafe"
+                STALE_OWNER_DIAGNOSTIC="stale status snapshot is unsafe"
                 return 1
             }
-    fi
-    if [ -e "$OBSOLETE_FIREWALL_WAL" ]; then
-        rm -f "$OBSOLETE_FIREWALL_WAL" || return 1
     fi
     if [ -e "$PIDFILE" ]; then rm -f "$PIDFILE" || return 1; fi
     if [ "${BOOT_STALE_RUNTIME_RECOVERY:-0}" = 1 ] && [ -e "$STATUS_SNAPSHOT" ]; then
@@ -684,76 +438,24 @@ recover_stale_owner_publication() {
     return 0
 }
 
-classify_stale_track_journals() {
-    local path found=0 restore_noglob=0 needs_clean_proof=0 retired_files
-    local owner_healthy owner_tag
-    STALE_TRACK_FILES=""; STALE_TRACK_REQUIRED_TOOLS=""; STALE_TRACK_DIAGNOSTIC=""; CURRENT_BOOT_ID=""
+# Formats produced by older module generations have no live writers anymore:
+# build/probe track journals, the firewall teardown WAL, the legacy
+# direct-rule migration marker and its snapshot artifacts, and the nfqws2
+# cmdline mirror. Reboot is the migration barrier — current code never
+# coexists with a runtime that still writes them — so the only correct
+# handling is deletion, and only the exact lifecycle-lock owner may do it.
+retire_obsolete_state_artifacts() {
+    local path restore_noglob=0
+    caller_holds_exact_lifecycle_lock || return 0
     case "$-" in *f*) restore_noglob=1; set +f;; esac
-    set -- "$STATE_DIR"/build-track.* "$STATE_DIR"/probe-track.*
+    set -- "$OBSOLETE_FIREWALL_WAL" "$LEGACY_MIGRATION_MARKER" "$CMDLINE_FILE" \
+        "$STATE_DIR"/build-track.* "$STATE_DIR"/probe-track.* \
+        "$STATE_DIR"/legacy-rollback.*
     [ "$restore_noglob" = 1 ] && set -f
     for path in "$@"; do
         { [ -e "$path" ] || [ -L "$path" ]; } || continue
-        found=1
-        if [ -z "$CURRENT_BOOT_ID" ]; then
-            read_current_boot_id || { STALE_TRACK_DIAGNOSTIC="current boot identity is unavailable"; return 1; }
-        fi
-        validate_track_journal_identity "$path" || { STALE_TRACK_DIAGNOSTIC="unsafe or unauthenticated track journal: $path"; return 1; }
-        if [ "$TRACK_BOOT_ID" = "$CURRENT_BOOT_ID" ]; then
-            track_creator_liveness || { STALE_TRACK_DIAGNOSTIC="track creator identity is unavailable: $path"; return 1; }
-            case "$TRACK_CREATOR_LIVENESS" in
-                live) STALE_TRACK_DIAGNOSTIC="track creator is still active: $path"; return 1 ;;
-                stale)
-                    same_boot_track_creator_is_stably_stale "$path" || {
-                        STALE_TRACK_DIAGNOSTIC="same-boot track creator did not remain stably stale: $path"
-                        return 1
-                    }
-                    ;;
-                *) STALE_TRACK_DIAGNOSTIC="same-boot track creator identity is ambiguous: $path"; return 1 ;;
-            esac
-        fi
-        STALE_TRACK_FILES="${STALE_TRACK_FILES}${STALE_TRACK_FILES:+ }$path"
-        if ! track_journal_is_terminal "$path"; then
-            owner_healthy=0
-            owner_tag=""
-            if [ "$TRACK_JOURNAL_MODE" = build ] &&
-               authenticated_published_owner_generation_healthy; then
-                owner_healthy=1
-                owner_tag="$OWNER_STATE_FIREWALL_TAG"
-            fi
-            # owner.meta becomes authoritative after exact process and complete
-            # topology verification. A dead start process may therefore leave
-            # an unfinished WAL for either the committed generation itself or
-            # an older failed generation that is now proven absent. Neither
-            # case may permanently fence update/install.
-            if [ "$owner_healthy" = 1 ] &&
-               { [ "$TRACK_FIREWALL_TAG" = "$owner_tag" ] || track_generation_absent; }; then
-                :
-            else
-                needs_clean_proof=1
-                case " $STALE_TRACK_REQUIRED_TOOLS " in
-                    *" $TRACK_JOURNAL_TOOL "*) ;;
-                    *) STALE_TRACK_REQUIRED_TOOLS="${STALE_TRACK_REQUIRED_TOOLS}${STALE_TRACK_REQUIRED_TOOLS:+ }$TRACK_JOURNAL_TOOL" ;;
-                esac
-            fi
-        fi
+        rm -f "$path" 2>/dev/null || return 1
     done
-    [ "$found" = 1 ] || return 0
-    if [ "$needs_clean_proof" = 1 ]; then
-        stale_track_clean_ownership_proof namespace || {
-            STALE_TRACK_DIAGNOSTIC="unfinished stale track cannot be retired while owned process/firewall state exists"
-            return 1
-        }
-    fi
-    if caller_holds_exact_lifecycle_lock; then
-        retired_files="$STALE_TRACK_FILES"
-        for path in $STALE_TRACK_FILES; do
-            rm -f "$path" 2>/dev/null || return 1
-        done
-        for path in $retired_files; do
-            [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
-        done
-        STALE_TRACK_FILES=""
-    fi
     return 0
 }
 
@@ -766,7 +468,6 @@ enumerate_recovery_artifacts() {
         "$LIFECYCLE_LOCK_REAPER_RECOVERY" "$LIFECYCLE_LOCK_REAPER_RECOVERY".* \
         "$LIFECYCLE_LOCK_QUARANTINE" "$LIFECYCLE_LOCK_QUARANTINE".* \
         "$STATE_DIR"/lifecycle.lock.candidate.* "$STATE_DIR"/.lifecycle.lock.* \
-        "$STATE_DIR"/build-track.* "$STATE_DIR"/probe-track.* \
         "$FULL_ROLLBACK_TRANSACTION" "$FULL_ROLLBACK_TRANSACTION".tmp "$FULL_ROLLBACK_TRANSACTION".tmp.* \
         "$STATE_DIR"/.full-rollback.transaction.* \
         "$FULL_ROLLBACK_META" "$FULL_ROLLBACK_META".tmp "$FULL_ROLLBACK_META".tmp.* \
@@ -789,18 +490,17 @@ audit_recovery_artifacts() {
         lifecycle|full-rollback|install|uninstall) ;;
         *) RECOVERY_ARTIFACT_DIAGNOSTIC="unknown recovery audit scope"; return 1 ;;
     esac
+    retire_obsolete_state_artifacts || {
+        RECOVERY_ARTIFACT_CLASS=unsafe
+        RECOVERY_ARTIFACT_DIAGNOSTIC="obsolete state artifacts could not be retired"
+        return 1
+    }
     if ! recover_stale_owner_publication; then
         RECOVERY_ARTIFACT_CLASS=unsafe
-        RECOVERY_ARTIFACT_DIAGNOSTIC="$STALE_TRACK_DIAGNOSTIC"
-        return 1
-    fi
-    if ! classify_stale_track_journals; then
-        RECOVERY_ARTIFACT_CLASS=unsafe
-        RECOVERY_ARTIFACT_DIAGNOSTIC="$STALE_TRACK_DIAGNOSTIC"
+        RECOVERY_ARTIFACT_DIAGNOSTIC="$STALE_OWNER_DIAGNOSTIC"
         return 1
     fi
     for artifact in $(enumerate_recovery_artifacts); do
-        stale_track_file_is_known "$artifact" && continue
         [ "$scope" = lifecycle ] && [ "$artifact" = "$UNINSTALL_TOMBSTONE" ] && continue
         [ "$scope" = uninstall ] && [ "$artifact" = "$UNINSTALL_TOMBSTONE" ] && continue
         if [ "$scope" = install ] && [ "$artifact" = "$UNINSTALL_TOMBSTONE" ]; then
@@ -1149,11 +849,6 @@ trim_config_value_in_place() {
     CONFIG_VALUE_TRIMMED="$1"
     CONFIG_VALUE_TRIMMED="${CONFIG_VALUE_TRIMMED#"${CONFIG_VALUE_TRIMMED%%[![:space:]]*}"}"
     CONFIG_VALUE_TRIMMED="${CONFIG_VALUE_TRIMMED%"${CONFIG_VALUE_TRIMMED##*[![:space:]]}"}"
-}
-
-trim_config_value() {
-    trim_config_value_in_place "$1"
-    printf '%s' "$CONFIG_VALUE_TRIMMED"
 }
 
 # Decode one INI/bootstrap scalar without eval, command substitution or escape
@@ -2093,31 +1788,11 @@ prepare_owner_generation_spec() {
     OWNER_WRITE_INSTALL_GENERATION="$INSTALL_META_GENERATION"; OWNER_WRITE_INSTALL_ARCHIVE_SHA256="$INSTALL_META_ARCHIVE_SHA256"; OWNER_WRITE_SOURCE_GENERATION=""; OWNER_WRITE_READY=1
 }
 
-owner_load_generation_fields() {
-    [ "$OWNER_STATE_SCHEMA_VERSION" = "$OWNER_STATE_VERSION" ] || return 1
-    OWNER_WRITE_QNUM="$OWNER_STATE_QNUM"; OWNER_WRITE_PORTS_TCP="$OWNER_STATE_PORTS_TCP"; OWNER_WRITE_PORTS_UDP="$OWNER_STATE_PORTS_UDP"; OWNER_WRITE_STUN_PORTS="$OWNER_STATE_STUN_PORTS"
-    OWNER_WRITE_FIREWALL_TAG="$OWNER_STATE_FIREWALL_TAG"; OWNER_WRITE_OUT_CHAIN="$OWNER_STATE_OUT_CHAIN"; OWNER_WRITE_IN_CHAIN="$OWNER_STATE_IN_CHAIN"
-    FIREWALL_TAG="$OWNER_STATE_FIREWALL_TAG"; ZAPRET2_OUT="$OWNER_STATE_OUT_CHAIN"; ZAPRET2_IN="$OWNER_STATE_IN_CHAIN"
-    OWNER_WRITE_TCP_PKT_OUT="$OWNER_STATE_TCP_PKT_OUT"; OWNER_WRITE_TCP_PKT_IN="$OWNER_STATE_TCP_PKT_IN"
-    OWNER_WRITE_UDP_PKT_OUT="$OWNER_STATE_UDP_PKT_OUT"; OWNER_WRITE_UDP_PKT_IN="$OWNER_STATE_UDP_PKT_IN"
-    OWNER_WRITE_DESYNC_MARK="$OWNER_STATE_DESYNC_MARK"
-    OWNER_WRITE_IPV4_ACTIVE="$OWNER_STATE_IPV4_ACTIVE"; OWNER_WRITE_IPV6_ACTIVE="$OWNER_STATE_IPV6_ACTIVE"
-    OWNER_WRITE_IPV4_CONNBYTES="$OWNER_STATE_IPV4_CONNBYTES"; OWNER_WRITE_IPV4_MULTIPORT="$OWNER_STATE_IPV4_MULTIPORT"; OWNER_WRITE_IPV4_MARK="$OWNER_STATE_IPV4_MARK"
-    OWNER_WRITE_IPV6_CONNBYTES="$OWNER_STATE_IPV6_CONNBYTES"; OWNER_WRITE_IPV6_MULTIPORT="$OWNER_STATE_IPV6_MULTIPORT"; OWNER_WRITE_IPV6_MARK="$OWNER_STATE_IPV6_MARK"
-    OWNER_WRITE_IPV4_RULES="$OWNER_STATE_IPV4_RULES"; OWNER_WRITE_IPV6_RULES="$OWNER_STATE_IPV6_RULES"; OWNER_WRITE_IPV4_SPEC="$OWNER_STATE_IPV4_SPEC"; OWNER_WRITE_IPV6_SPEC="$OWNER_STATE_IPV6_SPEC"
-    OWNER_WRITE_FIREWALL_FINGERPRINT="$OWNER_STATE_FIREWALL_FINGERPRINT"; OWNER_WRITE_INSTALL_GENERATION="$OWNER_STATE_INSTALL_GENERATION"; OWNER_WRITE_INSTALL_ARCHIVE_SHA256="$OWNER_STATE_INSTALL_ARCHIVE_SHA256"; OWNER_WRITE_SOURCE_GENERATION="$OWNER_STATE_GENERATION"; OWNER_WRITE_READY=1
-}
-
 owner_state_is_current_boot() {
     [ "$OWNER_STATE_SCHEMA_VERSION" = "$OWNER_STATE_VERSION" ] || return 1
     is_valid_boot_id "$OWNER_STATE_BOOT_ID" || return 1
     read_current_boot_id || return 1
     [ "$OWNER_STATE_BOOT_ID" = "$CURRENT_BOOT_ID" ]
-}
-
-owner_loaded_generation_for_write() {
-    owner_state_is_current_boot || return 1
-    owner_load_generation_fields
 }
 
 read_owner_state() {
@@ -2321,18 +1996,6 @@ set_owner_phase() {
     [ "$OWNER_STATE_PHASE" = "$phase" ] && return 0
     verify_nfqws_pid "$OWNER_STATE_PID" "$OWNER_STATE_START" "$OWNER_STATE_ARGV_SHA256" "$OWNER_STATE_QNUM" || return 1
     write_owner_state "$OWNER_STATE_PID" "$OWNER_STATE_START" "$OWNER_STATE_ARGV_SHA256" "$OWNER_STATE_QNUM" "$OWNER_STATE_GENERATION" "$phase"
-}
-
-republish_owner_ipv6_inactive() {
-    read_owner_state || return 1
-    owner_state_is_current_boot || return 1
-    verify_nfqws_pid "$OWNER_STATE_PID" "$OWNER_STATE_START" "$OWNER_STATE_ARGV_SHA256" "$OWNER_STATE_QNUM" || return 1
-    owner_loaded_generation_for_write || return 1
-    OWNER_WRITE_IPV6_ACTIVE=0; OWNER_WRITE_IPV6_RULES=0
-    OWNER_WRITE_IPV6_SPEC="$(owner_build_family_spec ipv6 0 "$OWNER_WRITE_IPV6_CONNBYTES" "$OWNER_WRITE_IPV6_MULTIPORT" "$OWNER_WRITE_IPV6_MARK" 0)" || return 1
-    OWNER_WRITE_FIREWALL_FINGERPRINT="$(owner_spec_fingerprint "$OWNER_WRITE_IPV4_SPEC" "$OWNER_WRITE_IPV6_SPEC")" || return 1
-    write_owner_state "$OWNER_STATE_PID" "$OWNER_STATE_START" "$OWNER_STATE_ARGV_SHA256" "$OWNER_STATE_QNUM" "$OWNER_STATE_GENERATION" "$OWNER_STATE_PHASE" || return 1
-    read_owner_state && [ "$OWNER_STATE_IPV6_ACTIVE" = 0 ] && [ "$OWNER_STATE_IPV6_RULES" = 0 ]
 }
 
 retire_owner_metadata() {
@@ -2840,672 +2503,6 @@ owned_family_absent() {
     z2_fw_family_absent "$1"
 }
 
-# Legacy direct-rule migration is a separate transaction from the current
-# owned-chain lifecycle.  Callers install their signal traps before invoking
-# it; these globals let those traps reconstruct the exact proven fingerprint
-# if phase-two deletion is interrupted.
-LEGACY_ROLLBACK_ARMED=0
-LEGACY_ROLLBACK_IN_PROGRESS=0
-LEGACY_ROLLBACK_FAILED=0
-LEGACY_SNAPSHOT_ARTIFACTS_OWNED=0
-LEGACY_MARKER_PUBLISH_ATTEMPTED=0
-LEGACY_MIGRATION_VERIFIED=0
-
-legacy_direct_rule_one() {
-    local tool="$1" chain="$2" proto="$3" direction="$4" ports="$5" packet_count="$6" cb_dir="$7"
-    set -- -t mangle -C "$chain" -p "$proto"
-    if [ "$LEGACY_MULTIPORT" = 1 ]; then
-        if [ "$direction" = out ]; then set -- "$@" -m multiport --dports "$ports"
-        else set -- "$@" -m multiport --sports "$ports"; fi
-    else
-        if [ "$direction" = out ]; then set -- "$@" --dport "$ports"
-        else set -- "$@" --sport "$ports"; fi
-    fi
-    if [ "$LEGACY_CONNBYTES" = 1 ]; then
-        set -- "$@" -m connbytes --connbytes "1:$packet_count" --connbytes-dir "$cb_dir" --connbytes-mode packets
-    fi
-    if [ "$direction" = out ] && [ "$LEGACY_MARK" = 1 ]; then
-        set -- "$@" -m mark ! --mark "$DESYNC_MARK/$DESYNC_MARK"
-    fi
-    set -- "$@" -j NFQUEUE --queue-num "$LEGACY_QNUM"
-    [ "$LEGACY_BYPASS" = 1 ] && set -- "$@" --queue-bypass
-    if "$tool" "$@" >/dev/null 2>&1; then
-        LEGACY_FOUND=$((LEGACY_FOUND + 1))
-    fi
-}
-
-# Build the delete form separately while preserving the exact pre-change
-# fingerprint; BusyBox sh intentionally gets only positional primitives here.
-legacy_delete_rule_one() {
-    local tool="$1" chain="$2" proto="$3" direction="$4" ports="$5" packet_count="$6" cb_dir="$7"
-    set -- -t mangle -D "$chain" -p "$proto"
-    if [ "$LEGACY_MULTIPORT" = 1 ]; then
-        if [ "$direction" = out ]; then set -- "$@" -m multiport --dports "$ports"
-        else set -- "$@" -m multiport --sports "$ports"; fi
-    else
-        if [ "$direction" = out ]; then set -- "$@" --dport "$ports"
-        else set -- "$@" --sport "$ports"; fi
-    fi
-    if [ "$LEGACY_CONNBYTES" = 1 ]; then set -- "$@" -m connbytes --connbytes "1:$packet_count" --connbytes-dir "$cb_dir" --connbytes-mode packets; fi
-    if [ "$direction" = out ] && [ "$LEGACY_MARK" = 1 ]; then set -- "$@" -m mark ! --mark "$DESYNC_MARK/$DESYNC_MARK"; fi
-    set -- "$@" -j NFQUEUE --queue-num "$LEGACY_QNUM"
-    [ "$LEGACY_BYPASS" = 1 ] && set -- "$@" --queue-bypass
-    "$tool" "$@" >/dev/null 2>&1
-}
-
-legacy_insert_rule_one() {
-    local tool="$1" chain="$2" position="$3" proto="$4" direction="$5" ports="$6" packet_count="$7" cb_dir="$8"
-    set -- -t mangle -I "$chain" "$position" -p "$proto"
-    if [ "$LEGACY_MULTIPORT" = 1 ]; then
-        if [ "$direction" = out ]; then set -- "$@" -m multiport --dports "$ports"
-        else set -- "$@" -m multiport --sports "$ports"; fi
-    else
-        if [ "$direction" = out ]; then set -- "$@" --dport "$ports"
-        else set -- "$@" --sport "$ports"; fi
-    fi
-    if [ "$LEGACY_CONNBYTES" = 1 ]; then set -- "$@" -m connbytes --connbytes "1:$packet_count" --connbytes-dir "$cb_dir" --connbytes-mode packets; fi
-    if [ "$direction" = out ] && [ "$LEGACY_MARK" = 1 ]; then set -- "$@" -m mark ! --mark "$DESYNC_MARK/$DESYNC_MARK"; fi
-    set -- "$@" -j NFQUEUE --queue-num "$LEGACY_QNUM"
-    [ "$LEGACY_BYPASS" = 1 ] && set -- "$@" --queue-bypass
-    "$tool" "$@" >/dev/null 2>&1
-}
-
-legacy_visit_port_set() {
-    local tool="$1" chain="$2" proto="$3" direction="$4" ports="$5" packet_count="$6" cb_dir="$7"
-    local old_ifs item
-    if [ "$LEGACY_MULTIPORT" = 1 ]; then
-        legacy_visit_rule "$tool" "$chain" "$proto" "$direction" "$ports" "$packet_count" "$cb_dir"
-        return
-    fi
-    old_ifs="$IFS"; IFS=,; set -- $ports; IFS="$old_ifs"
-    for item in "$@"; do legacy_visit_rule "$tool" "$chain" "$proto" "$direction" "$item" "$packet_count" "$cb_dir"; done
-}
-
-legacy_visit_rule() {
-    local before
-    before="$LEGACY_FOUND"
-    legacy_direct_rule_one "$@"
-    if [ "$LEGACY_ACTION" = delete ] && [ "$LEGACY_FOUND" -gt "$before" ]; then
-        legacy_delete_rule_one "$@" || LEGACY_DELETE_FAILED=1
-    elif [ "$LEGACY_ACTION" = snapshot ]; then
-        if [ "$LEGACY_FOUND" -gt "$before" ]; then
-            legacy_snapshot_rule_one "$@" || LEGACY_SNAPSHOT_FAILED=1
-        else
-            LEGACY_SNAPSHOT_FAILED=1
-        fi
-    fi
-}
-
-legacy_visit_family() {
-    local tool="$1" stun_ports="3478,5349,19302"
-    [ "$LEGACY_MULTIPORT" = 1 ] || stun_ports=3478
-    legacy_visit_port_set "$tool" OUTPUT tcp out "$PORTS_TCP" "$PKT_OUT" original
-    legacy_visit_port_set "$tool" OUTPUT udp out "$PORTS_UDP" "$PKT_OUT" original
-    legacy_visit_port_set "$tool" OUTPUT udp out "$stun_ports" "$PKT_OUT" original
-    legacy_visit_port_set "$tool" INPUT tcp in "$PORTS_TCP" "$PKT_IN" reply
-    legacy_visit_port_set "$tool" INPUT udp in "$PORTS_UDP" "$PKT_IN" reply
-    legacy_visit_port_set "$tool" INPUT udp in "$stun_ports" "$PKT_IN" reply
-}
-
-legacy_expected_family_count() {
-    local tcp_count udp_count
-    if [ "$LEGACY_MULTIPORT" = 1 ]; then printf '6\n'; return; fi
-    tcp_count="$(printf '%s\n' "$PORTS_TCP" | tr ',' '\n' | wc -l | tr -d '[:space:]')"
-    udp_count="$(printf '%s\n' "$PORTS_UDP" | tr ',' '\n' | wc -l | tr -d '[:space:]')"
-    is_decimal "$tcp_count" || tcp_count=0
-    is_decimal "$udp_count" || udp_count=0
-    printf '%s\n' $((2 * tcp_count + 2 * udp_count + 2))
-}
-
-legacy_direct_qnum_count() {
-    local tool="$1" count listing
-    command -v "$tool" >/dev/null 2>&1 || return 1
-    listing="$("$tool" -t mangle -S 2>/dev/null)" || return 1
-    count="$(printf '%s\n' "$listing" | awk -v qnum="$LEGACY_QNUM" '
-        $1 == "-A" && ($2 == "OUTPUT" || $2 == "INPUT") {
-            nfqueue = 0
-            queue = 0
-            for (i = 3; i <= NF; i++) {
-                if (($i == "-j" || $i == "--jump") && $(i + 1) == "NFQUEUE") nfqueue = 1
-                if ($i == "--queue-num" && $(i + 1) == qnum) queue = 1
-            }
-            if (nfqueue && queue) count++
-        }
-        END { print count + 0 }
-    ')" || return 1
-    is_decimal "$count" || return 1
-    printf '%s\n' "$count"
-}
-
-legacy_prove_family() {
-    local tool="$1" active="$2" expected direct
-    command -v "$tool" >/dev/null 2>&1 || {
-        LEGACY_MIGRATION_ERROR="cannot prove active/inactive legacy family because $tool is unavailable"
-        return 1
-    }
-    LEGACY_ACTION=count; LEGACY_FOUND=0
-    legacy_visit_family "$tool"
-    direct="$(legacy_direct_qnum_count "$tool")" || {
-        LEGACY_MIGRATION_ERROR="cannot count direct legacy queue references with $tool"
-        return 1
-    }
-    expected=0
-    [ "$active" = 0 ] || expected=6
-    [ "$LEGACY_FOUND" = "$expected" ] && [ "$direct" = "$expected" ] || {
-        LEGACY_MIGRATION_ERROR="$tool legacy family proof mismatch: active=$active, matched fingerprints=$LEGACY_FOUND, direct queue references=$direct, expected=$expected; no direct rules were changed"
-        return 1
-    }
-    if [ "$tool" = iptables ]; then
-        LEGACY_IPV4_FOUND="$LEGACY_FOUND"; LEGACY_IPV4_DIRECT="$direct"
-    else
-        LEGACY_IPV6_FOUND="$LEGACY_FOUND"; LEGACY_IPV6_DIRECT="$direct"
-    fi
-    return 0
-}
-
-legacy_snapshot_paths_init() {
-    local prefix="$STATE_DIR/legacy-rollback.$$"
-    LEGACY_SNAPSHOT_RULES_FILE="$prefix.rules"
-    LEGACY_SNAPSHOT_SORTED_FILE="$prefix.sorted"
-    LEGACY_SNAPSHOT_CURRENT_FILE="$prefix.current"
-    LEGACY_SNAPSHOT_V4_OUTPUT_FILE="$prefix.v4.output"
-    LEGACY_SNAPSHOT_V4_INPUT_FILE="$prefix.v4.input"
-    LEGACY_SNAPSHOT_V6_OUTPUT_FILE="$prefix.v6.output"
-    LEGACY_SNAPSHOT_V6_INPUT_FILE="$prefix.v6.input"
-}
-
-legacy_snapshot_file_for() {
-    case "$1:$2" in
-        iptables:OUTPUT) LEGACY_CHAIN_SNAPSHOT_FILE="$LEGACY_SNAPSHOT_V4_OUTPUT_FILE" ;;
-        iptables:INPUT) LEGACY_CHAIN_SNAPSHOT_FILE="$LEGACY_SNAPSHOT_V4_INPUT_FILE" ;;
-        ip6tables:OUTPUT) LEGACY_CHAIN_SNAPSHOT_FILE="$LEGACY_SNAPSHOT_V6_OUTPUT_FILE" ;;
-        ip6tables:INPUT) LEGACY_CHAIN_SNAPSHOT_FILE="$LEGACY_SNAPSHOT_V6_INPUT_FILE" ;;
-        *) return 1 ;;
-    esac
-}
-
-legacy_cleanup_snapshot_artifacts() {
-    local path rc=0
-    [ "$LEGACY_SNAPSHOT_ARTIFACTS_OWNED" = 1 ] || return 0
-    for path in \
-        "$LEGACY_SNAPSHOT_RULES_FILE" "$LEGACY_SNAPSHOT_SORTED_FILE" \
-        "$LEGACY_SNAPSHOT_CURRENT_FILE" "$LEGACY_SNAPSHOT_V4_OUTPUT_FILE" \
-        "$LEGACY_SNAPSHOT_V4_INPUT_FILE" "$LEGACY_SNAPSHOT_V6_OUTPUT_FILE" \
-        "$LEGACY_SNAPSHOT_V6_INPUT_FILE"; do
-        state_path_is_managed_file "$path" || { rc=1; continue; }
-        if [ -e "$path" ] || [ -L "$path" ]; then rm -f "$path" 2>/dev/null || rc=1; fi
-        [ ! -e "$path" ] && [ ! -L "$path" ] || rc=1
-    done
-    [ "$rc" -ne 0 ] || LEGACY_SNAPSHOT_ARTIFACTS_OWNED=0
-    return "$rc"
-}
-
-legacy_prepare_snapshot_artifacts() {
-    local path tool chain active
-    ensure_state_dir || return 1
-    legacy_snapshot_paths_init
-    for path in \
-        "$LEGACY_SNAPSHOT_RULES_FILE" "$LEGACY_SNAPSHOT_SORTED_FILE" \
-        "$LEGACY_SNAPSHOT_CURRENT_FILE" "$LEGACY_SNAPSHOT_V4_OUTPUT_FILE" \
-        "$LEGACY_SNAPSHOT_V4_INPUT_FILE" "$LEGACY_SNAPSHOT_V6_OUTPUT_FILE" \
-        "$LEGACY_SNAPSHOT_V6_INPUT_FILE"; do
-        state_path_is_managed_file "$path" || return 1
-        [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
-    done
-    LEGACY_SNAPSHOT_ARTIFACTS_OWNED=1
-    umask 077
-    : > "$LEGACY_SNAPSHOT_RULES_FILE" || return 1
-    chmod 0600 "$LEGACY_SNAPSHOT_RULES_FILE" 2>/dev/null || return 1
-    for tool in iptables ip6tables; do
-        if [ "$tool" = iptables ]; then active="$LEGACY_SNAPSHOT_IPV4_ACTIVE"
-        else active="$LEGACY_SNAPSHOT_IPV6_ACTIVE"; fi
-        [ "$active" = 1 ] || continue
-        command -v "$tool" >/dev/null 2>&1 || return 1
-        for chain in OUTPUT INPUT; do
-            legacy_snapshot_file_for "$tool" "$chain" || return 1
-            "$tool" -t mangle -S "$chain" > "$LEGACY_CHAIN_SNAPSHOT_FILE" 2>/dev/null || return 1
-            chmod 0600 "$LEGACY_CHAIN_SNAPSHOT_FILE" 2>/dev/null || return 1
-        done
-    done
-    return 0
-}
-
-legacy_snapshot_rule_one() {
-    local tool="$1" chain="$2" proto="$3" direction="$4" ports="$5" packet_count="$6" cb_dir="$7"
-    local port_option want_conn want_mark want_bypass position
-    legacy_snapshot_file_for "$tool" "$chain" || return 1
-    [ -f "$LEGACY_CHAIN_SNAPSHOT_FILE" ] && [ ! -L "$LEGACY_CHAIN_SNAPSHOT_FILE" ] || return 1
-    if [ "$LEGACY_MULTIPORT" = 1 ]; then
-        if [ "$direction" = out ]; then port_option=--dports
-        else port_option=--sports; fi
-    else
-        if [ "$direction" = out ]; then port_option=--dport
-        else port_option=--sport; fi
-    fi
-    want_conn="$LEGACY_CONNBYTES"
-    want_mark=0
-    [ "$direction" != out ] || [ "$LEGACY_MARK" != 1 ] || want_mark=1
-    want_bypass="$LEGACY_BYPASS"
-    position="$(awk -v chain="$chain" -v proto="$proto" \
-        -v port_option="$port_option" -v ports="$ports" \
-        -v packet_count="$packet_count" -v cb_dir="$cb_dir" \
-        -v qnum="$LEGACY_QNUM" -v want_conn="$want_conn" \
-        -v want_mark="$want_mark" -v want_bypass="$want_bypass" '
-        $1 == "-A" && $2 == chain {
-            ordinal++
-            got_proto = got_port = got_jump = got_queue = 0
-            got_conn = got_conn_dir = got_conn_mode = 0
-            got_mark = got_bypass = 0
-            for (i = 3; i <= NF; i++) {
-                if (($i == "-p" || $i == "--protocol") && $(i + 1) == proto) got_proto = 1
-                if ($i == port_option && $(i + 1) == ports) got_port = 1
-                if ($i == "--connbytes" && $(i + 1) == "1:" packet_count) got_conn = 1
-                if ($i == "--connbytes-dir" && $(i + 1) == cb_dir) got_conn_dir = 1
-                if ($i == "--connbytes-mode" && $(i + 1) == "packets") got_conn_mode = 1
-                if ($i == "--mark") got_mark = 1
-                if (($i == "-j" || $i == "--jump") && $(i + 1) == "NFQUEUE") got_jump = 1
-                if ($i == "--queue-num" && $(i + 1) == qnum) got_queue = 1
-                if ($i == "--queue-bypass") got_bypass = 1
-            }
-            conn_ok = want_conn ? (got_conn && got_conn_dir && got_conn_mode) : (!got_conn && !got_conn_dir && !got_conn_mode)
-            if (got_proto && got_port && got_jump && got_queue && conn_ok &&
-                got_mark == want_mark && got_bypass == want_bypass) {
-                matches++
-                matched_position = ordinal
-            }
-        }
-        END {
-            if (matches == 1) print matched_position
-            else exit 1
-        }
-    ' "$LEGACY_CHAIN_SNAPSHOT_FILE")" || return 1
-    is_decimal "$position" && [ "$position" -ge 1 ] 2>/dev/null || return 1
-    printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
-        "$tool" "$chain" "$position" "$proto" "$direction" "$ports" "$packet_count" "$cb_dir" \
-        >> "$LEGACY_SNAPSHOT_RULES_FILE" || return 1
-    LEGACY_SNAPSHOT_RECORDS=$((LEGACY_SNAPSHOT_RECORDS + 1))
-    return 0
-}
-
-legacy_snapshot_records_are_exact() {
-    local expected="$1"
-    awk -F '|' -v expected="$expected" '
-        NF != 8 { bad = 1; exit }
-        {
-            key = $1 "|" $2 "|" $3
-            if (seen[key]++) { bad = 1; exit }
-            count++
-        }
-        END { if (bad || count != expected) exit 1 }
-    ' "$LEGACY_SNAPSHOT_RULES_FILE"
-}
-
-legacy_snapshot_chains_equal() {
-    local tool chain active rc=0
-    for tool in iptables ip6tables; do
-        if [ "$tool" = iptables ]; then active="$LEGACY_SNAPSHOT_IPV4_ACTIVE"
-        else active="$LEGACY_SNAPSHOT_IPV6_ACTIVE"; fi
-        [ "$active" = 1 ] || continue
-        for chain in OUTPUT INPUT; do
-            legacy_snapshot_file_for "$tool" "$chain" || return 1
-            "$tool" -t mangle -S "$chain" > "$LEGACY_SNAPSHOT_CURRENT_FILE" 2>/dev/null || return 1
-            cmp -s "$LEGACY_CHAIN_SNAPSHOT_FILE" "$LEGACY_SNAPSHOT_CURRENT_FILE" || rc=1
-        done
-    done
-    rm -f "$LEGACY_SNAPSHOT_CURRENT_FILE" 2>/dev/null || rc=1
-    return "$rc"
-}
-
-legacy_restore_snapshot_records() {
-    local tool chain position proto direction ports packet_count cb_dir
-    local count=0 rc=0
-    command -v sort >/dev/null 2>&1 || return 1
-    sort -t '|' -k1,1 -k2,2 -k3,3n "$LEGACY_SNAPSHOT_RULES_FILE" \
-        > "$LEGACY_SNAPSHOT_SORTED_FILE" 2>/dev/null || return 1
-    chmod 0600 "$LEGACY_SNAPSHOT_SORTED_FILE" 2>/dev/null || return 1
-    while IFS='|' read -r tool chain position proto direction ports packet_count cb_dir; do
-        case "$tool:$chain:$direction:$cb_dir" in
-            iptables:OUTPUT:out:original|iptables:INPUT:in:reply|ip6tables:OUTPUT:out:original|ip6tables:INPUT:in:reply) ;;
-            *) rc=1; continue ;;
-        esac
-        case "$proto" in tcp|udp) ;; *) rc=1; continue ;; esac
-        case "$ports" in ""|*[!0-9,:]*) rc=1; continue ;; esac
-        is_decimal "$position" && [ "$position" -ge 1 ] 2>/dev/null || { rc=1; continue; }
-        is_decimal "$packet_count" && [ "$packet_count" -ge 1 ] 2>/dev/null || { rc=1; continue; }
-        count=$((count + 1))
-        LEGACY_FOUND=0
-        legacy_direct_rule_one "$tool" "$chain" "$proto" "$direction" "$ports" "$packet_count" "$cb_dir"
-        if [ "$LEGACY_FOUND" = 0 ]; then
-            legacy_insert_rule_one "$tool" "$chain" "$position" "$proto" "$direction" "$ports" "$packet_count" "$cb_dir" || rc=1
-        elif [ "$LEGACY_FOUND" != 1 ]; then
-            rc=1
-        fi
-    done < "$LEGACY_SNAPSHOT_SORTED_FILE"
-    [ "$count" = "$LEGACY_SNAPSHOT_RECORDS" ] || rc=1
-    [ "$rc" -ne 0 ] || legacy_snapshot_chains_equal || rc=1
-    return "$rc"
-}
-
-read_legacy_migration_marker() {
-    local key value version="" qnum="" seen_version=0 seen_qnum=0
-    LEGACY_MARKER_QNUM=""
-    state_file_is_secure "$LEGACY_MIGRATION_MARKER" &&
-        [ -r "$LEGACY_MIGRATION_MARKER" ] || return 1
-    while IFS='=' read -r key value; do
-        case "$key" in
-            version)
-                [ "$seen_version" = 0 ] || return 1
-                version="$value"; seen_version=1
-                ;;
-            qnum)
-                [ "$seen_qnum" = 0 ] || return 1
-                qnum="$value"; seen_qnum=1
-                ;;
-            *) return 1 ;;
-        esac
-    done < "$LEGACY_MIGRATION_MARKER"
-    [ "$seen_version:$seen_qnum" = 1:1 ] && [ "$version" = 1 ] || return 1
-    normalize_qnum "$qnum" || return 1
-    LEGACY_MARKER_QNUM="$QNUM_NORMALIZED"
-    return 0
-}
-
-legacy_arm_rollback() {
-    local tool active expected
-    [ "$LEGACY_ROLLBACK_ARMED" = 0 ] || return 1
-    LEGACY_SNAPSHOT_QNUM="$LEGACY_QNUM"
-    LEGACY_SNAPSHOT_CONNBYTES="$LEGACY_CONNBYTES"
-    LEGACY_SNAPSHOT_MULTIPORT="$LEGACY_MULTIPORT"
-    LEGACY_SNAPSHOT_MARK="$LEGACY_MARK"
-    LEGACY_SNAPSHOT_BYPASS="$LEGACY_BYPASS"
-    LEGACY_SNAPSHOT_IPV4_ACTIVE="$STATUS_FILE_IPV4_ACTIVE"
-    LEGACY_SNAPSHOT_IPV6_ACTIVE="$STATUS_FILE_IPV6_ACTIVE"
-    LEGACY_SNAPSHOT_PORTS_TCP="$PORTS_TCP"
-    LEGACY_SNAPSHOT_PORTS_UDP="$PORTS_UDP"
-    LEGACY_SNAPSHOT_PKT_OUT="$PKT_OUT"
-    LEGACY_SNAPSHOT_PKT_IN="$PKT_IN"
-    LEGACY_SNAPSHOT_DESYNC_MARK="$DESYNC_MARK"
-    LEGACY_CONTROLLED_TEARDOWN_PREVIOUS="${CONTROLLED_TEARDOWN_STARTED:-0}"
-    case "$LEGACY_CONTROLLED_TEARDOWN_PREVIOUS" in 0|1) ;; *) return 1 ;; esac
-    LEGACY_SNAPSHOT_RECORDS=0
-    LEGACY_SNAPSHOT_FAILED=0
-    LEGACY_ROLLBACK_FAILED=0
-    if ! legacy_prepare_snapshot_artifacts; then
-        legacy_cleanup_snapshot_artifacts >/dev/null 2>&1 || true
-        return 1
-    fi
-    LEGACY_ACTION=snapshot
-    LEGACY_FOUND=0
-    for tool in iptables ip6tables; do
-        if [ "$tool" = iptables ]; then active="$LEGACY_SNAPSHOT_IPV4_ACTIVE"
-        else active="$LEGACY_SNAPSHOT_IPV6_ACTIVE"; fi
-        [ "$active" = 1 ] || continue
-        legacy_visit_family "$tool"
-    done
-    expected=$((6 * (LEGACY_SNAPSHOT_IPV4_ACTIVE + LEGACY_SNAPSHOT_IPV6_ACTIVE)))
-    if [ "$LEGACY_SNAPSHOT_FAILED" != 0 ] ||
-       [ "$LEGACY_SNAPSHOT_RECORDS" != "$expected" ] ||
-       ! legacy_snapshot_records_are_exact "$expected" ||
-       ! legacy_snapshot_chains_equal; then
-        legacy_cleanup_snapshot_artifacts >/dev/null 2>&1 || true
-        return 1
-    fi
-    LEGACY_MARKER_PUBLISH_ATTEMPTED=0
-    # Publish the journal arm and fail-closed teardown guard as one shell
-    # assignment command so a pending signal cannot observe a half-armed state.
-    LEGACY_ROLLBACK_ARMED=1 CONTROLLED_TEARDOWN_STARTED=1
-    return 0
-}
-
-legacy_restore_snapshot_rules() {
-    local save_qnum="$LEGACY_QNUM" save_connbytes="$LEGACY_CONNBYTES"
-    local save_multiport="$LEGACY_MULTIPORT" save_mark="$LEGACY_MARK"
-    local save_bypass="$LEGACY_BYPASS" save_ipv4="$STATUS_FILE_IPV4_ACTIVE"
-    local save_ipv6="$STATUS_FILE_IPV6_ACTIVE" save_tcp="$PORTS_TCP"
-    local save_udp="$PORTS_UDP" save_out="$PKT_OUT" save_in="$PKT_IN"
-    local save_desync="$DESYNC_MARK" rc
-
-    LEGACY_QNUM="$LEGACY_SNAPSHOT_QNUM"
-    LEGACY_CONNBYTES="$LEGACY_SNAPSHOT_CONNBYTES"
-    LEGACY_MULTIPORT="$LEGACY_SNAPSHOT_MULTIPORT"
-    LEGACY_MARK="$LEGACY_SNAPSHOT_MARK"
-    LEGACY_BYPASS="$LEGACY_SNAPSHOT_BYPASS"
-    STATUS_FILE_IPV4_ACTIVE="$LEGACY_SNAPSHOT_IPV4_ACTIVE"
-    STATUS_FILE_IPV6_ACTIVE="$LEGACY_SNAPSHOT_IPV6_ACTIVE"
-    PORTS_TCP="$LEGACY_SNAPSHOT_PORTS_TCP"
-    PORTS_UDP="$LEGACY_SNAPSHOT_PORTS_UDP"
-    PKT_OUT="$LEGACY_SNAPSHOT_PKT_OUT"
-    PKT_IN="$LEGACY_SNAPSHOT_PKT_IN"
-    DESYNC_MARK="$LEGACY_SNAPSHOT_DESYNC_MARK"
-    legacy_restore_snapshot_records
-    rc=$?
-
-    LEGACY_QNUM="$save_qnum"
-    LEGACY_CONNBYTES="$save_connbytes"
-    LEGACY_MULTIPORT="$save_multiport"
-    LEGACY_MARK="$save_mark"
-    LEGACY_BYPASS="$save_bypass"
-    STATUS_FILE_IPV4_ACTIVE="$save_ipv4"
-    STATUS_FILE_IPV6_ACTIVE="$save_ipv6"
-    PORTS_TCP="$save_tcp"
-    PORTS_UDP="$save_udp"
-    PKT_OUT="$save_out"
-    PKT_IN="$save_in"
-    DESYNC_MARK="$save_desync"
-    return "$rc"
-}
-
-legacy_remove_transaction_marker() {
-    local rc=0 tmp="$LEGACY_MIGRATION_MARKER.tmp.$$"
-    [ "$LEGACY_MARKER_PUBLISH_ATTEMPTED" = 1 ] || return 0
-    if [ -e "$LEGACY_MIGRATION_MARKER" ] || [ -L "$LEGACY_MIGRATION_MARKER" ]; then
-        if read_legacy_migration_marker &&
-           [ "$LEGACY_MARKER_QNUM" = "$LEGACY_SNAPSHOT_QNUM" ]; then
-            rm -f "$LEGACY_MIGRATION_MARKER" 2>/dev/null || rc=1
-        else
-            rc=1
-        fi
-    fi
-    if [ -e "$tmp" ] || [ -L "$tmp" ]; then
-        rm -f "$tmp" 2>/dev/null || rc=1
-    fi
-    return "$rc"
-}
-
-rollback_legacy_migration() {
-    local rc=0
-    if [ "$LEGACY_ROLLBACK_ARMED" != 1 ]; then
-        [ "$LEGACY_ROLLBACK_FAILED" = 0 ] || return 1
-        legacy_cleanup_snapshot_artifacts
-        return $?
-    fi
-    [ "$LEGACY_ROLLBACK_IN_PROGRESS" = 0 ] || return 1
-    LEGACY_ROLLBACK_IN_PROGRESS=1
-    legacy_restore_snapshot_rules || rc=1
-    legacy_remove_transaction_marker || rc=1
-    legacy_cleanup_snapshot_artifacts || rc=1
-    LEGACY_ROLLBACK_ARMED=0
-    if [ "$rc" -eq 0 ]; then
-        LEGACY_ROLLBACK_FAILED=0
-        LEGACY_MARKER_PUBLISH_ATTEMPTED=0
-        CONTROLLED_TEARDOWN_STARTED="$LEGACY_CONTROLLED_TEARDOWN_PREVIOUS"
-    else
-        LEGACY_ROLLBACK_FAILED=1
-    fi
-    LEGACY_ROLLBACK_IN_PROGRESS=0
-    return "$rc"
-}
-
-commit_legacy_migration() {
-    legacy_cleanup_snapshot_artifacts || return 1
-    LEGACY_ROLLBACK_ARMED=0 LEGACY_ROLLBACK_FAILED=0 \
-        LEGACY_MARKER_PUBLISH_ATTEMPTED=0 \
-        CONTROLLED_TEARDOWN_STARTED="$LEGACY_CONTROLLED_TEARDOWN_PREVIOUS"
-    return 0
-}
-
-write_legacy_migration_marker() {
-    local tmp="$LEGACY_MIGRATION_MARKER.tmp.$$"
-    ensure_state_dir || return 1
-    state_file_target_is_safe "$LEGACY_MIGRATION_MARKER" || return 1
-    [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || return 1
-    umask 077
-    printf 'version=1\nqnum=%s\n' "$LEGACY_QNUM" > "$tmp" || { rm -f "$tmp"; return 1; }
-    chmod 0600 "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
-    mv -f "$tmp" "$LEGACY_MIGRATION_MARKER" || { rm -f "$tmp"; return 1; }
-}
-
-legacy_migrate_firewall() {
-    local proof=0 tool expected_family expected_total active direct
-    LEGACY_MIGRATION_ERROR=""
-    LEGACY_MIGRATION_VERIFIED=0
-    if [ -e "$LEGACY_MIGRATION_MARKER" ] || [ -L "$LEGACY_MIGRATION_MARKER" ]; then
-        read_legacy_migration_marker || {
-            LEGACY_MIGRATION_ERROR="legacy migration marker is unsafe or corrupt: $LEGACY_MIGRATION_MARKER"
-            return 1
-        }
-        LEGACY_QNUM="$LEGACY_MARKER_QNUM"
-        for tool in iptables ip6tables; do
-            command -v "$tool" >/dev/null 2>&1 || continue
-            direct="$(legacy_direct_qnum_count "$tool")" || {
-                LEGACY_MIGRATION_ERROR="cannot audit $tool against the verified legacy migration marker"
-                return 1
-            }
-            [ "$direct" = 0 ] || {
-                LEGACY_MIGRATION_ERROR="$tool has $direct direct queue references that conflict with the verified legacy migration marker; daemon retained"
-                return 1
-            }
-        done
-        LEGACY_MIGRATION_VERIFIED=1
-        return 0
-    fi
-    read_iptables_status "$LEGACY_IPTABLES_STATUS" >/dev/null 2>&1 || true
-    case "$STATUS_FILE_STATUS" in ok|partial) proof=1 ;; esac
-    case "$STATUS_FILE_RULES_TOTAL" in 6|12) ;; *) proof=0 ;; esac
-    [ "$STATUS_FILE_NFQUEUE_SUPPORTED" = 1 ] || proof=0
-    LEGACY_QNUM="$STATUS_FILE_QNUM"
-    if normalize_qnum "$LEGACY_QNUM"; then LEGACY_QNUM="$QNUM_NORMALIZED"; else proof=0; LEGACY_QNUM=200; fi
-    LEGACY_CONNBYTES="$STATUS_FILE_CONNBYTES_SUPPORTED"
-    LEGACY_MULTIPORT="$STATUS_FILE_MULTIPORT_SUPPORTED"
-    LEGACY_MARK="$STATUS_FILE_MARK_SUPPORTED"
-    LEGACY_BYPASS="$STATUS_FILE_QUEUE_BYPASS_SUPPORTED"
-    case "$LEGACY_CONNBYTES:$LEGACY_MULTIPORT:$LEGACY_MARK:$LEGACY_BYPASS" in
-        [01]:[01]:[01]:[01]) ;;
-        *) proof=0 ;;
-    esac
-    if [ "$proof" != 1 ]; then
-        LEGACY_QNUM=200
-        for tool in iptables ip6tables; do
-            direct="$(legacy_direct_qnum_count "$tool")" || {
-                LEGACY_MIGRATION_ERROR="cannot prove absence of direct legacy queue rules because $tool is unavailable or unreadable"
-                return 1
-            }
-            [ "$direct" = 0 ] || {
-                LEGACY_MIGRATION_ERROR="direct built-in NFQUEUE rules on historical queue 200 lack a provable zapret2 legacy status; leave them intact and remove only exact old zapret2 fingerprints manually, then rerun start"
-                return 1
-            }
-        done
-        write_legacy_migration_marker || { LEGACY_MIGRATION_ERROR="cannot write verified legacy migration marker"; return 1; }
-        LEGACY_MIGRATION_VERIFIED=1
-        return 0
-    fi
-
-    expected_family="$(legacy_expected_family_count)"
-    [ "$expected_family" = 6 ] || {
-        LEGACY_MIGRATION_ERROR="legacy status does not describe the historical six-rule family fingerprint; no direct rules were changed"
-        return 1
-    }
-    case "$STATUS_FILE_IPV4_ACTIVE:$STATUS_FILE_IPV6_ACTIVE" in
-        [01]:[01]) ;;
-        *)
-            LEGACY_MIGRATION_ERROR="legacy status has invalid per-family activity flags; no direct rules were changed"
-            return 1
-            ;;
-    esac
-    [ "$STATUS_FILE_IPV4_ACTIVE" = 1 ] || {
-        LEGACY_MIGRATION_ERROR="legacy status does not prove the mandatory IPv4 family active; no direct rules were changed"
-        return 1
-    }
-    expected_total=$((6 * (STATUS_FILE_IPV4_ACTIVE + STATUS_FILE_IPV6_ACTIVE)))
-    [ "$STATUS_FILE_RULES_TOTAL" = "$expected_total" ] || {
-        LEGACY_MIGRATION_ERROR="legacy status total is inconsistent with per-family activity; no direct rules were changed"
-        return 1
-    }
-
-    # Phase one is deliberately read-only.  Each active family must contain
-    # exactly six distinct expected fingerprints and exactly six total direct
-    # references to the historical queue; each inactive family must contain
-    # zero of both.  No family is changed until both proofs and the aggregate
-    # status total agree.
-    LEGACY_IPV4_FOUND=0; LEGACY_IPV4_DIRECT=0
-    LEGACY_IPV6_FOUND=0; LEGACY_IPV6_DIRECT=0
-    for tool in iptables ip6tables; do
-        if [ "$tool" = iptables ]; then active="$STATUS_FILE_IPV4_ACTIVE"
-        else active="$STATUS_FILE_IPV6_ACTIVE"; fi
-        legacy_prove_family "$tool" "$active" || return 1
-    done
-    [ $((LEGACY_IPV4_FOUND + LEGACY_IPV6_FOUND)) = "$STATUS_FILE_RULES_TOTAL" ] &&
-        [ $((LEGACY_IPV4_DIRECT + LEGACY_IPV6_DIRECT)) = "$STATUS_FILE_RULES_TOTAL" ] || {
-        LEGACY_MIGRATION_ERROR="legacy per-family proof total is inconsistent; no direct rules were changed"
-        return 1
-    }
-
-    # Phase two deletes only after every family passed phase one.  If any
-    # exact delete or post-delete audit fails, reconstruct the complete proven
-    # prestate so IPv4/IPv6 cannot be left in a mixed migration state.
-    legacy_arm_rollback || {
-        LEGACY_MIGRATION_ERROR="cannot arm exact legacy-rule rollback; no direct rules were changed"
-        return 1
-    }
-    LEGACY_ACTION=delete; LEGACY_FOUND=0; LEGACY_DELETE_FAILED=0
-    for tool in iptables ip6tables; do
-        if [ "$tool" = iptables ]; then active="$STATUS_FILE_IPV4_ACTIVE"
-        else active="$STATUS_FILE_IPV6_ACTIVE"; fi
-        [ "$active" = 1 ] || continue
-        legacy_visit_family "$tool"
-    done
-    [ "$LEGACY_DELETE_FAILED" = 0 ] || {
-        trap '' HUP INT TERM
-        if rollback_legacy_migration; then
-            LEGACY_MIGRATION_ERROR="one or more exact legacy rules could not be deleted; the exact ordered prestate snapshot was restored"
-        else
-            LEGACY_MIGRATION_ERROR="one or more exact legacy rules could not be deleted and exact ordered restoration could not be proven; daemon must remain running and both families require inspection"
-        fi
-        return 1
-    }
-    if [ "$(legacy_direct_qnum_count iptables 2>/dev/null)" != 0 ] ||
-       [ "$(legacy_direct_qnum_count ip6tables 2>/dev/null)" != 0 ]; then
-        trap '' HUP INT TERM
-        if rollback_legacy_migration; then
-            LEGACY_MIGRATION_ERROR="legacy post-delete proof failed; the exact ordered prestate snapshot was restored"
-        else
-            LEGACY_MIGRATION_ERROR="legacy post-delete proof and exact ordered restoration could not be proven; daemon must remain running and both families require inspection"
-        fi
-        return 1
-    fi
-    LEGACY_MARKER_PUBLISH_ATTEMPTED=1
-    if ! write_legacy_migration_marker; then
-        trap '' HUP INT TERM
-        if rollback_legacy_migration; then
-            LEGACY_MIGRATION_ERROR="legacy marker publication failed; the exact ordered prestate snapshot was restored"
-        else
-            LEGACY_MIGRATION_ERROR="legacy marker publication and exact ordered restoration could not be proven; daemon must remain running and both families require inspection"
-        fi
-        return 1
-    fi
-    if ! commit_legacy_migration; then
-        trap '' HUP INT TERM
-        if rollback_legacy_migration; then
-            LEGACY_MIGRATION_ERROR="legacy snapshot cleanup failed before commit; the exact ordered prestate was restored"
-        else
-            LEGACY_MIGRATION_ERROR="legacy snapshot cleanup failed and exact ordered restoration could not be proven; daemon must remain running"
-        fi
-        return 1
-    fi
-    LEGACY_MIGRATION_VERIFIED=1
-    return 0
-}
-
 status_safe_value() { printf '%s' "$1" | tr '\r\n' '  '; }
 
 LOG_READY="${LOG_READY:-0}"
@@ -3582,16 +2579,11 @@ read_iptables_status() {
     STATUS_FILE_ERROR_SCHEMA=0; STATUS_FILE_ERROR_STATUS=OK
     STATUS_FILE_ERROR_DOMAIN=NONE; STATUS_FILE_ERROR_CODE=NONE
     STATUS_FILE_ERROR_STAGE=NONE; STATUS_FILE_ERROR_DETAIL=""
-    if [ "$path" = "$IPTABLES_STATUS" ]; then
-        if [ "${OBSERVER_STATE_DIR_VERIFIED:-0}" = 1 ]; then
-            observer_state_file_is_secure "$path" && [ -r "$path" ] || return 1
-        else
-            state_file_is_secure "$path" && [ -r "$path" ] || return 1
-        fi
+    [ "$path" = "$IPTABLES_STATUS" ] || return 1
+    if [ "${OBSERVER_STATE_DIR_VERIFIED:-0}" = 1 ]; then
+        observer_state_file_is_secure "$path" && [ -r "$path" ] || return 1
     else
-        [ "$path" = "$LEGACY_IPTABLES_STATUS" ] || return 1
-        [ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ] || return 1
-        path_uid_is_root "$path" || return 1
+        state_file_is_secure "$path" && [ -r "$path" ] || return 1
     fi
     local key value
     while IFS='=' read -r key value; do

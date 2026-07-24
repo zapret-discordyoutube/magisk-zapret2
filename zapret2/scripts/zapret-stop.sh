@@ -20,8 +20,9 @@ stop_error_exit() {
 
 write_stop_status() {
     local state="$1" message="$2"
-    restore_status_facts
-    if read_owner_state >/dev/null 2>&1; then STATUS_QNUM="$OWNER_STATE_QNUM"; fi
+    # main() restores the status facts once for the whole transaction; only a
+    # signal arriving before that point needs a fallback restore here.
+    [ "${STOP_FACTS_RESTORED:-0}" = 1 ] || restore_status_facts
     STATUS_RULES_OK=0
     if [ "$state" = stopped ]; then STATUS_RULES_FAIL=0; STATUS_RULES_TOTAL=0
     else STATUS_RULES_FAIL=1; STATUS_RULES_TOTAL=1; fi
@@ -62,9 +63,6 @@ remove_transient_diagnostics() {
 stop_interrupted() {
     local message="stop interrupted by signal"
     trap '' HUP INT TERM
-    if ! rollback_legacy_migration; then
-        message="$message; exact legacy-rule rollback failed; daemon retained"
-    fi
     STOP_ERROR_DOMAIN=LIFECYCLE
     STOP_ERROR_CODE=LIFECYCLE_FAILED
     STOP_ERROR_STAGE=STOP_SIGNAL
@@ -106,17 +104,17 @@ main() {
         LOG_READY=0
         if command -v log >/dev/null 2>&1; then log -p w -t Zapret2 "Lifecycle file logging disabled: unsafe or unavailable path" 2>/dev/null; fi
     fi
-    # This is read-only; it supplies the queue number for legacy numeric PID
-    # files without creating/migrating configuration during a stop operation.
-    load_effective_core_config_readonly >/dev/null 2>&1 || true
     restore_status_facts
+    STOP_FACTS_RESTORED=1
     STOP_RUNTIME_OWNED=0
-    if read_runtime_owner_marker >/dev/null 2>&1 || read_owner_state >/dev/null 2>&1 || read_verified_pidfile >/dev/null 2>&1; then
+    OWNER_STATE_AVAILABLE=0
+    if read_owner_state >/dev/null 2>&1; then OWNER_STATE_AVAILABLE=1; fi
+    if [ "$OWNER_STATE_AVAILABLE" = 1 ] || read_runtime_owner_marker >/dev/null 2>&1 ||
+       read_verified_pidfile >/dev/null 2>&1; then
         STOP_RUNTIME_OWNED=1
     fi
-    restore_status_facts
     STOP_QNUM="${STATUS_FILE_QNUM:-${QNUM:-}}"
-    if read_owner_state >/dev/null 2>&1; then STOP_QNUM="$OWNER_STATE_QNUM"; fi
+    [ "$OWNER_STATE_AVAILABLE" != 1 ] || STOP_QNUM="$OWNER_STATE_QNUM"
     log_msg "Stopping Zapret2"
     [ -z "$UNINSTALL_TOMBSTONE_DIAGNOSTIC" ] || log_msg "$UNINSTALL_TOMBSTONE_DIAGNOSTIC"
 
@@ -125,27 +123,18 @@ main() {
     errors=""
     STOP_ERROR_DOMAIN=NONE; STOP_ERROR_CODE=NONE
     STOP_ERROR_STAGE=NONE; STOP_ERROR_RETRYABLE=0
-    # Prove the complete process identity/publication before legacy migration
-    # or any current-chain mutation. The later stop consumes this same snapshot
-    # and generation, so a replacement process cannot be killed after teardown.
+    # Prove the complete process identity/publication before any chain
+    # mutation. The later stop consumes this same snapshot and generation, so
+    # a replacement process cannot be killed after teardown.
     if ! preflight_owned_process_cleanup; then
         errors="process cleanup preflight blocked: $PROCESS_CLEANUP_PREFLIGHT_ERROR; firewall and daemon teardown were not attempted"
         STOP_ERROR_DOMAIN=PROCESS; STOP_ERROR_CODE=PROCESS_STOP_FAILED; STOP_ERROR_STAGE=STOP_PREFLIGHT
-    elif ! audit_owned_firewall_for_cleanup "$STOP_QNUM"; then
+    elif ! audit_owned_firewall_for_cleanup; then
         errors="firewall generation preflight blocked: $FIREWALL_CLEANUP_PREFLIGHT_ERROR; firewall and daemon teardown were not attempted"
         STOP_ERROR_DOMAIN=FIREWALL; STOP_ERROR_CODE=FIREWALL_CLEANUP_FAILED; STOP_ERROR_STAGE=STOP_PREFLIGHT
-    elif ! legacy_migrate_firewall; then
-        errors="legacy firewall migration blocked: $LEGACY_MIGRATION_ERROR; daemon teardown was not attempted"
-        STOP_ERROR_DOMAIN=FIREWALL; STOP_ERROR_CODE=FIREWALL_CLEANUP_FAILED; STOP_ERROR_STAGE=STOP_LEGACY
-    elif [ "$LEGACY_MIGRATION_VERIFIED" != 1 ]; then
-        errors="legacy firewall migration did not reach a verified commit; daemon teardown was not attempted"
-        STOP_ERROR_DOMAIN=FIREWALL; STOP_ERROR_CODE=POSTCONDITION_FAILED; STOP_ERROR_STAGE=STOP_LEGACY
     fi
     if [ -n "$errors" ]; then
         trap '' HUP INT TERM
-        if ! rollback_legacy_migration; then
-            errors="$errors; exact legacy-rule rollback failed"
-        fi
         write_stop_status error "$errors" >/dev/null 2>&1 || true
         release_lifecycle_lock
         trap - HUP INT TERM

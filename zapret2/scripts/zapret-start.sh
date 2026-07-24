@@ -159,9 +159,6 @@ prepare_options() {
     TCP_PKT_IN="$COMPILED_TCP_PKT_IN"
     UDP_PKT_OUT="$COMPILED_UDP_PKT_OUT"
     UDP_PKT_IN="$COMPILED_UDP_PKT_IN"
-    # Legacy direct-rule recovery predates protocol-specific capture policy.
-    PKT_OUT="$TCP_PKT_OUT"
-    PKT_IN="$TCP_PKT_IN"
     validate_port_list "$PORTS_TCP" || return 1
     validate_port_list "$PORTS_UDP" || return 1
     [ -n "$PORTS_TCP$PORTS_UDP" ] || return 1
@@ -184,14 +181,6 @@ prepare_options() {
         [ "$dry_rc" -eq 0 ] 2>/dev/null || return 1
         write_compiled_validation_receipt "$COMPILED_ARGV_FILE" || return 1
     fi
-    {
-        printf '%s\n' "$NFQWS2"
-        printf '%s\n' '--daemon' "--pidfile=$PIDFILE"
-        awk 'found { print } $0 == "ARGS" { found=1 }' "$COMPILED_ARGV_FILE"
-    } > "$CMDLINE_FILE.tmp.$$" || return 1
-    chmod 0600 "$CMDLINE_FILE.tmp.$$" 2>/dev/null && mv -f "$CMDLINE_FILE.tmp.$$" "$CMDLINE_FILE" || {
-        rm -f "$CMDLINE_FILE.tmp.$$"; return 1;
-    }
     return 0
 }
 
@@ -396,9 +385,6 @@ fail_start() {
     z2_error_set "$domain" "$code" "$stage" "$message" ||
         z2_error_set LIFECYCLE LIFECYCLE_FAILED START "$message"
     trap '' HUP INT TERM
-    if ! rollback_legacy_migration; then
-        message="$message; exact legacy-rule rollback failed; existing daemon retained"
-    fi
     log_error "$message"
     if [ "$CONTROLLED_TEARDOWN_STARTED" = 1 ] &&
        { [ "$FIREWALL_MUTATED" = 1 ] || [ "$NEW_PID_PUBLISHED" = 1 ] ||
@@ -589,12 +575,6 @@ main() {
     preflight_wifi_only ||
         fail_start "WIFI_ONLY cannot be safely scoped to a verified Wi-Fi interface" \
             CONFIG PREFLIGHT_FAILED START_WIFI 0
-    legacy_migrate_firewall ||
-        fail_start "legacy firewall migration blocked: $LEGACY_MIGRATION_ERROR" \
-            FIREWALL FIREWALL_CLEANUP_FAILED START_LEGACY 0
-    [ "$LEGACY_MIGRATION_VERIFIED" = 1 ] ||
-        fail_start "legacy firewall migration did not reach a verified commit" \
-            FIREWALL POSTCONDITION_FAILED START_LEGACY 0
 
     if normal_health_ok; then
         if [ "$REPLACE" = 0 ]; then

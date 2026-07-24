@@ -90,12 +90,6 @@ if z2_fw_cleanup_is_unambiguous iptables; then
     fail "foreign reference to the stable namespace passed cleanup preflight"
 fi
 
-LEGACY_QNUM=200
-Z2_QUERY_MODE=fail; export Z2_QUERY_MODE
-if legacy_direct_qnum_count iptables >/dev/null 2>&1; then
-    fail "legacy full-list query failure was masked by its counting pipeline"
-fi
-
 grep -Fq 'boot_id=%s' "$ROOT/zapret2/scripts/common.sh" || fail "owner publication is not boot-bound"
 grep -Fq 'return 2' "$ROOT/zapret2/scripts/common.sh" || fail "tri-state query error is absent"
 grep -Fq 'phase_at_least process-clean' "$ROOT/zapret2/scripts/zapret-full-rollback.sh" || fail "rollback resume gates are absent"
