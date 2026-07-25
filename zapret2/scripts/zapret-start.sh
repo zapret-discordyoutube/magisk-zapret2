@@ -369,6 +369,17 @@ firewall_is_clean_after_rollback() {
     return 0
 }
 
+# Answers "did this generation publish IPv6?" without disturbing the teardown
+# decision a caller may already have resolved: the resolver publishes both
+# answers into globals, and only one of them belongs to this question.
+snapshot_ipv6_publication_recorded() {
+    local saved="${CLEANUP_IPV6_OWNERSHIP_EXPECTED:-1}" recorded
+    resolve_ipv6_ownership_expectation 0
+    recorded="$IPV6_PUBLICATION_RECORDED"
+    CLEANUP_IPV6_OWNERSHIP_EXPECTED="$saved"
+    [ "$recorded" = 1 ]
+}
+
 snapshot_owned_state() {
     SNAP_PID=""; SNAP_PID_START=""; SNAP_GENERATION=""; SNAP_PID_VERIFIED=0
     SNAP_IPV4=0; SNAP_IPV6=0; SNAP_RULES=0; SNAP_CHAINS=0; SNAP_ANCHORS=0
@@ -403,8 +414,7 @@ snapshot_owned_state() {
         ip6tables -t mangle -C INPUT -j "$Z2_FW_IN_CHAIN" >/dev/null 2>&1 &&
             SNAP_ANCHORS=$((SNAP_ANCHORS + 1))
     elif { ! command -v ip6tables >/dev/null 2>&1 || ! z2_fw_tool_available ip6tables; } &&
-         { resolve_ipv6_ownership_expectation 0
-           [ "$IPV6_PUBLICATION_RECORDED" = 1 ]; }; then
+         snapshot_ipv6_publication_recorded; then
         # An unqueryable frontend is not a disproof. Recording ipv6_active=0
         # here would publish "no IPv6 rules" as a fact, and a later stop reads
         # this snapshot to decide whether IPv6 needs teardown at all.
