@@ -409,12 +409,10 @@ class ControlDialogStateModelTest {
         val savedState = SavedStateHandle(mapOf("control_full_rollback_in_progress" to true))
         val result = ServiceLifecycleController.FullRollbackResult(
             outcome = ServiceLifecycleController.FullRollbackOutcome.PARTIAL,
-            serviceStatus = ServiceLifecycleController.ServiceStatus(
-                rootGranted = true,
-                processRunning = false,
-                declaredStatus = "stopped",
-                metadataComplete = true,
-            ),
+            // The observation the module really answers with here: the receipt it just published
+            // denies the status script its fast path, so the script reports an owned, degraded,
+            // never fully stopped state. A synthetic stopped status would not exercise this.
+            serviceStatus = ipv6UnverifiedRollbackStatus(),
             report = ServiceLifecycleController.FullRollbackReport(
                 status = ServiceLifecycleController.FullRollbackStatus.PARTIAL,
                 processClean = true,
@@ -427,6 +425,7 @@ class ControlDialogStateModelTest {
                 diagnostic = "the IPv6 mangle table could not be queried",
             ),
         )
+        assertFalse(result.serviceStatus?.fullyStopped == true)
         assertTrue(result.rolledBack)
 
         FullRollbackOperationCoordinator(savedState).persistTerminal(
@@ -475,4 +474,54 @@ class ControlDialogStateModelTest {
         )
         assertEquals(1, resumed)
     }
+
+    /**
+     * `zapret-status.sh --machine-v6` right after a rollback that finished everything but could
+     * not re-read the IPv6 family: the published receipt (`ruleset_verified=0`, `ipv6_active=1`)
+     * denies the stopped fast path, `IPV6_UNKNOWN=1` forces `Z2_OWNED=1`, and the payload is
+     * graded `degraded` with exit 2.
+     */
+    private fun ipv6UnverifiedRollbackStatus(): ServiceLifecycleController.ServiceStatus =
+        ServiceLifecycleController.parseStatusCommandResult(
+            ServiceLifecycleController.CommandResult(
+                success = false,
+                exitCode = 2,
+                stdout = listOf(
+                    "Z2_PROTOCOL=6",
+                    "Z2_STATUS=degraded",
+                    "Z2_OWNED=1",
+                    "Z2_PROCESS=0",
+                    "Z2_ACTIVE=0",
+                    "Z2_PID=",
+                    "Z2_PID_VERIFIED=0",
+                    "Z2_PID_STARTTIME=",
+                    "Z2_OWNER_GENERATION=",
+                    "Z2_OWNER_METADATA_VERIFIED=0",
+                    "Z2_QNUM=200",
+                    "Z2_IPV4=0",
+                    "Z2_IPV6=0",
+                    "Z2_RULES=0",
+                    "Z2_EXPECTED_RULES=0",
+                    "Z2_IPV4_RULES=0",
+                    "Z2_IPV6_RULES=0",
+                    "Z2_RULESET_VERIFIED=0",
+                    "Z2_NFQUEUE=1",
+                    "Z2_QUEUE_BYPASS=1",
+                    "Z2_UPDATE_BLOCKED=0",
+                    "Z2_UNINSTALL_TOMBSTONE=0",
+                    "Z2_LIFECYCLE_STATE=idle",
+                    "Z2_LIFECYCLE_OWNER_KIND=none",
+                    "Z2_CHAINS=0",
+                    "Z2_ANCHORS=0",
+                    "Z2_ERROR_SCHEMA=1",
+                    "Z2_ERROR_STATUS=ERROR",
+                    "Z2_ERROR_DOMAIN=STATUS",
+                    "Z2_ERROR_CODE=STATUS_DEGRADED",
+                    "Z2_ERROR_STAGE=STATUS_QUERY",
+                    "Z2_ERROR_DETAIL=Service state is degraded; " +
+                        "inspect the lifecycle log for full details",
+                    "Z2_COMPLETE=1",
+                ),
+            ),
+        )
 }

@@ -1064,19 +1064,125 @@ class ServiceLifecycleControllerTest {
         assertFalse(legacyAmbiguous.report.satisfiesCompleteContract)
     }
 
+    /**
+     * The payload `zapret-status.sh --machine-v6` really answers with right after a rollback that
+     * finished everything but could not re-read the IPv6 family.
+     *
+     * The rollback publishes an honest receipt (`ruleset_verified=0`, `ipv6_active=1`), which
+     * denies the status script its stopped fast path; the script then cannot query IPv6 either,
+     * so `IPV6_UNKNOWN=1` forces `Z2_OWNED=1` and grades the payload `degraded` (exit 2). This is
+     * the observation the partial verdict must survive, so it is reproduced field for field
+     * instead of being stood in for by a synthetic stopped status.
+     */
+    @Test
+    fun ipv6UnverifiedRollbackObservation_isACompleteDegradedPayloadThatIsNeverFullyStopped() {
+        val status = ipv6UnverifiedRollbackStatus()
+
+        assertTrue(status.metadataComplete)
+        assertEquals("degraded", status.declaredStatus)
+        assertTrue(status.hasOwnedState)
+        assertFalse(status.rulesetVerified)
+        assertFalse(status.processRunning)
+        assertFalse(status.iptablesActive)
+        assertEquals(0, status.nfqueueRulesCount)
+        // The exact reason the previous gate could never be satisfied by this scenario.
+        assertFalse(status.fullyStopped)
+        assertFalse(status.provesLiveRuntime)
+    }
+
     @Test
     fun partialRollbackThatFinishedEverythingIsRolledBackWithAnUnverifiedCleanupReservation() {
         val result = fullRollbackResult(
             outcome = ServiceLifecycleController.FullRollbackOutcome.PARTIAL,
             status = "partial",
             overrides = mapOf("Z2_RB_FIREWALL_CLEAN" to "0"),
+            serviceStatus = ipv6UnverifiedRollbackStatus(),
         )
 
         assertFalse(result.success)
+        // Regression guard: this is the real observation the module produces for this receipt.
+        // Re-adding a `serviceStatus.fullyStopped` requirement to the partial branch fails here.
+        assertFalse(result.serviceStatus?.fullyStopped == true)
         assertTrue(result.rolledBack)
         assertNotEquals(ServiceLifecycleController.FullRollbackOutcome.COMPLETE, result.outcome)
         assertTrue(result.report?.satisfiesRolledBackContract == true)
         assertFalse(result.report?.satisfiesCompleteContract == true)
+    }
+
+    /**
+     * Only one receipt shape may claim "rolled back with a reservation": every completion field
+     * asserted, no legacy ambiguity, and the firewall assertion the module withheld. Enumerating
+     * the whole boolean space proves no other combination can forge that verdict, including
+     * against the real degraded observation that no longer gates it.
+     */
+    @Test
+    fun onlyTheExactUnverifiedFirewallReceiptCanClaimARolledBackPartial() {
+        val booleans = listOf(
+            "Z2_RB_PROCESS_CLEAN",
+            "Z2_RB_FIREWALL_CLEAN",
+            "Z2_RB_ROLLBACK_ARMED",
+            "Z2_RB_HOSTS_PRESERVED",
+            "Z2_RB_REBOOT_REQUIRED",
+            "Z2_RB_USER_DATA_PRESERVED",
+            "Z2_RB_LEGACY_AMBIGUOUS",
+        )
+        val rolledBackShape = mapOf(
+            "Z2_RB_PROCESS_CLEAN" to "1",
+            "Z2_RB_FIREWALL_CLEAN" to "0",
+            "Z2_RB_ROLLBACK_ARMED" to "1",
+            "Z2_RB_HOSTS_PRESERVED" to "1",
+            "Z2_RB_REBOOT_REQUIRED" to "1",
+            "Z2_RB_USER_DATA_PRESERVED" to "1",
+            "Z2_RB_LEGACY_AMBIGUOUS" to "0",
+        )
+        var accepted = 0
+
+        repeat(1 shl booleans.size) { mask ->
+            val overrides = booleans.withIndex().associate { (index, field) ->
+                field to if ((mask shr index) and 1 == 1) "1" else "0"
+            }
+            val result = fullRollbackResult(
+                outcome = ServiceLifecycleController.FullRollbackOutcome.PARTIAL,
+                status = "partial",
+                overrides = overrides,
+                serviceStatus = ipv6UnverifiedRollbackStatus(),
+            )
+            val expected = overrides == rolledBackShape
+            if (expected) accepted += 1
+            assertEquals(overrides.toString(), expected, result.rolledBack)
+        }
+
+        assertEquals(1, accepted)
+    }
+
+    /** The wire status is part of the claim: a receipt that says something else cannot borrow it. */
+    @Test
+    fun rolledBackPartialRequiresTheOutcomeAndTheReceiptToAgree() {
+        ServiceLifecycleController.FullRollbackOutcome.entries
+            .filter { it != ServiceLifecycleController.FullRollbackOutcome.COMPLETE }
+            .forEach { outcome ->
+                val mismatchedOutcome = fullRollbackResult(
+                    outcome = outcome,
+                    status = "partial",
+                    overrides = mapOf("Z2_RB_FIREWALL_CLEAN" to "0"),
+                    serviceStatus = ipv6UnverifiedRollbackStatus(),
+                )
+                assertEquals(
+                    outcome.name,
+                    outcome == ServiceLifecycleController.FullRollbackOutcome.PARTIAL,
+                    mismatchedOutcome.rolledBack,
+                )
+            }
+
+        listOf("complete", "blocked", "error").forEach { wireStatus ->
+            val mismatchedReceipt = fullRollbackResult(
+                outcome = ServiceLifecycleController.FullRollbackOutcome.PARTIAL,
+                status = wireStatus,
+                overrides = mapOf("Z2_RB_FIREWALL_CLEAN" to "0"),
+                serviceStatus = ipv6UnverifiedRollbackStatus(),
+            )
+            assertFalse(wireStatus, mismatchedReceipt.rolledBack)
+        }
     }
 
     @Test
@@ -1098,6 +1204,7 @@ class ServiceLifecycleControllerTest {
                 "Z2_RB_FIREWALL_CLEAN" to "0",
                 "Z2_RB_HOSTS_PRESERVED" to "0",
             ),
+            serviceStatus = ipv6UnverifiedRollbackStatus(),
         )
         val processRetained = fullRollbackResult(
             outcome = ServiceLifecycleController.FullRollbackOutcome.PARTIAL,
@@ -1106,13 +1213,17 @@ class ServiceLifecycleControllerTest {
                 "Z2_RB_FIREWALL_CLEAN" to "0",
                 "Z2_RB_PROCESS_CLEAN" to "0",
             ),
+            serviceStatus = ipv6UnverifiedRollbackStatus(),
         )
         // Every fact asserted, including a verified-clean firewall, yet still partial: the run was
         // interrupted before it could commit, so the recovery journal is what survived.
         val interruptedBeforeCommit = fullRollbackResult(
             outcome = ServiceLifecycleController.FullRollbackOutcome.PARTIAL,
             status = "partial",
+            serviceStatus = ipv6UnverifiedRollbackStatus(),
         )
+        // A receipt cannot be believed against an observation that disproves it: the module says
+        // the process is clean while the status script watches a verified nfqws2 serve live rules.
         val serviceStillUp = fullRollbackResult(
             outcome = ServiceLifecycleController.FullRollbackOutcome.PARTIAL,
             status = "partial",
@@ -1129,6 +1240,30 @@ class ServiceLifecycleControllerTest {
             outcome = ServiceLifecycleController.FullRollbackOutcome.BLOCKED,
             status = "blocked",
             overrides = mapOf("Z2_RB_FIREWALL_CLEAN" to "0"),
+            serviceStatus = ipv6UnverifiedRollbackStatus(),
+        )
+
+        // Same contradiction from the other direction: the observer counted live module-owned
+        // rules, so the receipt's teardown claim cannot be taken at face value either.
+        val residualRulesObserved = fullRollbackResult(
+            outcome = ServiceLifecycleController.FullRollbackOutcome.PARTIAL,
+            status = "partial",
+            overrides = mapOf("Z2_RB_FIREWALL_CLEAN" to "0"),
+            serviceStatus = ServiceLifecycleController.parseStatusCommandResult(
+                ServiceLifecycleController.CommandResult(
+                    success = false,
+                    stdout = ipv6UnverifiedRollbackStatusLines().map { line ->
+                        when {
+                            line.startsWith("Z2_IPV4=") -> "Z2_IPV4=1"
+                            line.startsWith("Z2_RULES=") -> "Z2_RULES=2"
+                            line.startsWith("Z2_EXPECTED_RULES=") -> "Z2_EXPECTED_RULES=2"
+                            line.startsWith("Z2_IPV4_RULES=") -> "Z2_IPV4_RULES=2"
+                            else -> line
+                        }
+                    },
+                    exitCode = 2,
+                ),
+            ),
         )
 
         listOf(
@@ -1136,10 +1271,12 @@ class ServiceLifecycleControllerTest {
             "processRetained" to processRetained,
             "interruptedBeforeCommit" to interruptedBeforeCommit,
             "serviceStillUp" to serviceStillUp,
+            "residualRulesObserved" to residualRulesObserved,
             "blockedBeforeAnything" to blockedBeforeAnything,
         ).forEach { (name, result) ->
             assertFalse(name, result.rolledBack)
         }
+        assertTrue(residualRulesObserved.serviceStatus?.metadataComplete == true)
     }
 
     @Test
@@ -1173,6 +1310,61 @@ class ServiceLifecycleControllerTest {
             report = parsed.report,
         )
     }
+
+    /**
+     * The status observation the app really takes right after an IPv6-unverified full rollback.
+     *
+     * `zapret-full-rollback.sh` publishes `ruleset_verified=0` with `ipv6_active=1` because it
+     * refuses to assert "verified clean" about a family it could not re-read. `zapret-status.sh`
+     * therefore fails its stopped fast path, sets `IPV6_UNKNOWN=1`, which forces `Z2_OWNED=1`, and
+     * grades the payload `degraded` (exit 2) with the `STATUS_DEGRADED` envelope. The lifecycle
+     * lock is already released — the app takes this observation outside any lease — so the
+     * lifecycle fields read `idle`/`none`, and the queue capabilities survive from the receipt.
+     */
+    private fun ipv6UnverifiedRollbackStatusLines(): List<String> = listOf(
+        "Z2_PROTOCOL=6",
+        "Z2_STATUS=degraded",
+        "Z2_OWNED=1",
+        "Z2_PROCESS=0",
+        "Z2_ACTIVE=0",
+        "Z2_PID=",
+        "Z2_PID_VERIFIED=0",
+        "Z2_PID_STARTTIME=",
+        "Z2_OWNER_GENERATION=",
+        "Z2_OWNER_METADATA_VERIFIED=0",
+        "Z2_QNUM=200",
+        "Z2_IPV4=0",
+        "Z2_IPV6=0",
+        "Z2_RULES=0",
+        "Z2_EXPECTED_RULES=0",
+        "Z2_IPV4_RULES=0",
+        "Z2_IPV6_RULES=0",
+        "Z2_RULESET_VERIFIED=0",
+        "Z2_NFQUEUE=1",
+        "Z2_QUEUE_BYPASS=1",
+        "Z2_UPDATE_BLOCKED=0",
+        "Z2_UNINSTALL_TOMBSTONE=0",
+        "Z2_LIFECYCLE_STATE=idle",
+        "Z2_LIFECYCLE_OWNER_KIND=none",
+        "Z2_CHAINS=0",
+        "Z2_ANCHORS=0",
+        "Z2_ERROR_SCHEMA=1",
+        "Z2_ERROR_STATUS=ERROR",
+        "Z2_ERROR_DOMAIN=STATUS",
+        "Z2_ERROR_CODE=STATUS_DEGRADED",
+        "Z2_ERROR_STAGE=STATUS_QUERY",
+        "Z2_ERROR_DETAIL=Service state is degraded; inspect the lifecycle log for full details",
+        "Z2_COMPLETE=1",
+    )
+
+    private fun ipv6UnverifiedRollbackStatus(): ServiceLifecycleController.ServiceStatus =
+        ServiceLifecycleController.parseStatusCommandResult(
+            ServiceLifecycleController.CommandResult(
+                success = false,
+                stdout = ipv6UnverifiedRollbackStatusLines(),
+                exitCode = 2,
+            ),
+        )
 
     private fun fullRollbackLines(
         status: String = "complete",

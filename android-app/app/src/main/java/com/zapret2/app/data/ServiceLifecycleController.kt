@@ -170,6 +170,25 @@ object ServiceLifecycleController {
                     ipv4RulesCount + ipv6RulesCount == expectedRulesCount &&
                     (ipv6Active || ipv6RulesCount == 0)
 
+        /**
+         * Observed evidence that module-owned runtime state is still live.
+         *
+         * This is deliberately narrow and asymmetric to [fullyStopped]: it is what an observation
+         * can *disprove*, not what it can confirm. A live verified process, an active rule set,
+         * counted NFQUEUE rules or a self-declared `ok` cannot coexist with a teardown receipt; a
+         * `degraded` payload can, because the module answers `degraded` whenever it merely failed
+         * to re-read a family it had already torn down.
+         */
+        val provesLiveRuntime: Boolean
+            get() =
+                rootGranted &&
+                    (
+                        processRunning ||
+                            iptablesActive ||
+                            nfqueueRulesCount > 0 ||
+                            declaredStatus == "ok"
+                        )
+
         val fullyStopped: Boolean
             get() =
                 rootGranted &&
@@ -283,19 +302,35 @@ object ServiceLifecycleController {
         val rebootRequired: Boolean get() = report?.rebootRequired == true
 
         /**
-         * The user-visible verdict: the rollback happened. The module reports partial when it
-         * finished everything it owns — module disabled, hosts preserved, recovery journal
-         * retired, metadata committed — but could not re-read one firewall family it had already
-         * torn down; that receipt withholds [FullRollbackReport.firewallClean] and nothing else,
-         * and the reboot it already demands removes anything that survived. Nothing is left for
-         * the user to retry, so it must be reported as done with the unverified step named
-         * beside it, never as a failure. The observed status still has to
-         * agree that the service is down, exactly as it does for [success].
+         * The user-visible verdict: the rollback happened.
+         *
+         * [FullRollbackOutcome.COMPLETE] keeps its full proof, observed status included: the
+         * controller only mints that outcome after [ServiceStatus.fullyStopped] held.
+         *
+         * The module reports `partial` when it finished everything it owns — module disabled,
+         * hosts preserved, recovery journal retired, metadata committed — but could not re-read
+         * one firewall family it had already torn down; that receipt withholds
+         * [FullRollbackReport.firewallClean] and nothing else, and the reboot it already demands
+         * removes anything that survived. Nothing is left for the user to retry, so it must be
+         * reported as done with the unverified step named beside it, never as a failure.
+         *
+         * That branch therefore rests on the receipt's own fields rather than on a second
+         * observation, because the very assertion the receipt withholds is what the module also
+         * publishes into its status snapshot (`ruleset_verified=0`, `ipv6_active=1`). The status
+         * script consequently refuses its fast path, cannot query that family either, reports
+         * `Z2_OWNED=1` and grades itself `degraded` — so [ServiceStatus.fullyStopped] is false in
+         * every run that reaches here. Requiring it would reject exactly the outcome this branch
+         * exists for; the receipt's own [FullRollbackReport.processClean] is what proves the
+         * service is down, and `degraded` here means only "one family was not re-read".
+         *
+         * The observation is still consulted for what it can disprove: a status that
+         * [proves live runtime state][ServiceStatus.provesLiveRuntime] contradicts the same
+         * receipt's process and teardown claims, and a contradicted receipt proves nothing.
          */
         val rolledBack: Boolean
             get() = success || (
                 outcome == FullRollbackOutcome.PARTIAL &&
-                    serviceStatus?.fullyStopped == true &&
+                    serviceStatus?.provesLiveRuntime != true &&
                     report?.let {
                         it.status == FullRollbackStatus.PARTIAL &&
                             it.satisfiesRolledBackContract &&
