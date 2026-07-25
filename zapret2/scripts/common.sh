@@ -2549,10 +2549,11 @@ cleanup_owned_firewall() {
     result=$?
     [ "$result" = 0 ] || rc=1
     if command -v ip6tables >/dev/null 2>&1; then
-        # Follow the preflight's decision. It already spent the probe budget,
-        # and in audited mode it is also the only thing that could have
-        # captured this family's baseline.
-        if [ "${FIREWALL_IPV6_UNQUERYABLE:-0}" != 1 ] &&
+        # An audited teardown can only remove what the preflight captured, so a
+        # family the preflight could not read is not one this mode can touch.
+        # An owned teardown captures its own baseline, so it only needs the
+        # frontend to answer now.
+        if { [ "$baseline_mode" != audited ] || [ "${FIREWALL_IPV6_UNQUERYABLE:-0}" != 1 ]; } &&
            { z2_fw_tool_available ip6tables || ! firewall_family_persistently_unavailable ip6tables; }; then
             z2_fw_cleanup_family ip6tables "$baseline_mode" ||
                 { FIREWALL_CLEANUP_PREFLIGHT_ERROR="IPv6 owned ruleset could not be removed"; rc=1; }
