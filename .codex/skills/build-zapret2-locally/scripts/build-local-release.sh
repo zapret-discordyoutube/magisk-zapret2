@@ -241,7 +241,9 @@ MODULE_SOURCE="$WORK_ROOT/module-source"
 APP_SOURCE="$WORK_ROOT/app-source"
 mkdir -p -- "$MODULE_SOURCE" "$APP_SOURCE"
 if [[ "$channel_arg" == stable ]]; then
-    git -C "$REPO" archive "$SOURCE_SHA" | tar -x -C "$MODULE_SOURCE"
+    # -p keeps the commit's canonical modes: this process runs under umask 077,
+    # and shell tests assert packaged-executable bits on the snapshot itself.
+    git -C "$REPO" archive "$SOURCE_SHA" | tar -xp -C "$MODULE_SOURCE"
 else
     while IFS= read -r -d '' source_path; do
         case "$source_path" in
