@@ -296,8 +296,12 @@ set -e
 # Leaving it behind makes the next observation replay those facts — an owned,
 # degraded service — over a module that is disabled and stopped, which the app
 # reads as a failed rollback.
-[ ! -e "$STATE/status.snapshot" ] && [ ! -L "$STATE/status.snapshot" ] ||
+grep -Fqx 'status=stopped' "$STATE/status.snapshot" ||
     fail "completed rollback left the status snapshot of the generation it removed"
+grep -Fqx 'ipv6_active=0' "$STATE/status.snapshot" ||
+    fail "completed rollback kept an IPv6-active claim from the generation it removed"
+grep -Fqx 'ruleset_verified=1' "$STATE/status.snapshot" ||
+    fail "completed rollback did not record that it verified the teardown"
 
 # An IPv6 frontend that exists but cannot answer must never strand the journal:
 # the artifact it would leave behind fences start, stop, uninstall and purge
@@ -316,6 +320,23 @@ exit 42
 EOF
     chmod 0755 "$MOCK/ip6tables"
 }
+
+# A device with no ip6tables frontend at all: the receipt the rollback leaves
+# behind must let a repeat run reach the same verdict instead of degrading,
+# because nothing about the device changed between the two runs.
+rm -f "$STATE/full-rollback.transaction" "$STATE/full-rollback.meta" \
+    "$STATE/nfqws2.pid" "$STATE/owner.meta" "$STATE/runtime.owner" "$MOD/disable"
+mv "$MOCK/ip6tables" "$CASE/ip6tables.hidden"
+PATH="$MOCK:$PATH" STATE_DIR="$STATE" Z2_MOCK_LOG="$LOG" \
+    sh "$MOD/zapret2/scripts/zapret-full-rollback.sh" --machine > "$OUT.noipv6.first"
+rm -f "$STATE/full-rollback.meta"
+PATH="$MOCK:$PATH" STATE_DIR="$STATE" Z2_MOCK_LOG="$LOG" \
+    sh "$MOD/zapret2/scripts/zapret-full-rollback.sh" --machine > "$OUT.noipv6.second"
+first_verdict=$(grep -E '^Z2_RB_(STATUS|FIREWALL_CLEAN)=' "$OUT.noipv6.first")
+second_verdict=$(grep -E '^Z2_RB_(STATUS|FIREWALL_CLEAN)=' "$OUT.noipv6.second")
+[ "$first_verdict" = "$second_verdict" ] ||
+    fail "repeating an unchanged rollback changed its verdict: [$first_verdict] vs [$second_verdict]"
+mv "$CASE/ip6tables.hidden" "$MOCK/ip6tables"
 
 rb_ipv6_case
 set +e

@@ -369,13 +369,36 @@ process_clean() { scan_exact_owned_nfqws >/dev/null 2>&1; [ -z "$OWNED_SCAN_PIDS
 
 cleanup_diagnostics() {
     local path
-    # The committed status snapshot describes the generation this rollback
-    # just dismantled. Leaving it behind makes the next observation replay
-    # those facts — an owned, degraded service — over a module that is
-    # disabled and stopped, which reads as a failed rollback.
-    for path in "$CMDLINE_FILE" "$STARTUP_LOG" "$ERROR_LOG" "$DEBUG_LOG" "$STATUS_SNAPSHOT"; do
+    for path in "$CMDLINE_FILE" "$STARTUP_LOG" "$ERROR_LOG" "$DEBUG_LOG"; do
         if state_file_is_secure "$path"; then rm -f "$path" 2>/dev/null || true; fi
     done
+}
+
+# The committed snapshot describes the generation this rollback dismantled.
+# Leaving it makes the next observation replay those facts — an owned,
+# degraded service — over a module that is disabled and stopped. Deleting it
+# is no better: absence reads as "verified stopped", which would claim the
+# very proof a rollback that skipped an unqueryable family does not have. So
+# publish what this rollback actually established.
+write_rollback_status() {
+    restore_status_facts
+    STATUS_RULES_OK=0; STATUS_RULES_FAIL=0; STATUS_RULES_TOTAL=0
+    STATUS_ERRORS=""; STATUS_OWN_PID=""; STATUS_OWN_PID_STARTTIME=""
+    STATUS_OWN_ARGV_SHA256=""; STATUS_OWNER_GENERATION=""
+    STATUS_PID_VERIFIED=0; STATUS_OWNER_METADATA_VERIFIED=0
+    STATUS_RULES_EXPECTED=0; STATUS_QNUM="${STOP_QNUM:-${STATUS_QNUM:-}}"
+    STATUS_IPV4_ACTIVE=0; STATUS_CHAINS=0; STATUS_ANCHORS=0
+    STATUS_IPV4_RULES=0; STATUS_IPV6_RULES=0; STATUS_FALLBACK_MODE=0
+    STATUS_ERROR_STATUS=OK; STATUS_ERROR_DOMAIN=NONE; STATUS_ERROR_CODE=NONE
+    STATUS_ERROR_STAGE=NONE; STATUS_ERROR_DETAIL=""
+    if [ "${RB_IPV6_UNVERIFIED:-0}" = 1 ]; then
+        STATUS_RULESET_VERIFIED=0; STATUS_IPV6_ACTIVE=1
+        STATUS_DIAGNOSTICS="full rollback finished; the IPv6 ruleset stayed unverified until the reboot"
+    else
+        STATUS_RULESET_VERIFIED=1; STATUS_IPV6_ACTIVE=0
+        STATUS_DIAGNOSTICS="full rollback complete; reboot required"
+    fi
+    write_iptables_status stopped
 }
 
 # Install signal handling before usage validation, lock acquisition/waiting, or
@@ -487,6 +510,7 @@ else
 fi
 durability_sync || failed "hosts preservation phase could not be synchronized; recovery journal retained"
 cleanup_diagnostics
+write_rollback_status || failed "cleanup is verified but the rollback status receipt could not be committed"
 write_meta || failed "cleanup is verified but rollback metadata commit failed"
 durability_sync || failed "rollback metadata could not be synchronized; recovery journal retained"
 RB_COMMIT_TOKEN="$RB_TOKEN"
