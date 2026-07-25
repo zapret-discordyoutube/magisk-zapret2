@@ -172,6 +172,8 @@ prepare_options() {
         log_debug "Reusing generation-bound nfqws2 preflight receipt"
     else
         rm -f "$capture" "$rcfile" 2>/dev/null
+        { [ ! -e "$capture" ] && [ ! -L "$capture" ] &&
+          [ ! -e "$rcfile" ] && [ ! -L "$rcfile" ]; } || return 1
         umask 077
         { run_compiled_artifact "$COMPILED_ARGV_FILE" dry-run >/dev/null; printf '%s\n' "$?" > "$rcfile"; } 2>&1 |
             tail -c 32768 > "$capture"

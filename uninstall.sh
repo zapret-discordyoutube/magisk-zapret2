@@ -507,7 +507,7 @@ manager_remove_all_owned_state() {
                 return 1
                 ;;
         esac
-        report_warning "Lifecycle lock is stale; continuing root-manager removal"
+        report_warning "No live lifecycle owner holds the module ($LIFECYCLE_OBSERVED_STATE); continuing root-manager removal"
     fi
     manager_remove_locked_state
     rc=$?
@@ -549,10 +549,17 @@ manager_remove_locked_state() {
             report_error "Unable to access $tool during root-manager removal"
             return 1
         fi
-        purge_zapret2_namespace "$tool" || {
-            report_error "Unable to remove the strict Zapret2 namespace from $tool"
-            return 1
-        }
+        purge_zapret2_namespace "$tool" && continue
+        # Removal is committed and a reboot follows it, which destroys every
+        # netfilter object anyway. Refusing here would strand the private
+        # state tree forever on a device whose IPv6 mangle table cannot be
+        # queried, so report the residue instead of blocking removal on it.
+        if [ "$tool" = ip6tables ] && ! z2_fw_tool_available ip6tables; then
+            report_warning "IPv6 mangle backend is unavailable; any IPv6 rules are left to the pending reboot"
+            continue
+        fi
+        report_error "Unable to remove the strict Zapret2 namespace from $tool"
+        return 1
     done
 
     if [ -e "$STATE_DIR" ] || [ -L "$STATE_DIR" ]; then

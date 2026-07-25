@@ -509,9 +509,15 @@ retire_obsolete_state_artifacts() {
 # no lifecycle lock, safe.
 retire_dead_scratch_files() {
     local path base owner restore_noglob=0
-    [ -d "$Z2_STATE_TMP" ] && [ ! -L "$Z2_STATE_TMP" ] || return 0
     case "$-" in *f*) restore_noglob=1; set +f;; esac
-    set -- "$Z2_STATE_TMP"/*
+    # Atomic publications stage through "<target>.tmp.<pid>" in the state root,
+    # so a process killed between the redirect and the rename leaves residue
+    # there too — and an unknown child fences uninstall.
+    if [ -d "$Z2_STATE_TMP" ] && [ ! -L "$Z2_STATE_TMP" ]; then
+        set -- "$Z2_STATE_TMP"/* "$STATE_DIR"/*.tmp.*
+    else
+        set -- "$STATE_DIR"/*.tmp.*
+    fi
     [ "$restore_noglob" = 1 ] && set -f
     for path in "$@"; do
         { [ -e "$path" ] || [ -L "$path" ]; } || continue
@@ -2449,13 +2455,17 @@ cleanup_owned_firewall() {
     result=$?
     [ "$result" = 0 ] || rc=1
     if command -v ip6tables >/dev/null 2>&1; then
-        # A present frontend whose mangle table cannot be queried proves
-        # nothing about IPv6 ownership. Skipping it here would let callers
-        # treat an unproven family as clean, so fail instead.
         if z2_fw_tool_available ip6tables; then
             z2_fw_cleanup_family ip6tables "$baseline_mode" || rc=1
+        elif [ "${CLEANUP_IPV6_OWNERSHIP_EXPECTED:-1}" = 0 ]; then
+            # Our own committed record says this generation never published
+            # IPv6 rules, so an unqueryable frontend cannot be hiding any.
+            :
         else
-            FIREWALL_CLEANUP_PREFLIGHT_ERROR="IPv6 mangle backend became unavailable during cleanup"
+            # Otherwise a present frontend whose mangle table cannot be queried
+            # proves nothing: treating an unproven family as clean is exactly
+            # the failure this cleanup exists to prevent.
+            FIREWALL_CLEANUP_PREFLIGHT_ERROR="IPv6 mangle backend is unavailable and IPv6 ownership cannot be disproved"
             rc=1
         fi
     fi
@@ -2632,7 +2642,32 @@ STATUS_FILE_ERROR_CODE=NONE
 STATUS_FILE_ERROR_STAGE=NONE
 STATUS_FILE_ERROR_DETAIL=""
 
+# A rejected snapshot must leave nothing behind: consumers read STATUS_FILE_*
+# whether or not they check the return code, so partially parsed facts from a
+# file this function refused would be indistinguishable from accepted ones.
 read_iptables_status() {
+    read_iptables_status_parse "$@" && return 0
+    reset_status_file_facts
+    return 1
+}
+
+reset_status_file_facts() {
+    STATUS_FILE_STATUS=""; STATUS_FILE_QNUM=""; STATUS_FILE_RULES_TOTAL=0
+    STATUS_FILE_NFQUEUE_SUPPORTED=0; STATUS_FILE_QUEUE_BYPASS_SUPPORTED=0
+    STATUS_FILE_CONNBYTES_SUPPORTED=0; STATUS_FILE_MULTIPORT_SUPPORTED=0
+    STATUS_FILE_MARK_SUPPORTED=0; STATUS_FILE_IPV4_ACTIVE=0; STATUS_FILE_IPV6_ACTIVE=0
+    STATUS_FILE_IPV4_RULES=0; STATUS_FILE_IPV6_RULES=0
+    STATUS_FILE_CHAINS=0; STATUS_FILE_ANCHORS=0; STATUS_FILE_RULESET_VERIFIED=0
+    STATUS_FILE_OWNER_METADATA_VERIFIED=0; STATUS_FILE_RULES_EXPECTED=0; STATUS_FILE_DIAGNOSTICS=""
+    STATUS_FILE_OWN_PID=""; STATUS_FILE_OWN_PID_STARTTIME=""
+    STATUS_FILE_OWN_ARGV_SHA256=""; STATUS_FILE_OWNER_GENERATION=""
+    STATUS_FILE_ERROR_SCHEMA=0; STATUS_FILE_ERROR_STATUS=OK
+    STATUS_FILE_ERROR_DOMAIN=NONE; STATUS_FILE_ERROR_CODE=NONE
+    STATUS_FILE_ERROR_STAGE=NONE; STATUS_FILE_ERROR_DETAIL=""
+    STATUS_FILE_BOOT_ID=""
+}
+
+read_iptables_status_parse() {
     local path="${1:-$IPTABLES_STATUS}"
     STATUS_FILE_STATUS=""; STATUS_FILE_QNUM=""; STATUS_FILE_RULES_TOTAL=0
     STATUS_FILE_NFQUEUE_SUPPORTED=0; STATUS_FILE_QUEUE_BYPASS_SUPPORTED=0

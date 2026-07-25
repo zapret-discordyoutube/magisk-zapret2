@@ -500,6 +500,10 @@ collect_capture_ports() {
 
 compile_preset_artifact() {
     local preset_file="$1" logical_name="$2" artifact="$3" tmp source_sha runtime_sha size
+    # Retire any previous artifact's metadata proof first: an early failure
+    # here must not leave a stale proof that lets a later run_compiled_artifact
+    # skip its own authentication.
+    COMPILED_METADATA_FOR=""
     validate_preset_file "$preset_file" "$logical_name" || return 1
     collect_capture_ports "$preset_file" || return 1
     source_sha="$(sha256sum "$preset_file" 2>/dev/null)" || return 1

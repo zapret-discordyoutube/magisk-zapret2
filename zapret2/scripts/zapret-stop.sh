@@ -103,7 +103,16 @@ main() {
         STOP_RUNTIME_OWNED=1
     fi
     STOP_QNUM="${STATUS_FILE_QNUM:-}"
-    [ "$OWNER_STATE_AVAILABLE" != 1 ] || STOP_QNUM="$OWNER_STATE_QNUM"
+    # The owner record, else the committed snapshot, decides whether this
+    # generation ever published IPv6 rules; without either, assume it did.
+    if [ "$OWNER_STATE_AVAILABLE" = 1 ]; then
+        STOP_QNUM="$OWNER_STATE_QNUM"
+        CLEANUP_IPV6_OWNERSHIP_EXPECTED="${OWNER_STATE_IPV6_ACTIVE:-1}"
+    elif [ -n "${STATUS_FILE_STATUS:-}" ]; then
+        CLEANUP_IPV6_OWNERSHIP_EXPECTED="${STATUS_FILE_IPV6_ACTIVE:-1}"
+    else
+        CLEANUP_IPV6_OWNERSHIP_EXPECTED=1
+    fi
     if [ -z "$STOP_QNUM" ]; then
         # Neither the committed snapshot nor an owner record carries the queue
         # number (first stop on a fresh boot); fall back to the configured one.
@@ -146,11 +155,12 @@ main() {
         STOP_ERROR_DOMAIN=FIREWALL; STOP_ERROR_CODE=FIREWALL_CLEANUP_FAILED; STOP_ERROR_STAGE=STOP_FIREWALL
         if [ -n "$errors" ]; then errors="$errors; owned firewall cleanup failed"
         else errors="owned firewall cleanup failed: ${FIREWALL_CLEANUP_PREFLIGHT_ERROR:-ambiguous ownership}; daemon teardown was not attempted"; fi
-    elif ! command -v ip6tables >/dev/null 2>&1 && [ "${STATUS_FILE_IPV6_ACTIVE:-0}" = 1 ]; then
+    elif ! command -v ip6tables >/dev/null 2>&1 && [ "$CLEANUP_IPV6_OWNERSHIP_EXPECTED" = 1 ]; then
         # cleanup_owned_firewall proves per-family absence as the postcondition
         # of each family it touches, and fails when a present frontend cannot
-        # be queried. The one fact left is a device that lost its ip6tables
-        # frontend entirely while the last commit recorded IPv6 rules.
+        # be queried while IPv6 ownership is expected. The one fact left is a
+        # device that lost its ip6tables frontend entirely while this
+        # generation did publish IPv6 rules.
         rc=1
         STOP_ERROR_DOMAIN=FIREWALL; STOP_ERROR_CODE=POSTCONDITION_FAILED; STOP_ERROR_STAGE=STOP_FIREWALL
         if [ -n "$errors" ]; then errors="$errors; owned firewall artifacts remain"

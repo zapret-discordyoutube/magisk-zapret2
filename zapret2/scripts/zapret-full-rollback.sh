@@ -352,8 +352,15 @@ preserve_hosts() {
 firewall_clean() {
     command -v iptables >/dev/null 2>&1 || return 1
     owned_family_absent iptables || return 1
-    if command -v ip6tables >/dev/null 2>&1; then owned_family_absent ip6tables || return 1
-    elif [ "${STATUS_FILE_IPV6_ACTIVE:-0}" = 1 ]; then return 1; fi
+    # An IPv6 frontend that cannot be queried is only acceptable when this
+    # generation is known never to have published IPv6 rules.
+    if command -v ip6tables >/dev/null 2>&1; then
+        owned_family_absent ip6tables ||
+            { [ "${CLEANUP_IPV6_OWNERSHIP_EXPECTED:-1}" = 0 ] && ! z2_fw_tool_available ip6tables; } ||
+            return 1
+    elif [ "${CLEANUP_IPV6_OWNERSHIP_EXPECTED:-1}" = 1 ]; then
+        return 1
+    fi
     return 0
 }
 
@@ -397,7 +404,12 @@ preflight_runtime_config || blocked "runtime.ini is missing, unsafe, or ambiguou
 preflight_hosts || blocked "hosts overlay or existing backup is unsafe or conflicts"
 load_effective_core_config_readonly >/dev/null 2>&1 || blocked "runtime.ini core values are invalid"
 restore_status_facts
-STOP_QNUM="${STATUS_FILE_QNUM:-${QNUM:-}}"; if read_owner_state >/dev/null 2>&1; then STOP_QNUM="$OWNER_STATE_QNUM"; fi
+STOP_QNUM="${STATUS_FILE_QNUM:-${QNUM:-}}"
+CLEANUP_IPV6_OWNERSHIP_EXPECTED="${STATUS_FILE_IPV6_ACTIVE:-1}"
+if read_owner_state >/dev/null 2>&1; then
+    STOP_QNUM="$OWNER_STATE_QNUM"
+    CLEANUP_IPV6_OWNERSHIP_EXPECTED="${OWNER_STATE_IPV6_ACTIVE:-1}"
+fi
 
 arm_runtime_config || failed "cannot atomically disable autostart in runtime.ini"
 arm_disable || failed "cannot publish exact module disable fence"

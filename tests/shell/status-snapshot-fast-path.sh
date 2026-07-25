@@ -81,4 +81,27 @@ grep -Fxq 'Z2_STATUS=degraded' "$OUTPUT" ||
 grep -Fxq 'Z2_PID_VERIFIED=0' "$OUTPUT" ||
     fail "mismatched command digest retained verified process state"
 
+# A snapshot describes processes and netfilter objects that a reboot destroys,
+# so one stamped with another boot must be rejected whole: no facts from it may
+# reach the projection, not even the capability flags or the queue number.
+write_snapshot "$NFQWS_ARGV_SHA"
+sed 's/^boot_id=.*/boot_id=11111111-1111-1111-1111-111111111111/' \
+    "$STATE/status.snapshot" > "$STATE/status.snapshot.foreign"
+mv "$STATE/status.snapshot.foreign" "$STATE/status.snapshot"
+chmod 0600 "$STATE/status.snapshot"
+run_status
+grep -Fxq 'Z2_STATUS=ok' "$OUTPUT" && fail "a snapshot from another boot was accepted"
+grep -Fxq 'Z2_QNUM=200' "$OUTPUT" || fail "queue number leaked from the rejected snapshot"
+grep -Fxq 'Z2_EXPECTED_RULES=0' "$OUTPUT" ||
+    fail "expected rule count leaked from the rejected snapshot"
+grep -Fxq 'Z2_NFQUEUE=0' "$OUTPUT" ||
+    fail "capability facts leaked from the rejected snapshot"
+
+# The pre-2.2.0 format carries no boot binding at all and is equally stale.
+grep -v '^boot_id=' "$STATE/status.snapshot" > "$STATE/status.snapshot.legacy"
+mv "$STATE/status.snapshot.legacy" "$STATE/status.snapshot"
+chmod 0600 "$STATE/status.snapshot"
+run_status
+grep -Fxq 'Z2_STATUS=ok' "$OUTPUT" && fail "an unbound legacy snapshot was accepted"
+
 echo "Status snapshot fast-path tests passed"
