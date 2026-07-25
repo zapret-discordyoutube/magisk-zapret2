@@ -186,8 +186,16 @@ commit_purge() {
     uninstall_output="$(MODPATH="$MODDIR" /system/bin/sh "$UNINSTALL_SCRIPT" 2>&1)" || uninstall_rc=$?
     if [ "$uninstall_rc" -ne 0 ]; then
         # The fence is already published, so this is not a "nothing happened"
-        # rejection: the module is retired at the next boot either way.
-        purge_report partial 0 0 0 0 0 1 "verified service/firewall uninstall failed: $uninstall_output"
+        # rejection: the module is retired at the next boot either way. And it
+        # is not a "nothing was removed" one either — uninstall.sh's
+        # manager-remove branch clears the external workspaces and the entire
+        # private state tree before its last steps can still fail, so these
+        # facts are measured here for the same reason they are measured below.
+        { [ -e "$Z2_PURGE_CANONICAL_MODULE_DIR" ] || [ -L "$Z2_PURGE_CANONICAL_MODULE_DIR" ]; } || module_removed=1
+        { [ -e "$Z2_PURGE_CANONICAL_STATE_DIR" ] || [ -L "$Z2_PURGE_CANONICAL_STATE_DIR" ]; } || state_removed=1
+        z2_purge_external_workspaces_absent || external_removed=0
+        purge_report partial 0 0 "$module_removed" "$state_removed" "$external_removed" 1 \
+            "verified service/firewall uninstall failed: $uninstall_output"
         return 1
     fi
 

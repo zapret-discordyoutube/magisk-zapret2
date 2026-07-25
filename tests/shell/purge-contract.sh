@@ -102,9 +102,11 @@ eval "case \"\$ipv6_warning\" in $ipv6_pattern) ipv6_matched=1 ;; esac"
 # A partial receipt reports what survived. Denying a removal that did happen
 # is as wrong as claiming one that did not: an unremovable external workspace
 # must not report the module directory and private state as still present.
-if grep -Eq 'purge_report partial 1 [01] 0 0 0 1' "$PURGE"; then
+if grep -Eq 'purge_report partial [01] [01] 0 0 0 1' "$PURGE"; then
     fail "a partial purge receipt hardcodes removal facts it did not measure"
 fi
+grep -Fq 'z2_purge_external_workspaces_absent' "$PURGE" ||
+    fail "a partial receipt no longer measures external workspaces it did not remove itself"
 grep -Fq 'purge_report partial 1 0 "$module_removed" "$state_removed" "$external_removed" 1' "$PURGE" ||
     fail "the unverified-firewall partial receipt no longer reports measured removal facts"
 grep -Fq 'purge_report partial 1 1 "$module_removed" "$state_removed" "$external_removed" 1' "$PURGE" ||

@@ -163,6 +163,24 @@ z2_purge_remove_external_workspaces() {
     return "$rc"
 }
 
+# Reads the same three patterns z2_purge_remove_external_workspaces removes, so
+# a receipt can report what is actually left rather than what a return code
+# said. Used where the removal ran in another process — uninstall.sh clears
+# these on its manager-remove branch — and its outcome is not ours to assume.
+z2_purge_external_workspaces_absent() {
+    local path rc=0 restore_noglob=0
+    case "$-" in *f*) restore_noglob=1; set +f ;; esac
+    set -- \
+        "$Z2_PURGE_STORAGE_DIR"/zapret2-install.* \
+        "$Z2_PURGE_STORAGE_DIR"/zapret2-recovery.* \
+        "$Z2_PURGE_MODULES_DIR"/.zapret2-recovery-*
+    [ "$restore_noglob" = 1 ] && set -f
+    for path in "$@"; do
+        if [ -e "$path" ] || [ -L "$path" ]; then rc=1; fi
+    done
+    return "$rc"
+}
+
 z2_purge_remove_legacy_files() {
     local path rc=0 restore_noglob=0
     case "$-" in *f*) restore_noglob=1; set +f ;; esac
