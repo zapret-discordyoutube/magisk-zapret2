@@ -144,6 +144,7 @@
     <string name="cd_dismiss_quic_notice">Dismiss QUIC notice</string>
     <string name="control_error_details">Error details</string>
     <string name="control_copied">Copied to clipboard</string>
+    <string name="presets_preview_clip_label">nfqws2 arguments</string>
     <string name="control_copy_failed">Could not copy to the clipboard</string>
     <string name="control_status_degraded">Service degraded</string>
     <string name="control_status_root_denied">Grant root access in your root manager</string>
@@ -287,7 +288,10 @@
         <item quantity="one">%1$d entry</item>
         <item quantity="other">%1$d entries</item>
     </plurals>
-    <string name="hostlists_total_entries">%1$s entries</string>
+    <plurals name="hostlists_total_entries">
+        <item quantity="one">%1$s entry</item>
+        <item quantity="other">%1$s entries</item>
+    </plurals>
     <plurals name="hostlists_total_files">
         <item quantity="one">Across %1$d hostlist file</item>
         <item quantity="other">Across %1$d hostlist files</item>

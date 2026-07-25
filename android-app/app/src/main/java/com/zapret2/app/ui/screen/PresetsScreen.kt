@@ -81,6 +81,7 @@ fun PresetsScreen(
     val state = previewState ?: runtimeState?.value ?: PresetsUiState()
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
+    val previewClipLabel = stringResource(R.string.presets_preview_clip_label)
     val settingsEnabled = !state.isLoading && state.hasAuthoritativeCatalog
 
     LaunchedEffect(activeViewModel) {
@@ -117,8 +118,16 @@ fun PresetsScreen(
             onContentChange = { activeViewModel?.updatePresetContent(it) },
             onPreview = { activeViewModel?.previewPreset() },
             onCopyPreview = { command ->
-                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                clipboard.setPrimaryClip(ClipData.newPlainText("nfqws2 argv", command))
+                // The clipboard is a UI service, so the copy happens here — but
+                // the outcome is reported like every other action on this
+                // screen, and the clip label is user-visible on the platforms
+                // that surface it, so it is translated rather than hard-coded.
+                val copied = runCatching {
+                    val clipboard =
+                        context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    clipboard.setPrimaryClip(ClipData.newPlainText(previewClipLabel, command))
+                }.isSuccess
+                activeViewModel?.reportPreviewCopy(copied)
             },
             onDismiss = { discardUnsavedChanges ->
                 activeViewModel?.closePresetEditor(discardUnsavedChanges)

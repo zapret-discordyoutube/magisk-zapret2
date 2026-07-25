@@ -3,6 +3,7 @@ package com.zapret2.app.viewmodel
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.zapret2.app.R
@@ -93,10 +94,21 @@ private sealed interface LogFetchResult {
 class LogsViewModel @Inject constructor(
     @param:ApplicationContext private val context: Context,
     private val serviceEventBus: ServiceEventBus,
+    private val savedStateHandle: SavedStateHandle,
     private val logRepository: RuntimeLogRepository = RuntimeLogRepository(),
 ) : ViewModel() {
 
-    private val _uiState = MutableStateFlow(LogsUiState())
+    // Only what the user chose is restored. The log text itself is re-read on
+    // every start and can be large, so persisting it would trade a bounded
+    // saved state for an unbounded one to recover something already free.
+    private val _uiState = MutableStateFlow(
+        LogsUiState(
+            currentTab = savedStateHandle.restoreEnumNameOrRemove<LogTab>(KEY_TAB)
+                ?: LogTab.COMMAND,
+            filterText = savedStateHandle.restoreTypedOrRemove<String>(KEY_FILTER).orEmpty(),
+            autoScroll = savedStateHandle.restoreTypedOrRemove<Boolean>(KEY_AUTO_SCROLL) ?: true,
+        ),
+    )
     val uiState: StateFlow<LogsUiState> = _uiState.asStateFlow()
 
     private var commandLoadJob: Job? = null
@@ -180,15 +192,20 @@ class LogsViewModel @Inject constructor(
             }
         }
         _uiState.update { it.copy(currentTab = tab) }
+        savedStateHandle[KEY_TAB] = tab.name
         loadCurrentTab(force = false)
     }
 
     fun setFilter(text: String) {
-        _uiState.update { it.copy(filterText = text.take(MAX_LOG_FILTER_CHARS)) }
+        val bounded = text.take(MAX_LOG_FILTER_CHARS)
+        _uiState.update { it.copy(filterText = bounded) }
+        savedStateHandle[KEY_FILTER] = bounded
     }
 
     fun toggleAutoScroll() {
-        _uiState.update { it.copy(autoScroll = !it.autoScroll) }
+        val enabled = !_uiState.value.autoScroll
+        _uiState.update { it.copy(autoScroll = enabled) }
+        savedStateHandle[KEY_AUTO_SCROLL] = enabled
     }
 
     fun refresh() {
@@ -446,5 +463,8 @@ class LogsViewModel @Inject constructor(
 
     private companion object {
         const val MAX_LOG_FILTER_CHARS = 256
+        const val KEY_TAB = "logs_tab"
+        const val KEY_FILTER = "logs_filter"
+        const val KEY_AUTO_SCROLL = "logs_auto_scroll"
     }
 }

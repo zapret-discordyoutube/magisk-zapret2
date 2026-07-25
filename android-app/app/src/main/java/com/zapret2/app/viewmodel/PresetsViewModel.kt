@@ -92,6 +92,22 @@ class PresetsViewModel @Inject constructor(
         if (initialLoadRequested.compareAndSet(false, true)) loadPresets()
     }
 
+    /**
+     * Reports the outcome of a clipboard copy the screen performed.
+     *
+     * The clipboard is a UI service, so the copy itself cannot live here — but a silent action is
+     * indistinguishable from one that failed, and every other action on this screen answers.
+     */
+    fun reportPreviewCopy(copied: Boolean) {
+        _uiState.update {
+            it.copy(
+                message = UiText.resource(
+                    if (copied) R.string.control_copied else R.string.control_copy_failed,
+                ),
+            )
+        }
+    }
+
     fun clearMessage() {
         _uiState.update { it.copy(message = null) }
     }

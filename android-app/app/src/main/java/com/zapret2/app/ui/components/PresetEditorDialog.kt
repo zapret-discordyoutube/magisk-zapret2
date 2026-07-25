@@ -11,6 +11,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.PrimaryTabRow
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -103,24 +105,26 @@ fun PresetEditorDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(SpacingTokens.Medium))
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    TextButton(
+                // Two identically styled buttons announced as "button" gave a
+                // screen reader no way to tell which page was open, and gave
+                // sight no cue either. A real tab row carries the selection in
+                // both the semantics and the indicator.
+                PrimaryTabRow(selectedTabIndex = selectedPage) {
+                    Tab(
+                        selected = selectedPage == 0,
                         onClick = { selectedPage = 0 },
                         enabled = dismissEnabled,
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text(stringResource(R.string.presets_editor_source_tab))
-                    }
-                    TextButton(
+                        text = { Text(stringResource(R.string.presets_editor_source_tab)) },
+                    )
+                    Tab(
+                        selected = selectedPage == 1,
                         onClick = {
                             selectedPage = 1
                             if (commandPreview == null && previewError == null && !previewLoading) onPreview()
                         },
                         enabled = dismissEnabled,
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text(stringResource(R.string.presets_editor_command_tab))
-                    }
+                        text = { Text(stringResource(R.string.presets_editor_command_tab)) },
+                    )
                 }
                 Spacer(Modifier.height(SpacingTokens.Small))
                 unavailableMessage?.let { message ->

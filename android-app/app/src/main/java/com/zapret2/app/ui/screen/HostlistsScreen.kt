@@ -139,8 +139,12 @@ fun HostlistsScreen(
                             Spacer(Modifier.width(SpacingTokens.Large))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = stringResource(
-                                        R.string.hostlists_total_entries,
+                                    // The count is grouped for display, so the
+                                    // quantity comes from the number and the
+                                    // argument from its formatted form.
+                                    text = quantityStringResource(
+                                        R.plurals.hostlists_total_entries,
+                                        state.totalEntries,
                                         formattedTotalEntries,
                                     ),
                                     style = MaterialTheme.typography.headlineSmallEmphasized,

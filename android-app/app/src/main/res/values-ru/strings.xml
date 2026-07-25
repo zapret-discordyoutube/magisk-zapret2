@@ -144,6 +144,7 @@
     <string name="cd_dismiss_quic_notice">Закрыть уведомление о QUIC</string>
     <string name="control_error_details">Подробности ошибки</string>
     <string name="control_copied">Скопировано в буфер обмена</string>
+    <string name="presets_preview_clip_label">Аргументы nfqws2</string>
     <string name="control_copy_failed">Не удалось скопировать в буфер обмена</string>
     <string name="control_status_degraded">Служба работает с ошибками</string>
     <string name="control_status_root_denied">Разрешите root-доступ в root-менеджере</string>
@@ -297,7 +298,12 @@
         <item quantity="many">%1$d записей</item>
         <item quantity="other">%1$d записи</item>
     </plurals>
-    <string name="hostlists_total_entries">Записей: %1$s</string>
+    <plurals name="hostlists_total_entries">
+        <item quantity="one">%1$s запись</item>
+        <item quantity="few">%1$s записи</item>
+        <item quantity="many">%1$s записей</item>
+        <item quantity="other">%1$s записи</item>
+    </plurals>
     <plurals name="hostlists_total_files">
         <item quantity="one">В %1$d файле списка хостов</item>
         <item quantity="few">В %1$d файлах списков хостов</item>
