@@ -528,14 +528,15 @@ if ! durability_sync; then
     failed "rollback journal removal could not be synchronized; recovery journal retained"
 fi
 
+RB_RECEIPT_NOTE=""
+[ "${RB_STATUS_RECEIPT_FAILED:-0}" != 1 ] ||
+    RB_RECEIPT_NOTE="; the status receipt could not be written"
 if [ "${RB_IPV6_UNVERIFIED:-0}" = 1 ]; then
     # Everything the rollback owns is done and the journal is retired, so the
     # module is not fenced — but "complete" asserts a verified-clean firewall,
     # and this run could not query IPv6. Report what is true.
-    partial "full rollback finished and the module is disabled, but the IPv6 mangle table is unavailable; the required reboot clears any remaining IPv6 rules"
+    partial "full rollback finished and the module is disabled, but the IPv6 mangle table is unavailable; the required reboot clears any remaining IPv6 rules$RB_RECEIPT_NOTE"
 fi
 RB_STATUS=complete
-RB_DIAGNOSTIC="full rollback complete; reboot required; user strategies and lists preserved"
-[ "${RB_STATUS_RECEIPT_FAILED:-0}" != 1 ] ||
-    RB_DIAGNOSTIC="$RB_DIAGNOSTIC; the status receipt could not be written"
+RB_DIAGNOSTIC="full rollback complete; reboot required; user strategies and lists preserved$RB_RECEIPT_NOTE"
 finish_result 0
