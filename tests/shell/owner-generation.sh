@@ -33,6 +33,22 @@ case " $* " in
         [ "${Z2_SNAPSHOT_MODE:-ok}" = missing-anchor ] ||
             echo '-A OUTPUT -j ZAPRET2_OUT'
         echo '-A INPUT -j ZAPRET2_IN'
+        if [ "${Z2_SNAPSHOT_MODE:-ok}" = split ]; then
+            tail=' -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 200 --queue-bypass'
+            for p in 80 443; do
+                echo "-A ZAPRET2_OUT -p tcp --dport $p -m connbytes --connbytes 1:20 --connbytes-dir original --connbytes-mode packets$tail"
+            done
+            for p in 443 3478 5349 19302; do
+                echo "-A ZAPRET2_OUT -p udp --dport $p -m connbytes --connbytes 1:20 --connbytes-dir original --connbytes-mode packets$tail"
+            done
+            for p in 80 443; do
+                echo "-A ZAPRET2_IN -p tcp --sport $p -m connbytes --connbytes 1:10 --connbytes-dir reply --connbytes-mode packets$tail"
+            done
+            for p in 443 3478 5349 19302; do
+                echo "-A ZAPRET2_IN -p udp --sport $p -m connbytes --connbytes 1:10 --connbytes-dir reply --connbytes-mode packets$tail"
+            done
+            exit 0
+        fi
         if [ "${Z2_SNAPSHOT_MODE:-ok}" = wrong-payload ]; then
             echo '-A ZAPRET2_OUT -p tcp -m multiport --dports 80,443 -m connbytes --connbytes 1:21 --connbytes-dir original --connbytes-mode packets -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 200 --queue-bypass'
         else
@@ -103,5 +119,36 @@ for mode in missing-anchor extra-payload wrong-payload; do
     if owner_family_generation_healthy iptables ipv4; then fail "$mode generation was accepted"; fi
 done
 unset Z2_SNAPSHOT_MODE
+
+# A kernel without xt_multiport, or a port list past the fifteen values the
+# parser accepts, publishes one rule per interval and records multiport=0.
+# That is a generation this module created, so re-reading it must recognise it
+# — refusing would make the start path rebuild the ruleset on every run for the
+# entire life of such a device. mark is different: every rule carries it, so a
+# record claiming otherwise describes something the module did not publish.
+Z2_SNAPSHOT_MODE=split; export Z2_SNAPSHOT_MODE
+OWNER_STATE_IPV4_MULTIPORT=0
+OWNER_STATE_IPV4_RULES=12
+owner_family_generation_healthy iptables ipv4 ||
+    fail "a generation published without multiport was refused by its own module"
+# The record still has to describe what is actually loaded: the same split
+# ruleset read as a multiport generation is a mismatch, not a detail.
+OWNER_STATE_IPV4_MULTIPORT=1
+OWNER_STATE_IPV4_RULES=4
+if owner_family_generation_healthy iptables ipv4; then
+    fail "a split ruleset was accepted as a multiport generation"
+fi
+unset Z2_SNAPSHOT_MODE
+OWNER_STATE_IPV4_MULTIPORT=1
+OWNER_STATE_IPV4_MARK=0
+if owner_family_generation_healthy iptables ipv4; then
+    fail "a generation claiming no mark match was accepted"
+fi
+OWNER_STATE_IPV4_MARK=1
+OWNER_STATE_IPV4_MULTIPORT=maybe
+if owner_family_generation_healthy iptables ipv4; then
+    fail "a non-boolean multiport record was accepted"
+fi
+OWNER_STATE_IPV4_MULTIPORT=1
 
 echo "Owner generation shell tests passed"

@@ -2410,7 +2410,7 @@ preflight_owned_process_cleanup() {
 }
 
 owner_family_generation_healthy() {
-    local tool="$1" family="$2" active connbytes expected
+    local tool="$1" family="$2" active connbytes expected multiport
     local PORTS_TCP="$OWNER_STATE_PORTS_TCP" PORTS_UDP="$OWNER_STATE_PORTS_UDP"
     local TCP_PKT_OUT="$OWNER_STATE_TCP_PKT_OUT" TCP_PKT_IN="$OWNER_STATE_TCP_PKT_IN"
     local UDP_PKT_OUT="$OWNER_STATE_UDP_PKT_OUT" UDP_PKT_IN="$OWNER_STATE_UDP_PKT_IN"
@@ -2419,22 +2419,31 @@ owner_family_generation_healthy() {
         "$OWNER_STATE_OUT_CHAIN" "$OWNER_STATE_IN_CHAIN" || return 1
     [ "$OWNER_STATE_OUT_CHAIN" = "$Z2_FW_OUT_CHAIN" ] &&
         [ "$OWNER_STATE_IN_CHAIN" = "$Z2_FW_IN_CHAIN" ] || return 1
+    # mark is in every rule the module authors, so a record that says otherwise
+    # describes something this module did not publish. multiport is not: a
+    # kernel without xt_multiport, or a port list past the fifteen values the
+    # parser accepts, is published one rule per interval and recorded as such.
+    # Requiring 1 here would refuse to re-verify a generation the module itself
+    # created, and the start path would rebuild the ruleset on every run.
     if [ "$family" = ipv4 ]; then
         active="$OWNER_STATE_IPV4_ACTIVE"
         connbytes="$OWNER_STATE_IPV4_CONNBYTES"
         expected="$OWNER_STATE_IPV4_RULES"
-        [ "$OWNER_STATE_IPV4_MULTIPORT" = 1 ] && [ "$OWNER_STATE_IPV4_MARK" = 1 ] || return 1
+        multiport="$OWNER_STATE_IPV4_MULTIPORT"
+        [ "$OWNER_STATE_IPV4_MARK" = 1 ] || return 1
     else
         active="$OWNER_STATE_IPV6_ACTIVE"
         connbytes="$OWNER_STATE_IPV6_CONNBYTES"
         expected="$OWNER_STATE_IPV6_RULES"
-        [ "$OWNER_STATE_IPV6_MULTIPORT" = 1 ] && [ "$OWNER_STATE_IPV6_MARK" = 1 ] || return 1
+        multiport="$OWNER_STATE_IPV6_MULTIPORT"
+        [ "$OWNER_STATE_IPV6_MARK" = 1 ] || return 1
     fi
+    case "$multiport" in 0|1) ;; *) return 1 ;; esac
     if [ "$active" = 0 ]; then
         z2_fw_family_absent "$tool"
         return
     fi
-    z2_fw_verify_family "$tool" "$connbytes" || return 1
+    z2_fw_verify_family "$tool" "$connbytes" "$multiport" || return 1
     [ "$Z2_FW_RULES" = "$expected" ]
 }
 
