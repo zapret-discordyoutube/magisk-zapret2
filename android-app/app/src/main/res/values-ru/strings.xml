@@ -182,6 +182,7 @@
     <string name="control_wifi_only_disable_failed">Не удалось отключить режим «Только Wi-Fi»</string>
     <string name="control_wait_operation_finish">Дождитесь завершения текущей операции со службой</string>
     <string name="control_service_stopped_result">Служба остановлена</string>
+    <string name="control_service_stopped_ipv6_unverified">Служба остановлена. Одну проверку повторить не удалось: правила IPv6 не были перечитаны. Перезагрузка их снимет, вмешательства не требуется.</string>
     <string name="control_service_started">Служба запущена</string>
     <string name="control_service_expected_state_error">Служба не перешла в ожидаемое состояние</string>
     <string name="control_autostart_save_failed">Не удалось сохранить настройку автозапуска</string>

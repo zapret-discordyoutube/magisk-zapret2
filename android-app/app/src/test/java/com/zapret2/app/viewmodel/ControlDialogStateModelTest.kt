@@ -244,6 +244,24 @@ class ControlDialogStateModelTest {
         // Only a failed erase is persisted, so a restored result never claims the module is gone.
         assertFalse(purge.erased)
         assertFalse(purge.unverifiedCleanup)
+        // The module version this was derived from is gone with the module, so an absent answer
+        // restores fail-closed and the dialog stays silent about a removal it cannot vouch for.
+        assertFalse(purge.partialProvesRemovalFence)
+        assertFalse(purge.moduleRemovalStillScheduled)
+
+        val fenceProven = restoreControlUiState(
+            SavedStateHandle(
+                mapOf(
+                    "control_dialog_kind" to ControlDialogKind.MODULE_PURGE_RESULT.name,
+                    "control_module_purge_outcome" to ModulePurgeController.Outcome.PARTIAL.name,
+                    "control_module_purge_reboot_required" to true,
+                    "control_module_purge_removal_fence" to true,
+                    "control_module_purge_diagnostic" to "state cleanup incomplete",
+                ),
+            ),
+        ).modulePurge as ModulePurgeUiState.Result
+        assertTrue(fenceProven.partialProvesRemovalFence)
+        assertTrue(fenceProven.moduleRemovalStillScheduled)
     }
 
     @Test
@@ -420,7 +438,7 @@ class ControlDialogStateModelTest {
         val reset = installedControlState().afterModulePurge(appDataSurvived)
 
         assertEquals(com.zapret2.app.data.ModuleInstallState.MISSING, reset.moduleInstallState)
-        assertEquals(ControlStatus.STOPPED, reset.status)
+        assertEquals(ControlStatus.NOT_INSTALLED, reset.status)
         assertEquals("", reset.moduleVersion)
         assertEquals(0, reset.nfqueueRulesCount)
         assertFalse(reset.isRunning)
@@ -433,11 +451,12 @@ class ControlDialogStateModelTest {
     }
 
     /**
-     * The reset follows the module verdict exactly — over every outcome, receipt status, firewall
-     * proof and APK-clear result — while the erase verdict keeps demanding both halves.
+     * The screen follows the measured module directory over every outcome, receipt status, firewall
+     * proof and APK-clear result, while the erase verdict — the one that authorises wiping
+     * APK-private data — keeps demanding its whole fail-closed contract.
      */
     @Test
-    fun screenResetFollowsTheModuleVerdictWhileTheErasedVerdictStillDemandsBoth() {
+    fun screenResetFollowsTheMeasuredModuleDirectoryWhileTheErasedVerdictStillDemandsEverything() {
         val installed = installedControlState()
         val statuses = ModulePurgeController.Status.entries.map(
             ModulePurgeController.Status::wireValue,
@@ -445,24 +464,37 @@ class ControlDialogStateModelTest {
         ModulePurgeController.Outcome.entries.forEach { outcome ->
             statuses.forEach { status ->
                 listOf(true, false).forEach { firewallClean ->
-                    listOf(true, false).forEach { appDataCleared ->
-                        val honoured = purgeControllerResult(outcome, status, firewallClean)
-                        val result = if (appDataCleared) honoured else honoured.withAppDataRetained()
-                        val reset = installed.afterModulePurge(result)
-                        val label = "$outcome/$status/firewall=$firewallClean/apk=$appDataCleared"
+                    listOf(true, false).forEach { moduleRemoved ->
+                        listOf(true, false).forEach { appDataCleared ->
+                            val honoured =
+                                purgeControllerResult(outcome, status, firewallClean, moduleRemoved)
+                            val result =
+                                if (appDataCleared) honoured else honoured.withAppDataRetained()
+                            val reset = installed.afterModulePurge(result)
+                            val label = "$outcome/$status/firewall=$firewallClean/" +
+                                "module=$moduleRemoved/apk=$appDataCleared"
 
-                        assertEquals(
-                            label,
-                            result.moduleFullyRemoved,
-                            reset.moduleInstallState ==
-                                com.zapret2.app.data.ModuleInstallState.MISSING,
-                        )
-                        assertEquals(
-                            label,
-                            result.moduleFullyRemoved && appDataCleared,
-                            result.erased,
-                        )
-                        if (!result.moduleFullyRemoved) assertEquals(label, installed, reset)
+                            assertEquals(
+                                label,
+                                result.moduleDirectoryRemoved,
+                                reset.moduleInstallState ==
+                                    com.zapret2.app.data.ModuleInstallState.MISSING,
+                            )
+                            assertEquals(
+                                label,
+                                result.moduleFullyRemoved && appDataCleared,
+                                result.erased,
+                            )
+                            // The screen never resets on less than a measured directory removal,
+                            // and the strict verdict never claims more than the weak one.
+                            assertTrue(
+                                label,
+                                !result.moduleFullyRemoved || result.moduleDirectoryRemoved,
+                            )
+                            if (!result.moduleDirectoryRemoved) {
+                                assertEquals(label, installed, reset)
+                            }
+                        }
                     }
                 }
             }
@@ -501,13 +533,14 @@ class ControlDialogStateModelTest {
         outcome: ModulePurgeController.Outcome,
         status: String,
         firewallClean: Boolean,
+        moduleRemoved: Boolean = true,
     ): ModulePurgeController.Result {
         val lines = listOf(
             "Z2_PURGE_VERSION=1",
             "Z2_PURGE_STATUS=$status",
             "Z2_PURGE_PROCESS_CLEAN=1",
             "Z2_PURGE_FIREWALL_CLEAN=${if (firewallClean) 1 else 0}",
-            "Z2_PURGE_MODULE_REMOVED=1",
+            "Z2_PURGE_MODULE_REMOVED=${if (moduleRemoved) 1 else 0}",
             "Z2_PURGE_STATE_REMOVED=1",
             "Z2_PURGE_EXTERNAL_REMOVED=1",
             "Z2_PURGE_APK_TOUCHED=0",

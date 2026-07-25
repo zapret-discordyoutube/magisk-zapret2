@@ -100,12 +100,9 @@ object ModulePurgeController {
          * claims a verified-clean firewall contradicts its own status and proves nothing, exactly
          * like one that admits touching the APK. Every other outcome proves nothing either.
          *
-         * This is also the fact the screen resets on, and it is deliberately not [erased]: once
-         * the module directory is gone the app cannot reach it again — the purge script went with
-         * it — so a screen that kept describing an installed module would offer controls that
-         * resolve to nothing, and only a process restart would rediscover that. Whether
-         * APK-private state survived is a separate question with a separate answer,
-         * [appDataCleared], and it never brings the module back.
+         * Whether APK-private state survived is a separate question with a separate answer,
+         * [appDataCleared], and it never brings the module back. What the *screen* obeys is
+         * [moduleDirectoryRemoved], which asks a narrower question than this one.
          */
         val moduleFullyRemoved: Boolean
             get() = command?.success != false && when (outcome) {
@@ -115,6 +112,36 @@ object ModulePurgeController {
                 } == true
                 else -> false
             }
+
+        /**
+         * Whether `/data/adb/modules/zapret2` was measured gone, whatever else the receipt could
+         * not finish.
+         *
+         * This is the only question the screen has to answer, and it is strictly narrower than
+         * [moduleFullyRemoved]. That verdict authorises wiping APK-private data, so it is
+         * fail-closed on purpose and demands the whole contract — including facts about trees the
+         * module directory does not contain, such as the external `/data/adb/zapret2-install.*`
+         * staging workspace. A receipt like `partial 1 1 1 1 0 1` reports precisely that: the
+         * module directory and its private state were *measured* removed and only the external
+         * workspace survived. Refusing to reset the screen on it leaves the user looking at a
+         * READY module, a version, and live start/stop/rollback/erase controls whose scripts —
+         * `zapret-status.sh`, `zapret-purge.sh` — were deleted with the directory, and only a
+         * process restart would ever correct it. The app already accepts weaker proof and names
+         * the reservation for the firewall; the module's own existence must not be the one fact
+         * it insists on proving through unrelated evidence.
+         *
+         * [Report.moduleRemoved] is the module's direct measurement of that single fact, so it is
+         * what this reads. [Outcome.COMPLETE] and [Outcome.PARTIAL] are the only outcomes that
+         * carry a receipt at all; every other one means the record was rejected or never printed.
+         * [ServiceLifecycleController.CommandResult.success] is deliberately not required: the
+         * full eleven-field record with its `Z2_PURGE_COMPLETE=1` terminator can only be printed
+         * by `purge_report` itself, so a command cut short cannot reach this predicate — and a
+         * `partial` receipt is printed on the path that exits non-zero, which is exactly the case
+         * this exists for.
+         */
+        val moduleDirectoryRemoved: Boolean
+            get() = outcome in setOf(Outcome.COMPLETE, Outcome.PARTIAL) &&
+                report?.moduleRemoved == true
 
         /**
          * The user-visible verdict: the module is gone and the APK-private state that belonged to
@@ -134,7 +161,7 @@ object ModulePurgeController {
          * [outcome] grades the module receipt, and this is not about the module — its directory,
          * its state tree and its purge script are gone, which is the only reason this step ran at
          * all. Rewriting the outcome here would put it at odds with the receipt it grades and, by
-         * way of [moduleFullyRemoved], silently take back the fact the screen must obey. The
+         * way of [moduleDirectoryRemoved], silently take back the fact the screen must obey. The
          * failure belongs to [appDataCleared] alone, and [erased] already demands both.
          */
         fun withAppDataRetained(): Result = copy(

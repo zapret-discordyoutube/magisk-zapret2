@@ -1,14 +1,18 @@
 package com.zapret2.app.viewmodel
 
+import com.zapret2.app.data.ModuleEnvironmentSnapshot
 import com.zapret2.app.data.ModuleInstallState
 import com.zapret2.app.data.ModuleMutationState
 import com.zapret2.app.data.ModulePurgeController
+import com.zapret2.app.data.NetworkStatsManager
 import com.zapret2.app.data.PendingModuleState
 import com.zapret2.app.data.ServiceLifecycleController
 import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -97,6 +101,62 @@ class ModulePurgeTerminalSessionTest {
             assertTrue(
                 "$label must tell the user the module is still scheduled for removal",
                 dialog.moduleRemovalStillScheduled,
+            )
+        }
+    }
+
+    /**
+     * The sentence is only true of a module that publishes the removal fence before it touches
+     * anything. Shipped releases up to v2.1.5 print the *same* version-1 `partial` receipt for the
+     * opposite case — `publish_remove_marker` failed, no marker exists, the module survives the
+     * reboot — and the app legitimately runs ahead of the module: `updateAll` installs the two
+     * independently, the pending-APK and partial update outcomes leave the APK newer until the
+     * next reboot, and a sideloaded APK does the same.
+     */
+    @Test
+    fun scheduledRemovalSentenceIsWithheldFromModulesThatPrintPartialWhenTheFenceFailed() {
+        // zapret-purge.sh v2.1.5:185 — purge_report partial 1 1 0 0 0 1 "cannot publish ..."
+        val fenceFailed = purgeReceipt(
+            status = "partial",
+            processClean = "1",
+            firewallClean = "1",
+            moduleRemoved = "0",
+            stateRemoved = "0",
+            externalRemoved = "0",
+            rebootRequired = "1",
+            diagnostic = "cannot publish the permanent module-removal gate",
+        )
+
+        val onShippedModule = purgeDialogState(
+            fenceFailed,
+            commandSucceeded = false,
+            moduleVersion = PRE_FENCE_MODULE_VERSION,
+        )
+        assertEquals(ModulePurgeController.Outcome.PARTIAL, onShippedModule.outcome)
+        assertTrue(onShippedModule.rebootRequired)
+        assertFalse(
+            "a module that prints partial when the fence failed must not promise a removal",
+            onShippedModule.moduleRemovalStillScheduled,
+        )
+
+        val onFenceFirstModule = purgeDialogState(
+            fenceFailed,
+            commandSucceeded = false,
+            moduleVersion = FENCE_FIRST_MODULE_VERSION,
+        )
+        assertTrue(
+            "a module that reserves partial for post-fence states still owes the sentence",
+            onFenceFirstModule.moduleRemovalStillScheduled,
+        )
+
+        listOf("", "unknown", "v2.1.6-rc1", "2.1", "v0.0.0").forEach { version ->
+            assertFalse(
+                "module version '$version' must fail closed",
+                purgeDialogState(
+                    fenceFailed,
+                    commandSucceeded = false,
+                    moduleVersion = version,
+                ).moduleRemovalStillScheduled,
             )
         }
     }
@@ -227,6 +287,95 @@ class ModulePurgeTerminalSessionTest {
     }
 
     /**
+     * The reset must retire every field that described the erased module's runtime.
+     *
+     * `afterModulePurge` is the last write the screen accepts — it arms the terminal gate, and
+     * `refreshStatus()` returns early afterwards — so anything it leaves behind stays on screen
+     * for the life of the process, sourced from a killed process and a deleted module. Before this
+     * was fixed the screen showed "Stopped" with an uptime of the dead nfqws2, its whole process
+     * card, the NFQUEUE capability badge and the module's own red diagnostic.
+     *
+     * The projection is the same one `refreshStatus()` publishes for a module it cannot query.
+     */
+    @Test
+    fun purgeResetRetiresEveryRuntimeFactOfTheErasedModule() {
+        val installed = installedControlState()
+        // Guard: a fixture that never had these cannot prove they were cleared.
+        assertNotEquals("", installed.uptime)
+        assertNotEquals(ProcessStats(), installed.processStats)
+        assertNotEquals(NetworkStatsManager.IptablesDetail(), installed.iptablesDetail)
+        assertNotNull(installed.moduleDiagnostic)
+        assertTrue(installed.nfqueueSupported)
+
+        val reset = installed.afterModulePurge(
+            purgeControllerResult(completeReceipt(), commandSucceeded = true),
+        )
+
+        assertEquals(ControlStatus.NOT_INSTALLED, reset.status)
+        assertEquals("", reset.uptime)
+        assertEquals(ProcessStats(), reset.processStats)
+        assertEquals(NetworkStatsManager.IptablesDetail(), reset.iptablesDetail)
+        assertNull(reset.moduleDiagnostic)
+        assertFalse(reset.nfqueueSupported)
+        assertEquals(ModuleInstallState.MISSING, reset.moduleInstallState)
+        assertEquals(PendingModuleState.NONE, reset.pendingModuleState)
+        assertTrue(reset.modulePurgeCompleted)
+
+        // The same projection `refreshStatus()` reaches for a module it cannot query.
+        assertEquals(
+            ControlStatus.NOT_INSTALLED,
+            ModuleEnvironmentSnapshot(
+                activeState = ModuleInstallState.MISSING,
+                pendingState = PendingModuleState.NONE,
+                nfqueueSupported = false,
+            ).serviceAccess.statusWithoutQuery(),
+        )
+    }
+
+    /**
+     * The screen follows the one fact it needs: the module directory was measured gone.
+     *
+     * `purge_report partial 1 1 1 1 0 1` reports exactly that — module directory and private state
+     * removed, only the external `/data/adb/zapret2-install.*` staging workspace left — and
+     * `commit_purge` returns 1 for it. Gating the screen on the erase verdict, which additionally
+     * demands that unrelated workspace, left the user on a READY module with a version and live
+     * start/stop/rollback/erase controls whose scripts had been deleted with the directory; the
+     * erase button would re-run a `zapret-purge.sh` that no longer exists. The erase verdict itself
+     * stays fail-closed, because it is what authorises wiping APK-private data.
+     */
+    @Test
+    fun screenResetFollowsTheMeasuredModuleDirectoryNotTheWholeEraseContract() {
+        val externalWorkspaceSurvived = purgeControllerResult(
+            purgeReceipt(
+                status = "partial",
+                processClean = "1",
+                firewallClean = "1",
+                moduleRemoved = "1",
+                stateRemoved = "1",
+                externalRemoved = "0",
+                rebootRequired = "1",
+                diagnostic = "the module stays scheduled for removal at the next reboot, but " +
+                    "these remain now: external staging workspace",
+            ),
+            commandSucceeded = false,
+        )
+
+        assertTrue(externalWorkspaceSurvived.moduleDirectoryRemoved)
+        assertFalse(externalWorkspaceSurvived.moduleFullyRemoved)
+        assertFalse("APK-private data must not be wiped on this receipt", externalWorkspaceSurvived.erased)
+
+        val reset = installedControlState().afterModulePurge(externalWorkspaceSurvived)
+
+        assertEquals(ModuleInstallState.MISSING, reset.moduleInstallState)
+        assertEquals(ControlStatus.NOT_INSTALLED, reset.status)
+        assertEquals("", reset.moduleVersion)
+        assertTrue(reset.modulePurgeCompleted)
+        assertFalse(reset.canPurgeModule)
+        assertFalse(reset.canFullRollback)
+        assertFalse(reset.canStopService)
+    }
+
+    /**
      * The gate is armed by the module verdict alone. A purge that left the module behind — and a
      * screen that never purged — must keep taking status updates, or the screen would freeze on
      * whatever it happened to show.
@@ -300,14 +449,35 @@ class ModulePurgeTerminalSessionTest {
         )
     }
 
+    /**
+     * A screen describing a *running* module, which is the only state that populates the fields a
+     * purge has to retire: a live process card, its uptime, the counted firewall detail, the
+     * capability badge and the module's own diagnostic. A reset asserted against a state that
+     * never had them cannot tell a cleared field from one that was never set.
+     */
     private fun installedControlState() = ControlUiState(
         isRunning = true,
         status = ControlStatus.RUNNING,
+        uptime = "3:12:44",
         autostart = true,
         moduleVersion = "2.1.5",
         canStopService = true,
         iptablesActive = true,
         nfqueueRulesCount = 2,
+        nfqueueSupported = true,
+        processStats = ProcessStats(
+            pid = "4242",
+            memory = "8192 KB",
+            threads = "3",
+            uptime = "3:12:44",
+        ),
+        iptablesDetail = NetworkStatsManager.IptablesDetail(
+            rulesOk = 2,
+            rulesTotal = 2,
+            ipv4Active = true,
+            rulesetVerified = true,
+        ),
+        moduleDiagnostic = "FIREWALL/POSTCONDITION_FAILED: stale diagnostic from the erased module",
         hasRootAccess = true,
         hasAuthoritativeRuntimeSettings = true,
         moduleInstallState = ModuleInstallState.READY,
@@ -316,9 +486,14 @@ class ModulePurgeTerminalSessionTest {
     private fun purgeDialogState(
         receipt: List<String>,
         commandSucceeded: Boolean,
+        moduleVersion: String = FENCE_FIRST_MODULE_VERSION,
     ): ModulePurgeUiState.Result {
         val result = purgeControllerResult(receipt, commandSucceeded)
-        return modulePurgeResultState(result, sanitizedBoundedUiDiagnostic(result.diagnosticText()))
+        return modulePurgeResultState(
+            result,
+            sanitizedBoundedUiDiagnostic(result.diagnosticText()),
+            moduleVersion,
+        )
     }
 
     private fun purgeControllerResult(
@@ -371,6 +546,14 @@ class ModulePurgeTerminalSessionTest {
         "Z2_PURGE_DIAGNOSTIC=$diagnostic",
         "Z2_PURGE_COMPLETE=1",
     )
+
+    private companion object {
+        /** The oldest module release whose `partial` receipt proves the removal fence is up. */
+        const val FENCE_FIRST_MODULE_VERSION = "v2.2.0"
+
+        /** The newest shipped release that prints `partial` when the fence could NOT be published. */
+        const val PRE_FENCE_MODULE_VERSION = "v2.1.5"
+    }
 
     private fun productionFile(relativePath: String): File {
         val target = "android-app/app/src/main/java/com/zapret2/app/$relativePath"

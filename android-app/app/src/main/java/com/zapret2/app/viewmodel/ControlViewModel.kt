@@ -25,6 +25,7 @@ import com.zapret2.app.data.RuntimeConfigMutationResult
 import com.zapret2.app.data.RuntimeConfigStore
 import com.zapret2.app.data.diagnosticText
 import com.zapret2.app.data.diagnosticTextOrNull
+import com.zapret2.app.data.projectReleaseVersionCode
 import com.zapret2.app.data.RuntimeLogRepository
 import com.zapret2.app.data.ServiceEventBus
 import com.zapret2.app.data.ServiceEventSource
@@ -187,6 +188,7 @@ enum class ControlErrorKind(@param:StringRes val titleRes: Int) {
 enum class ControlLastResult(@param:StringRes val messageRes: Int) {
     SERVICE_STARTED(R.string.control_service_started),
     SERVICE_STOPPED(R.string.control_service_stopped_result),
+    SERVICE_STOPPED_IPV6_UNVERIFIED(R.string.control_service_stopped_ipv6_unverified),
     SERVICE_FAILED(R.string.control_service_operation_failed),
     ROLLBACK_COMPLETED(R.string.control_full_rollback_success_title),
     ROLLBACK_FAILED(R.string.control_full_rollback_failure_title),
@@ -200,6 +202,23 @@ enum class ControlLastResult(@param:StringRes val messageRes: Int) {
     UPDATE_PARTIAL_REBOOT(R.string.control_update_partial_reboot),
     UPDATE_FAILED(R.string.control_update_failed),
 }
+
+/**
+ * The verdict a stop that the module reported as complete publishes to the screen.
+ *
+ * A teardown removes both families and counts zero rules in both, but it can only certify the
+ * families it could read back. On a device whose IPv6 mangle table is unreadable the module
+ * withholds that certification alone ([ServiceLifecycleController.ServiceStatus.rulesetVerified]
+ * is false) while every measurable fact is still zero. The stop happened, so it is reported as
+ * done; the one check that could not be repeated is named beside it rather than replacing it,
+ * and the reboot the rules would not survive is what clears them.
+ */
+internal fun stoppedServiceResult(rulesetVerified: Boolean): ControlLastResult =
+    if (rulesetVerified) {
+        ControlLastResult.SERVICE_STOPPED
+    } else {
+        ControlLastResult.SERVICE_STOPPED_IPV6_UNVERIFIED
+    }
 
 internal fun UpdateProgress.toUiText(): UiText = when (stage) {
     UpdateStage.DOWNLOADING_MODULE -> normalizedPercent?.let {
@@ -347,6 +366,12 @@ sealed interface ModulePurgeUiState {
         val erased: Boolean,
         val rebootRequired: Boolean,
         val diagnostic: String,
+        /**
+         * Whether the module that printed this receipt is one whose `partial` status proves the
+         * removal fence is already published. Fail-closed by default; see
+         * [modulePublishesRemovalFenceBeforeCleanup].
+         */
+        val partialProvesRemovalFence: Boolean = false,
     ) : ModulePurgeUiState {
         /**
          * Erased, with one cleanup step the module could not verify and the reboot clears.
@@ -365,12 +390,16 @@ sealed interface ModulePurgeUiState {
          *
          * `commit` publishes the durable `$MODDIR/remove` fence before it touches a single tree, so
          * every receipt printed after that point describes a module the root manager deletes at the
-         * next boot no matter what else failed. The module reserves the `partial` status for
-         * exactly those post-fence states — every rejection that happens before the fence is
-         * published reports `blocked` or `error` — and [ModulePurgeController.Outcome.PARTIAL] is
-         * set for exactly a `partial` receipt, so this is the app's honest, fail-closed reading of
-         * "the fence is already up". [rebootRequired] is a belt on the same fact: a partial receipt
+         * next boot no matter what else failed. A module that reserves the `partial` status for
+         * exactly those post-fence states — reporting every earlier rejection as `blocked` or
+         * `error` — makes [ModulePurgeController.Outcome.PARTIAL] an honest reading of "the fence
+         * is already up". [rebootRequired] is a belt on the same fact: such a partial receipt
          * always demands the reboot that completes the removal.
+         *
+         * That reservation is a property of the *module*, not of the protocol: the wire format is
+         * still version 1, and older shipped modules print `partial` for the opposite case — the
+         * fence could not be published at all. [partialProvesRemovalFence] is therefore required
+         * too, and it is what keeps this sentence from promising a removal that will not happen.
          *
          * Without it the failure dialog says only that something could not be removed, and the user
          * concludes the module survived — while the next boot deletes it out from under them.
@@ -378,7 +407,8 @@ sealed interface ModulePurgeUiState {
         val moduleRemovalStillScheduled: Boolean
             get() = !erased &&
                 outcome == ModulePurgeController.Outcome.PARTIAL &&
-                rebootRequired
+                rebootRequired &&
+                partialProvesRemovalFence
 
         /**
          * Whether the dialog shows what the module and the transport actually said, on the erased
@@ -392,27 +422,39 @@ sealed interface ModulePurgeUiState {
 /**
  * Retires everything the screen says about an installed module once the purge removed it.
  *
- * The gate is the module verdict, [ModulePurgeController.Result.moduleFullyRemoved], not the erase
- * verdict [ModulePurgeController.Result.erased]. The two part company on exactly one path: the
- * module receipt was honoured, the directory and its state tree are gone, and the app's own
- * `pm clear` then failed to wipe APK-private state. That failure is real and the dialog reports it
- * as one, but it does not put the module back. Leaving the screen on its pre-purge state there
- * would show a READY module with a version and live start/stop/update/purge controls that reach
- * nothing, and nothing would correct it for the lifetime of the ViewModel: the environment is
- * reconciled once, from `loadInitialState()`.
+ * The gate is [ModulePurgeController.Result.moduleDirectoryRemoved] — the module's own measurement
+ * that its directory is gone — and deliberately neither the erase verdict
+ * [ModulePurgeController.Result.erased] nor the stricter
+ * [ModulePurgeController.Result.moduleFullyRemoved] that authorises wiping APK-private data. Those
+ * two answer a different question and require proof of facts outside the module directory; the
+ * screen only needs to stop describing something that no longer exists. Once the directory is gone
+ * so are `zapret-status.sh` and `zapret-purge.sh`, so a screen left on its pre-purge state would
+ * show a READY module with a version and live start/stop/update/purge controls that reach nothing,
+ * and nothing would correct it for the lifetime of the ViewModel: the environment is reconciled
+ * once, from `loadInitialState()`.
  *
- * The reset also arms [ControlUiState.modulePurgeCompleted], which makes it terminal for the
- * session. See [withModuleStatusPublication].
+ * The projection below is the same one `refreshStatus()` publishes for a module it cannot query
+ * (`ModuleServiceAccess.NOT_INSTALLED`), and it has to be: the reset also arms
+ * [ControlUiState.modulePurgeCompleted], so no later status read is allowed to correct it. Every
+ * field that described the runtime of the erased module — the status label, the uptime, the process
+ * card, the firewall detail, the NFQUEUE capability badge, the module's own diagnostic — is retired
+ * here, or it would stay on screen forever, sourced from a process and a module that are both gone.
+ * See [withModuleStatusPublication].
  */
 internal fun ControlUiState.afterModulePurge(result: ModulePurgeController.Result): ControlUiState =
-    if (!result.moduleFullyRemoved) {
+    if (!result.moduleDirectoryRemoved) {
         this
     } else {
         copy(
             autostart = false,
             isRunning = false,
             canStopService = false,
-            status = ControlStatus.STOPPED,
+            status = ControlStatus.NOT_INSTALLED,
+            uptime = "",
+            processStats = ProcessStats(),
+            iptablesDetail = NetworkStatsManager.IptablesDetail(),
+            moduleDiagnostic = null,
+            nfqueueSupported = false,
             moduleInstallState = ModuleInstallState.MISSING,
             pendingModuleState = PendingModuleState.NONE,
             moduleMutationState = ModuleMutationState.IDLE,
@@ -445,15 +487,51 @@ internal fun ControlUiState.withModuleStatusPublication(
     publish: ControlUiState.() -> ControlUiState,
 ): ControlUiState = if (modulePurgeCompleted) this else publish()
 
-/** The single projection of a purge receipt onto the result dialog's state. */
+/**
+ * The first module release whose `commit_purge` publishes the durable `$MODDIR/remove` fence
+ * before it touches any tree, and reports every rejection that can still happen before that point
+ * as `blocked` or `error`. From this version on — and only from it — a `partial` receipt proves
+ * the fence is up and the next boot deletes the module.
+ *
+ * Shipped releases up to and including v2.1.5 print `partial 1 1 0 0 0 1` for the exact opposite
+ * case: `publish_remove_marker` itself failed, no marker exists, and the module survives the
+ * reboot. The purge wire protocol is still version 1 and the app accepts every version-1 receipt,
+ * so nothing in the record distinguishes the two — only the module version does.
+ *
+ * The app and the module are versioned independently and legitimately drift apart: `updateAll`
+ * installs them separately, the `ApkInstallerPending` and `Partial` update outcomes leave the APK
+ * ahead of the module until the next reboot, and a sideloaded APK does the same.
+ */
+private const val REMOVAL_FENCE_FIRST_MODULE_VERSION_CODE = 2_020_000L
+
+/**
+ * Whether the installed module is one whose `partial` purge receipt proves the removal fence was
+ * already published.
+ *
+ * Fail-closed: an absent, unparsable or older version answers false, so the dialog stays silent
+ * about a scheduled removal it cannot vouch for rather than promising one that will not happen.
+ */
+internal fun modulePublishesRemovalFenceBeforeCleanup(moduleVersion: String): Boolean {
+    val versionCode = projectReleaseVersionCode(moduleVersion) ?: return false
+    return versionCode >= REMOVAL_FENCE_FIRST_MODULE_VERSION_CODE
+}
+
+/**
+ * The single projection of a purge receipt onto the result dialog's state.
+ *
+ * [moduleVersion] is the version of the module that printed the receipt, sampled before the purge
+ * reset retires it, and it decides one sentence only — see [ModulePurgeUiState.Result].
+ */
 internal fun modulePurgeResultState(
     result: ModulePurgeController.Result,
     diagnostic: String,
+    moduleVersion: String,
 ): ModulePurgeUiState.Result = ModulePurgeUiState.Result(
     outcome = result.outcome,
     erased = result.erased,
     rebootRequired = result.rebootRequired,
     diagnostic = diagnostic,
+    partialProvesRemovalFence = modulePublishesRemovalFenceBeforeCleanup(moduleVersion),
 )
 
 internal object FullRollbackAvailabilityPolicy {
@@ -573,6 +651,7 @@ private const val KEY_PURGE_IN_PROGRESS = "control_module_purge_in_progress"
 private const val KEY_PURGE_OUTCOME = "control_module_purge_outcome"
 private const val KEY_PURGE_REBOOT_REQUIRED = "control_module_purge_reboot_required"
 private const val KEY_PURGE_DIAGNOSTIC = "control_module_purge_diagnostic"
+private const val KEY_PURGE_REMOVAL_FENCE = "control_module_purge_removal_fence"
 private const val KEY_LAST_RESULT = "control_last_result"
 private const val MAX_ERROR_DETAIL_LENGTH = 12_000
 private const val UPDATE_STATUS_REFRESH_DELAY_MS = 1_000L
@@ -744,6 +823,8 @@ internal fun restoreControlUiState(savedStateHandle: SavedStateHandle): ControlU
                 erased = false,
                 rebootRequired = savedStateHandle
                     .restoreTypedOrRemove<Boolean>(KEY_PURGE_REBOOT_REQUIRED) == true,
+                partialProvesRemovalFence = savedStateHandle
+                    .restoreTypedOrRemove<Boolean>(KEY_PURGE_REMOVAL_FENCE) == true,
                 diagnostic = sanitizedBoundedUiDiagnostic(
                     savedStateHandle.restoreTypedOrRemove<String>(KEY_PURGE_DIAGNOSTIC).orEmpty(),
                 ),
@@ -841,10 +922,12 @@ private fun canonicalizeRestoredControlState(
     if (modulePurge !is ModulePurgeUiState.Result) {
         savedStateHandle.remove<String>(KEY_PURGE_OUTCOME)
         savedStateHandle.remove<Boolean>(KEY_PURGE_REBOOT_REQUIRED)
+        savedStateHandle.remove<Boolean>(KEY_PURGE_REMOVAL_FENCE)
         savedStateHandle.remove<String>(KEY_PURGE_DIAGNOSTIC)
     } else {
         savedStateHandle[KEY_PURGE_OUTCOME] = modulePurge.outcome.name
         savedStateHandle[KEY_PURGE_REBOOT_REQUIRED] = modulePurge.rebootRequired
+        savedStateHandle[KEY_PURGE_REMOVAL_FENCE] = modulePurge.partialProvesRemovalFence
         savedStateHandle[KEY_PURGE_DIAGNOSTIC] = modulePurge.diagnostic
     }
     if (modulePurge !is ModulePurgeUiState.InProgress) {
@@ -961,9 +1044,13 @@ internal class ModulePurgeOperationCoordinator(
         result: ModulePurgeController.Result,
         diagnostic: String,
         lastResult: ControlLastResult,
+        projected: ModulePurgeUiState.Result,
     ) {
         savedStateHandle[KEY_PURGE_OUTCOME] = result.outcome.name
         savedStateHandle[KEY_PURGE_REBOOT_REQUIRED] = result.rebootRequired
+        // The module version this was derived from is retired with the module, so the answer, not
+        // the input, is what survives a process restart. Absent, it restores fail-closed.
+        savedStateHandle[KEY_PURGE_REMOVAL_FENCE] = projected.partialProvesRemovalFence
         savedStateHandle[KEY_PURGE_DIAGNOSTIC] = diagnostic
         savedStateHandle[KEY_LAST_RESULT] = lastResult.name
         savedStateHandle.remove<String>(KEY_ERROR_KIND)
@@ -982,6 +1069,7 @@ internal class ModulePurgeOperationCoordinator(
         savedStateHandle.remove<Boolean>(KEY_PURGE_IN_PROGRESS)
         savedStateHandle.remove<String>(KEY_PURGE_OUTCOME)
         savedStateHandle.remove<Boolean>(KEY_PURGE_REBOOT_REQUIRED)
+        savedStateHandle.remove<Boolean>(KEY_PURGE_REMOVAL_FENCE)
         savedStateHandle.remove<String>(KEY_PURGE_DIAGNOSTIC)
         savedStateHandle.remove<String>(KEY_LAST_RESULT)
     }
@@ -989,6 +1077,7 @@ internal class ModulePurgeOperationCoordinator(
     private fun clearPersistedResult() {
         savedStateHandle.remove<String>(KEY_PURGE_OUTCOME)
         savedStateHandle.remove<Boolean>(KEY_PURGE_REBOOT_REQUIRED)
+        savedStateHandle.remove<Boolean>(KEY_PURGE_REMOVAL_FENCE)
         savedStateHandle.remove<String>(KEY_PURGE_DIAGNOSTIC)
     }
 }
@@ -1228,14 +1317,20 @@ class ControlViewModel @Inject constructor(
             }
 
             viewModelScope.launch {
+                // Sampled before the purge retires it: the reset below clears the module version,
+                // and the result dialog still has to know which module printed the receipt.
+                val moduleVersion = _uiState.value.moduleVersion
                 try {
                     val result = ModulePurgeController.purge(modulePurgeAppDataCleaner)
                     _uiState.update { it.afterModulePurge(result) }
-                    showModulePurgeResult(result)
+                    showModulePurgeResult(result, moduleVersion)
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (_: Exception) {
-                    showModulePurgeResult(ModulePurgeController.Result(ModulePurgeController.Outcome.ERROR))
+                    showModulePurgeResult(
+                        ModulePurgeController.Result(ModulePurgeController.Outcome.ERROR),
+                        moduleVersion,
+                    )
                 } finally {
                     purgeOperation.finishAttempt()
                 }
@@ -1243,9 +1338,13 @@ class ControlViewModel @Inject constructor(
         }
     }
 
-    private fun showModulePurgeResult(result: ModulePurgeController.Result) {
+    private fun showModulePurgeResult(
+        result: ModulePurgeController.Result,
+        moduleVersion: String,
+    ) {
         val diagnostic = sanitizedBoundedUiDiagnostic(result.diagnosticText())
         val erased = result.erased
+        val projected = modulePurgeResultState(result, diagnostic, moduleVersion)
         val lastResult = if (erased) {
             ControlLastResult.PURGE_COMPLETED
         } else {
@@ -1256,7 +1355,7 @@ class ControlViewModel @Inject constructor(
             // its own persisted app state after the app-owned storage was cleared.
             purgeOperation.retireSuccessfulTerminalState()
         } else {
-            purgeOperation.persistTerminal(result, diagnostic, lastResult)
+            purgeOperation.persistTerminal(result, diagnostic, lastResult, projected)
         }
         _uiState.update {
             it.copy(
@@ -1264,7 +1363,7 @@ class ControlViewModel @Inject constructor(
                 updateRelease = null,
                 errorDialog = null,
                 fullRollback = FullRollbackUiState.Idle,
-                modulePurge = modulePurgeResultState(result, diagnostic),
+                modulePurge = projected,
                 lastResult = lastResult,
             )
         }
@@ -1339,6 +1438,7 @@ class ControlViewModel @Inject constructor(
     private fun clearPersistedPurge() {
         savedStateHandle.remove<String>(KEY_PURGE_OUTCOME)
         savedStateHandle.remove<Boolean>(KEY_PURGE_REBOOT_REQUIRED)
+        savedStateHandle.remove<Boolean>(KEY_PURGE_REMOVAL_FENCE)
         savedStateHandle.remove<String>(KEY_PURGE_DIAGNOSTIC)
     }
 
@@ -1725,22 +1825,13 @@ class ControlViewModel @Inject constructor(
 
                 val verified = if (shouldStop) !verifiedState.canStopService else verifiedState.isRunning
                 if (lifecycleResult.success && verified) {
-                    recordLastResult(
-                        if (shouldStop) {
-                            ControlLastResult.SERVICE_STOPPED
-                        } else {
-                            ControlLastResult.SERVICE_STARTED
-                        },
-                    )
-                    publishMessage(
-                        UiText.Resource(
-                            if (shouldStop) {
-                                R.string.control_service_stopped_result
-                            } else {
-                                R.string.control_service_started
-                            },
-                        ),
-                    )
+                    val outcome = if (shouldStop) {
+                        stoppedServiceResult(lifecycleResult.status.rulesetVerified)
+                    } else {
+                        ControlLastResult.SERVICE_STARTED
+                    }
+                    recordLastResult(outcome)
+                    publishMessage(UiText.Resource(outcome.messageRes))
                     if (!shouldStop) {
                         serviceEventBus.notifyServiceRestarted(ServiceEventSource.CONTROL)
                     }

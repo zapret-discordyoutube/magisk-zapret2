@@ -1158,10 +1158,23 @@ object ServiceLifecycleController {
                 qnum != null && ipv4 && flag("Z2_NFQUEUE") && flag("Z2_QUEUE_BYPASS") &&
                 rulesVerified && expected > 0 && ipv4Rules > 0 && rules == expected &&
                 !flag("Z2_UPDATE_BLOCKED") && !flag("Z2_UNINSTALL_TOMBSTONE")
+            // Every measurable fact a teardown owns must be zero, and no ownership,
+            // process, queue or gate may survive it. `Z2_RULESET_VERIFIED` is the one
+            // field deliberately not required here: it is a certification, not a
+            // measurement. A device whose `ip6tables` mangle table cannot be read —
+            // no `ip6table_mangle`, or an xtables lock held past the polling budget —
+            // lets the module tear everything down and count zero rules in both
+            // families, yet leaves it unable to certify the family it never read. The
+            // module publishes exactly that (`ruleset_verified=0`, `ipv6_active=0`),
+            // and rejecting the payload for it would turn an honest, complete stop
+            // into a self-sustaining "process or stale rules remain" failure. The
+            // withheld certification is carried to the user as a reservation instead;
+            // `status == "ok"` above still demands it, because a running service that
+            // cannot prove its own ruleset is a different claim entirely.
             "stopped" -> !owned && !process && !active && pid == null && !pidVerified &&
                 pidStarttime == null && values["Z2_OWNER_GENERATION"].orEmpty().isEmpty() &&
                 !ownerVerified && !ipv4 && !ipv6 && rules == 0 && expected == 0 &&
-                ipv4Rules == 0 && ipv6Rules == 0 && rulesVerified &&
+                ipv4Rules == 0 && ipv6Rules == 0 &&
                 !flag("Z2_NFQUEUE") && !flag("Z2_QUEUE_BYPASS") &&
                 !flag("Z2_UPDATE_BLOCKED") && !flag("Z2_UNINSTALL_TOMBSTONE")
             else -> owned && !active

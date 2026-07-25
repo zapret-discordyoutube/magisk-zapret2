@@ -139,6 +139,90 @@ class ModuleServiceStatusPolicyTest {
         assertNull(projectedLifecycleDiagnostic(active))
     }
 
+    /**
+     * A completed stop is reported as done in both shapes the module can report it in, and the
+     * one check it could not repeat is named rather than dropped or turned into a failure.
+     *
+     * Both payloads below are what `zapret-stop.sh` really emits: the ordinary teardown proves
+     * every family and certifies the ruleset, while the teardown on a device whose IPv6 mangle
+     * table cannot be read tears the same rules down, measures the same zeroes, and withholds
+     * only `Z2_RULESET_VERIFIED`.
+     */
+    @Test
+    fun stopThatCouldNotRereadTheIpv6Family_isReportedDoneWithTheCheckNamed() {
+        val proven = stopReceiptStatus(rulesetVerified = true)
+        val reserved = stopReceiptStatus(rulesetVerified = false)
+
+        assertTrue(proven.fullyStopped)
+        assertTrue(reserved.fullyStopped)
+        assertEquals(
+            ControlLastResult.SERVICE_STOPPED,
+            stoppedServiceResult(proven.rulesetVerified),
+        )
+        assertEquals(
+            R.string.control_service_stopped_result,
+            stoppedServiceResult(proven.rulesetVerified).messageRes,
+        )
+        assertEquals(
+            ControlLastResult.SERVICE_STOPPED_IPV6_UNVERIFIED,
+            stoppedServiceResult(reserved.rulesetVerified),
+        )
+        assertEquals(
+            R.string.control_service_stopped_ipv6_unverified,
+            stoppedServiceResult(reserved.rulesetVerified).messageRes,
+        )
+    }
+
+    /**
+     * The `emit_committed_status_v6 stopped idle none` receipt, with `Z2_RULESET_VERIFIED`
+     * carrying `STATUS_RULESET_VERIFIED` exactly as `write_stop_status stopped` recorded it.
+     */
+    private fun stopReceiptStatus(
+        rulesetVerified: Boolean,
+    ): ServiceLifecycleController.ServiceStatus = requireNotNull(
+        ServiceLifecycleController.parseLifecycleReceipt(
+            ServiceLifecycleController.CommandResult(
+                success = true,
+                exitCode = 0,
+                stdout = listOf(
+                    "Z2_PROTOCOL=6",
+                    "Z2_STATUS=stopped",
+                    "Z2_OWNED=0",
+                    "Z2_PROCESS=0",
+                    "Z2_ACTIVE=0",
+                    "Z2_PID=",
+                    "Z2_PID_VERIFIED=0",
+                    "Z2_PID_STARTTIME=",
+                    "Z2_OWNER_GENERATION=",
+                    "Z2_OWNER_METADATA_VERIFIED=0",
+                    "Z2_QNUM=200",
+                    "Z2_IPV4=0",
+                    "Z2_IPV6=0",
+                    "Z2_RULES=0",
+                    "Z2_EXPECTED_RULES=0",
+                    "Z2_IPV4_RULES=0",
+                    "Z2_IPV6_RULES=0",
+                    "Z2_RULESET_VERIFIED=${if (rulesetVerified) 1 else 0}",
+                    "Z2_NFQUEUE=0",
+                    "Z2_QUEUE_BYPASS=0",
+                    "Z2_UPDATE_BLOCKED=0",
+                    "Z2_UNINSTALL_TOMBSTONE=0",
+                    "Z2_LIFECYCLE_STATE=idle",
+                    "Z2_LIFECYCLE_OWNER_KIND=none",
+                    "Z2_CHAINS=0",
+                    "Z2_ANCHORS=0",
+                    "Z2_ERROR_SCHEMA=1",
+                    "Z2_ERROR_STATUS=OK",
+                    "Z2_ERROR_DOMAIN=NONE",
+                    "Z2_ERROR_STAGE=NONE",
+                    "Z2_ERROR_CODE=NONE",
+                    "Z2_ERROR_DETAIL=",
+                    "Z2_COMPLETE=1",
+                ),
+            ),
+        ),
+    ) { "the module's own stop receipt must parse" }
+
     private fun statusWithoutQuery(
         activeState: ModuleInstallState,
         pendingState: PendingModuleState,

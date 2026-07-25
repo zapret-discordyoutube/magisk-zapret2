@@ -4,6 +4,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -869,6 +870,13 @@ class ServiceLifecycleControllerTest {
         }
     }
 
+    /**
+     * Every override below is applied to the *healthy* payload, so each one contradicts a
+     * self-declared `ok`. `Z2_RULESET_VERIFIED=0` belongs here for that reason and no other: a
+     * running service that cannot prove its own ruleset is incoherent. It says nothing about a
+     * `stopped` payload, where the same field is a certification a teardown is allowed to withhold
+     * — see [parseStatusOutput_acceptsObservedStopThatCouldNotRereadTheIpv6Family].
+     */
     @Test
     fun parseStatusOutput_rejectsCrossContractContradictions() {
         val contradictoryRecords = listOf(
@@ -891,6 +899,106 @@ class ServiceLifecycleControllerTest {
             )
             assertFalse("Contradiction $overrides must fail closed", status.metadataComplete)
             assertFalse(status.healthy)
+        }
+    }
+
+    /**
+     * A stop that removed everything but could not re-read one family is a completed stop.
+     *
+     * The module cannot certify a table it never managed to read, so it withholds
+     * `Z2_RULESET_VERIFIED` while still measuring zero rules in both families, no process, no
+     * ownership. Rejecting the whole payload for the withheld certification used to declare the
+     * receipt semantically invalid, which downgraded `Z2_STATUS` to `unknown`, made
+     * `fullyStopped` false and told the user "an nfqws2 process or stale NFQUEUE rules remain"
+     * about a device where neither existed — and it repeated on every later stop, because each
+     * one re-read the same preserved snapshot.
+     */
+    @Test
+    fun lifecycleReceipt_acceptsStopThatCouldNotRereadTheIpv6Family() {
+        val receipt = ServiceLifecycleController.parseLifecycleReceipt(
+            ServiceLifecycleController.CommandResult(
+                success = true,
+                stdout = ipv6UnprovenStopReceiptLines(),
+                exitCode = 0,
+            ),
+        )
+
+        assertNotNull("the module's own stop receipt must be accepted", receipt)
+        val stopped = requireNotNull(receipt)
+        assertTrue(stopped.metadataComplete)
+        assertEquals("stopped", stopped.declaredStatus)
+        assertTrue("a reserved stop is still a completed stop", stopped.fullyStopped)
+        assertFalse(stopped.hasOwnedState)
+        assertFalse(stopped.provesLiveRuntime)
+        assertFalse(stopped.healthy)
+        assertFalse(
+            "the withheld certification must survive parsing so the screen can name it",
+            stopped.rulesetVerified,
+        )
+    }
+
+    /** The same reservation must survive the separate status observation that follows a stop. */
+    @Test
+    fun parseStatusOutput_acceptsObservedStopThatCouldNotRereadTheIpv6Family() {
+        val status = ServiceLifecycleController.parseStatusCommandResult(
+            ServiceLifecycleController.CommandResult(
+                success = false,
+                stdout = ipv6UnprovenStoppedStatusLines(),
+                exitCode = 1,
+            ),
+        )
+
+        assertTrue(status.metadataComplete)
+        assertEquals("stopped", status.declaredStatus)
+        assertTrue(status.fullyStopped)
+        assertFalse(status.hasOwnedState)
+        assertFalse(status.provesLiveRuntime)
+        assertFalse(status.rulesetVerified)
+        assertNull(status.error)
+    }
+
+    /**
+     * Exactly one assertion was relaxed: the certification the module physically could not make.
+     *
+     * Everything a teardown can measure stays mandatory, so a payload that reintroduces any owned
+     * fact — a process, a rule, a queue capability, an update or uninstall gate, a chain, or any
+     * scrap of owner identity — must still fail closed even though it declares itself stopped.
+     */
+    @Test
+    fun parseStatusOutput_relaxesOnlyTheCertificationInAReservedStop() {
+        val contradictions = listOf(
+            "Z2_OWNED" to "1",
+            "Z2_PROCESS" to "1",
+            "Z2_ACTIVE" to "1",
+            "Z2_PID" to "4242",
+            "Z2_PID_VERIFIED" to "1",
+            "Z2_PID_STARTTIME" to "98765",
+            "Z2_OWNER_GENERATION" to "generation-1",
+            "Z2_OWNER_METADATA_VERIFIED" to "1",
+            "Z2_IPV4" to "1",
+            "Z2_IPV6" to "1",
+            "Z2_RULES" to "3",
+            "Z2_EXPECTED_RULES" to "3",
+            "Z2_IPV4_RULES" to "2",
+            "Z2_IPV6_RULES" to "1",
+            "Z2_NFQUEUE" to "1",
+            "Z2_QUEUE_BYPASS" to "1",
+            "Z2_UPDATE_BLOCKED" to "1",
+            "Z2_UNINSTALL_TOMBSTONE" to "1",
+            "Z2_CHAINS" to "4",
+            "Z2_ANCHORS" to "4",
+        )
+
+        contradictions.forEach { (field, value) ->
+            val status = ServiceLifecycleController.parseStatusOutput(
+                ipv6UnprovenStoppedStatusLines().map {
+                    if (it.startsWith("$field=")) "$field=$value" else it
+                },
+            )
+
+            assertFalse("$field=$value must fail closed", status.metadataComplete)
+            assertFalse("$field=$value must not report a completed stop", status.fullyStopped)
+            assertEquals("unknown", status.declaredStatus)
         }
     }
 
@@ -1671,6 +1779,99 @@ class ServiceLifecycleControllerTest {
         "Z2_QUEUE_BYPASS=0",
         "Z2_UPDATE_BLOCKED=0",
         "Z2_UNINSTALL_TOMBSTONE=0",
+        "Z2_COMPLETE=1",
+    )
+
+    /**
+     * The receipt `zapret-stop.sh` prints when it tore both families down but could not re-read
+     * the IPv6 mangle table (`ip6tables` present, `ip6table_mangle` absent or the xtables lock
+     * held past the polling budget).
+     *
+     * `write_stop_status stopped` sets every measurable field to zero and, because
+     * `FIREWALL_IPV6_SKIPPED_UNPROVEN=1`, records `ruleset_verified=0` and `ipv6_active=0`.
+     * `emit_committed_status_v6 stopped idle none` forwards that snapshot verbatim — including
+     * `Z2_RULESET_VERIFIED=${STATUS_RULESET_VERIFIED:-0}` — so this is the byte shape the app
+     * receives on the lifecycle transport, not an invented one.
+     */
+    private fun ipv6UnprovenStopReceiptLines(): List<String> = listOf(
+        "Z2_PROTOCOL=6",
+        "Z2_STATUS=stopped",
+        "Z2_OWNED=0",
+        "Z2_PROCESS=0",
+        "Z2_ACTIVE=0",
+        "Z2_PID=",
+        "Z2_PID_VERIFIED=0",
+        "Z2_PID_STARTTIME=",
+        "Z2_OWNER_GENERATION=",
+        "Z2_OWNER_METADATA_VERIFIED=0",
+        "Z2_QNUM=200",
+        "Z2_IPV4=0",
+        "Z2_IPV6=0",
+        "Z2_RULES=0",
+        "Z2_EXPECTED_RULES=0",
+        "Z2_IPV4_RULES=0",
+        "Z2_IPV6_RULES=0",
+        "Z2_RULESET_VERIFIED=0",
+        "Z2_NFQUEUE=0",
+        "Z2_QUEUE_BYPASS=0",
+        "Z2_UPDATE_BLOCKED=0",
+        "Z2_UNINSTALL_TOMBSTONE=0",
+        "Z2_LIFECYCLE_STATE=idle",
+        "Z2_LIFECYCLE_OWNER_KIND=none",
+        "Z2_CHAINS=0",
+        "Z2_ANCHORS=0",
+        "Z2_ERROR_SCHEMA=1",
+        "Z2_ERROR_STATUS=OK",
+        "Z2_ERROR_DOMAIN=NONE",
+        "Z2_ERROR_STAGE=NONE",
+        "Z2_ERROR_CODE=NONE",
+        "Z2_ERROR_DETAIL=",
+        "Z2_COMPLETE=1",
+    )
+
+    /**
+     * The `--machine-v6` projection `zapret-status.sh` prints over that same snapshot.
+     *
+     * The stopped fast path is refused (it demands `ruleset_verified=1`), and because the
+     * teardown recorded `ipv6_active=0` nothing sets `IPV6_UNKNOWN`, so `Z2_OWNED` stays 0 and
+     * the payload is graded `stopped` with `Z2_EXPECTED_RULES=0`. That branch then deliberately
+     * preserves the reservation instead of overwriting it: `STATUS_FILE_STATUS=stopped` with
+     * `STATUS_FILE_RULESET_VERIFIED=0` keeps `Z2_RULESET_VERIFIED=0`. `Z2_NFQUEUE` and
+     * `Z2_QUEUE_BYPASS` keep their unowned initial `0`, and the error envelope is cleared.
+     */
+    private fun ipv6UnprovenStoppedStatusLines(): List<String> = listOf(
+        "Z2_PROTOCOL=6",
+        "Z2_STATUS=stopped",
+        "Z2_OWNED=0",
+        "Z2_PROCESS=0",
+        "Z2_ACTIVE=0",
+        "Z2_PID=",
+        "Z2_PID_VERIFIED=0",
+        "Z2_PID_STARTTIME=",
+        "Z2_OWNER_GENERATION=",
+        "Z2_OWNER_METADATA_VERIFIED=0",
+        "Z2_QNUM=200",
+        "Z2_IPV4=0",
+        "Z2_IPV6=0",
+        "Z2_RULES=0",
+        "Z2_EXPECTED_RULES=0",
+        "Z2_IPV4_RULES=0",
+        "Z2_IPV6_RULES=0",
+        "Z2_RULESET_VERIFIED=0",
+        "Z2_NFQUEUE=0",
+        "Z2_QUEUE_BYPASS=0",
+        "Z2_UPDATE_BLOCKED=0",
+        "Z2_UNINSTALL_TOMBSTONE=0",
+        "Z2_LIFECYCLE_STATE=idle",
+        "Z2_LIFECYCLE_OWNER_KIND=none",
+        "Z2_CHAINS=0",
+        "Z2_ANCHORS=0",
+        "Z2_ERROR_SCHEMA=1",
+        "Z2_ERROR_STATUS=OK",
+        "Z2_ERROR_DOMAIN=NONE",
+        "Z2_ERROR_STAGE=NONE",
+        "Z2_ERROR_CODE=NONE",
+        "Z2_ERROR_DETAIL=",
         "Z2_COMPLETE=1",
     )
 

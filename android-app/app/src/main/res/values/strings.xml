@@ -182,6 +182,7 @@
     <string name="control_wifi_only_disable_failed">Could not disable Wi-Fi-only mode</string>
     <string name="control_wait_operation_finish">Wait for the current service operation to finish</string>
     <string name="control_service_stopped_result">Service stopped</string>
+    <string name="control_service_stopped_ipv6_unverified">Service stopped. One check could not be repeated: the IPv6 firewall rules were not re-read. A reboot clears them; nothing else is needed.</string>
     <string name="control_service_started">Service started</string>
     <string name="control_service_expected_state_error">Service did not reach the expected state</string>
     <string name="control_autostart_save_failed">Could not save the autostart setting</string>
