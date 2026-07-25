@@ -279,5 +279,6 @@ Z2_TEST_TMP="$TMP" sh "$ROOT/tests/shell/firewall-reconciler.sh"
 Z2_TEST_TMP="$TMP" sh "$ROOT/tests/shell/magisk-boot-installer.sh"
 Z2_TEST_TMP="$TMP" sh "$ROOT/tests/shell/packaging-recovery-flow.sh"
 Z2_TEST_TMP="$TMP" sh "$ROOT/tests/shell/preset-contract.sh"
+Z2_TEST_TMP="$TMP" sh "$ROOT/tests/shell/preset-apply-transaction.sh"
 
 echo "Shell integration tests passed"

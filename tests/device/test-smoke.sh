@@ -496,6 +496,7 @@ ensure_object wrapper-rollback /data/adb/modules/zapret2/system/bin/zapret2-full
 ensure_object script-start /data/adb/modules/zapret2/zapret2/scripts/zapret-start.sh file 0 1 755 0 0 none 128
 ensure_object script-stop /data/adb/modules/zapret2/zapret2/scripts/zapret-stop.sh file 0 1 755 0 0 none 128
 ensure_object script-restart /data/adb/modules/zapret2/zapret2/scripts/zapret-restart.sh file 0 1 755 0 0 none 128
+ensure_object script-apply-preset /data/adb/modules/zapret2/zapret2/scripts/zapret-apply-preset.sh file 0 1 755 0 0 none 128
 ensure_object script-status /data/adb/modules/zapret2/zapret2/scripts/zapret-status.sh file 0 1 755 0 0 none 128
 ensure_object script-rollback /data/adb/modules/zapret2/zapret2/scripts/zapret-full-rollback.sh file 0 1 755 0 0 none 128
 ensure_object binary /data/adb/modules/zapret2/zapret2/bin/arm64-v8a/nfqws2 file 0 1 755 0 0 none 128

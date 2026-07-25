@@ -36,6 +36,19 @@ object PresetNamePolicy {
             !fileName.startsWith("_")
 }
 
+/**
+ * Outcome of the module-owned preset application transaction.
+ *
+ * [Unsupported] and [Indeterminate] are deliberately distinct: the first says the installed
+ * generation never ran the transaction at all, the second says it ran without proving what it left
+ * behind. Collapsing them would let a lost answer be replayed as a fresh attempt.
+ */
+internal sealed interface PresetApplyTransaction {
+    data object Unsupported : PresetApplyTransaction
+    data object Indeterminate : PresetApplyTransaction
+    data class Reported(val outcome: PresetMutationOutcome) : PresetApplyTransaction
+}
+
 internal object PresetMachineProtocol {
     private const val RECORD = "Z2_PRESET"
     private const val SUMMARY = "Z2_PRESET_SUMMARY"
@@ -44,6 +57,97 @@ internal object PresetMachineProtocol {
     private const val COMMAND_EXECUTABLE = "Z2_COMMAND_EXECUTABLE"
     private const val COMMAND_ARGUMENT = "Z2_COMMAND_ARGUMENT"
     private const val COMMAND_SUMMARY = "Z2_COMMAND_SUMMARY"
+
+    const val APPLY_UNSUPPORTED = "Z2_APPLY_UNSUPPORTED=1"
+    private const val APPLY_SCHEMA = "Z2_APPLY_SCHEMA"
+    private const val APPLY_SCHEMA_VERSION = "1"
+    private const val APPLY_OUTCOME = "Z2_APPLY_OUTCOME"
+    private const val APPLY_ISSUE = "Z2_APPLY_ISSUE"
+    private const val APPLY_PRESET = "Z2_APPLY_PRESET"
+    private const val APPLY_PREVIOUS_PRESET = "Z2_APPLY_PREVIOUS_PRESET"
+    private const val APPLY_CONFIG_COMMITTED = "Z2_APPLY_CONFIG_COMMITTED"
+    private const val APPLY_SERVICE_WAS_RUNNING = "Z2_APPLY_SERVICE_WAS_RUNNING"
+    private const val APPLY_COMPLETE = "Z2_APPLY_COMPLETE"
+    private const val APPLY_ISSUE_NONE = "NONE"
+
+    private val applyOwnFields = setOf(
+        APPLY_SCHEMA,
+        APPLY_OUTCOME,
+        APPLY_ISSUE,
+        APPLY_PRESET,
+        APPLY_PREVIOUS_PRESET,
+        APPLY_CONFIG_COMMITTED,
+        APPLY_SERVICE_WAS_RUNNING,
+        APPLY_COMPLETE,
+    )
+
+    private val applyFields = applyOwnFields + LifecycleErrorContract.wireFields
+
+    /**
+     * Projects the module's single apply payload onto one existing mutation outcome.
+     *
+     * The payload is accepted only when it is complete, terminated by its own sentinel, and
+     * internally consistent: a committed outcome must carry a clean error envelope, and a refusal
+     * must carry both an error envelope and a typed issue. Anything else is [Indeterminate] — the
+     * module may have mutated state this app cannot describe, so the caller resolves it from
+     * published facts rather than assuming either direction.
+     */
+    fun parseApply(lines: List<String>, expectedFileName: String): PresetApplyTransaction {
+        val records = lines.filter(String::isNotBlank)
+        if (records.singleOrNull() == APPLY_UNSUPPORTED) return PresetApplyTransaction.Unsupported
+        if (records.lastOrNull() != "$APPLY_COMPLETE=1") return PresetApplyTransaction.Indeterminate
+        val pairs = records.map { record ->
+            val separator = record.indexOf('=')
+            if (separator <= 0) return PresetApplyTransaction.Indeterminate
+            record.substring(0, separator) to record.substring(separator + 1)
+        }
+        val counts = pairs.groupingBy { it.first }.eachCount()
+        if (counts.keys != applyFields || applyFields.any { counts[it] != 1 }) {
+            return PresetApplyTransaction.Indeterminate
+        }
+        val values = pairs.toMap()
+        if (values[APPLY_SCHEMA] != APPLY_SCHEMA_VERSION) return PresetApplyTransaction.Indeterminate
+        val error = LifecycleErrorContract.parseValues(values) ?: return PresetApplyTransaction.Indeterminate
+        val committed = values.getValue(APPLY_CONFIG_COMMITTED).takeIf { it == "0" || it == "1" }
+            ?: return PresetApplyTransaction.Indeterminate
+        val wasRunning = values.getValue(APPLY_SERVICE_WAS_RUNNING).takeIf { it == "0" || it == "1" }
+            ?: return PresetApplyTransaction.Indeterminate
+        val issueCode = values.getValue(APPLY_ISSUE)
+        val outcome = when (values.getValue(APPLY_OUTCOME)) {
+            "APPLIED" -> PresetMutationOutcome.Applied
+            "SAVED" -> PresetMutationOutcome.Saved
+            "REJECTED" -> PresetMutationOutcome.Rejected(PresetIssue.fromWireCode(issueCode))
+            "WRITE_FAILED", "IO_FAILED" -> PresetMutationOutcome.IoFailed
+            "WRITE_FAILED_ROLLED_BACK" -> PresetMutationOutcome.WriteFailedRolledBack
+            "RESTART_FAILED_ROLLED_BACK" -> PresetMutationOutcome.RestartFailedRolledBack
+            "ROLLBACK_FAILED" -> PresetMutationOutcome.RollbackFailed
+            "BLOCKED" -> PresetMutationOutcome.Blocked
+            else -> return PresetApplyTransaction.Indeterminate
+        }
+        val rejectedName = outcome is PresetMutationOutcome.Rejected &&
+            PresetIssue.fromWireCode(issueCode) == PresetIssue.UNSAFE_PRESET_NAME
+        // An unsafe request is never echoed back, so only that refusal may omit the name.
+        if (!rejectedName && values.getValue(APPLY_PRESET) != expectedFileName) {
+            return PresetApplyTransaction.Indeterminate
+        }
+        if (rejectedName && values.getValue(APPLY_PRESET).isNotEmpty()) {
+            return PresetApplyTransaction.Indeterminate
+        }
+        if (values.getValue(APPLY_PREVIOUS_PRESET).let { it.isNotEmpty() && !PresetNamePolicy.isValid(it) }) {
+            return PresetApplyTransaction.Indeterminate
+        }
+        val consistent = when (outcome) {
+            PresetMutationOutcome.Applied ->
+                error.isNone && committed == "1" && wasRunning == "1" && issueCode == APPLY_ISSUE_NONE
+            PresetMutationOutcome.Saved ->
+                error.isNone && committed == "1" && wasRunning == "0" && issueCode == APPLY_ISSUE_NONE
+            is PresetMutationOutcome.Rejected ->
+                !error.isNone && committed == "0" && issueCode != APPLY_ISSUE_NONE
+            else -> !error.isNone && issueCode == APPLY_ISSUE_NONE
+        }
+        if (!consistent) return PresetApplyTransaction.Indeterminate
+        return PresetApplyTransaction.Reported(outcome)
+    }
 
     fun parseDiscovery(lines: List<String>): PresetDiscovery? {
         val records = mutableListOf<ScanRecord>()
@@ -197,6 +301,7 @@ internal interface PresetMutationGate {
 
 internal interface PresetRunner {
     suspend fun listPresets(): List<String>?
+    suspend fun applyPresetTransaction(fileName: String): PresetApplyTransaction
     suspend fun validatePreset(candidateFileName: String, logicalFileName: String): PresetValidation
     suspend fun previewPreset(candidateFileName: String, logicalFileName: String): PresetPreviewOutcome
     suspend fun loadSelection(): PresetSelection?
@@ -209,6 +314,7 @@ internal interface PresetRunner {
     suspend fun removeFile(fileName: String): Boolean
     suspend fun restart(): Boolean
     suspend fun isServiceRunning(): Boolean?
+    suspend fun committedApplyIsProven(): Boolean
 }
 
 @Singleton
@@ -223,6 +329,7 @@ internal class RootPresetRunner @Inject constructor() : PresetRunner {
     private val zapretDir = "$moduleDir/zapret2"
     private val presetsDir = "$zapretDir/presets"
     private val commandBuilder = "$zapretDir/scripts/command-builder.sh"
+    private val applyPresetScript = "$moduleDir/${ModulePackageContract.APPLY_PRESET_SCRIPT_PATH}"
 
     override suspend fun listPresets(): List<String>? {
         val result = ServiceLifecycleController.executeRoot(
@@ -230,6 +337,35 @@ internal class RootPresetRunner @Inject constructor() : PresetRunner {
                 RootFileIo.shellQuote(zapretDir),
         )
         return result.stdout.takeIf { result.success }
+    }
+
+    /**
+     * One privileged round trip for the whole preset application.
+     *
+     * The module validates, persists and replaces under a single transaction that inherits this
+     * mutation's lifecycle lease, so nothing here reconstructs the steps or their rollback. A
+     * generation installed before that entry point exists answers with the unsupported sentinel
+     * from the same round trip, which is what lets the caller fall back instead of failing.
+     */
+    override suspend fun applyPresetTransaction(fileName: String): PresetApplyTransaction {
+        if (!PresetNamePolicy.isValid(fileName)) {
+            return PresetApplyTransaction.Reported(
+                PresetMutationOutcome.Rejected(PresetIssue.UNSAFE_PRESET_NAME),
+            )
+        }
+        val script = RootFileIo.shellQuote(applyPresetScript)
+        val invocation = ModuleMutationCoordinator.inheritLifecycleLock(
+            "sh $script ${RootFileIo.shellQuote(fileName)}",
+        )
+        val command = """
+            if [ -f $script ] && [ ! -L $script ]; then
+                $invocation
+            else
+                echo ${PresetMachineProtocol.APPLY_UNSUPPORTED}
+            fi
+        """.trimIndent()
+        val result = ServiceLifecycleController.executeRoot(command, RootCommandPolicy.LIFECYCLE)
+        return PresetMachineProtocol.parseApply(result.stdout, fileName)
     }
 
     override suspend fun validatePreset(
@@ -374,6 +510,19 @@ internal class RootPresetRunner @Inject constructor() : PresetRunner {
     override suspend fun isServiceRunning(): Boolean? =
         ServiceLifecycleController.getStatus().takeIf { it.rootGranted }?.processRunning
 
+    /**
+     * Proves an application whose answer was lost, on the exact terms the restart path already
+     * owns: the published generation is the one this mutation's lease stamped, and the service it
+     * describes is healthy. The module writes that generation from `ZAPRET2_LIFECYCLE_TOKEN`, so
+     * only a replacement run under this lease can match it.
+     */
+    override suspend fun committedApplyIsProven(): Boolean {
+        val expectedGeneration = ModuleMutationCoordinator.currentLifecycleToken()
+        if (expectedGeneration.isNullOrEmpty()) return false
+        val status = ServiceLifecycleController.getStatus()
+        return status.rootGranted && status.healthy && status.ownerGeneration == expectedGeneration
+    }
+
     private fun isSafeName(fileName: String): Boolean =
         RootFileIo.isSimpleFileName(fileName, ".txt")
 
@@ -448,22 +597,71 @@ internal class TransactionalPresetRepository @Inject constructor(
         }
     }
 
+    /**
+     * One logical mutation, one module transaction.
+     *
+     * The module owns validation, the runtime.ini commit, the replacement and every rollback
+     * decision, and answers with one typed payload this repository only projects. The stepwise
+     * flow below survives for one reason: a module generation installed before that entry point
+     * existed cannot grow it, and a preset must still be applicable on it.
+     */
     override suspend fun apply(fileName: String): PresetMutationOutcome = safelyMutate {
         if (!PresetNamePolicy.isValid(fileName)) {
             return@safelyMutate PresetMutationOutcome.Rejected(PresetIssue.UNSAFE_PRESET_NAME)
         }
-        val oldConfig = runner.snapshotActiveConfig() ?: return@safelyMutate PresetMutationOutcome.IoFailed
-        val wasRunning = runner.isServiceRunning() ?: return@safelyMutate PresetMutationOutcome.IoFailed
+        when (val transaction = applyTransaction(fileName)) {
+            PresetApplyTransaction.Unsupported -> applyStepwise(fileName)
+            PresetApplyTransaction.Indeterminate -> resolveIndeterminateApply(fileName)
+            is PresetApplyTransaction.Reported -> transaction.outcome
+        }
+    }
+
+    private suspend fun applyTransaction(fileName: String): PresetApplyTransaction = try {
+        runner.applyPresetTransaction(fileName)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        PresetApplyTransaction.Indeterminate
+    }
+
+    /**
+     * The module ran but did not prove what it left behind. Read published facts instead of
+     * guessing: an unchanged selection means nothing was committed, and a committed selection is
+     * an application only when the live generation is the one this lease stamped. Everything else
+     * stays unproven, which is the direction that cannot invent a success. Re-applying a selection
+     * that was already active also resolves to the unproven side, because the two cases are
+     * indistinguishable from the published state alone.
+     */
+    private suspend fun resolveIndeterminateApply(fileName: String): PresetMutationOutcome {
+        val published = try {
+            runner.snapshotActiveConfig()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        } ?: return PresetMutationOutcome.RollbackFailed
+        if (published.presetFile != fileName) return PresetMutationOutcome.IoFailed
+        return if (booleanResult { runner.committedApplyIsProven() }) {
+            PresetMutationOutcome.Applied
+        } else {
+            PresetMutationOutcome.RollbackFailed
+        }
+    }
+
+    /** Preserved only for module generations without the transactional entry point. */
+    private suspend fun applyStepwise(fileName: String): PresetMutationOutcome {
+        val oldConfig = runner.snapshotActiveConfig() ?: return PresetMutationOutcome.IoFailed
+        val wasRunning = runner.isServiceRunning() ?: return PresetMutationOutcome.IoFailed
         when (writeConfigResult(ActivePresetConfig(fileName))) {
             true -> Unit
-            false -> return@safelyMutate PresetMutationOutcome.IoFailed
-            null -> return@safelyMutate if (writeConfigOrFalse(oldConfig)) {
+            false -> return PresetMutationOutcome.IoFailed
+            null -> return if (writeConfigOrFalse(oldConfig)) {
                 PresetMutationOutcome.WriteFailedRolledBack
             } else {
                 PresetMutationOutcome.RollbackFailed
             }
         }
-        if (!wasRunning) PresetMutationOutcome.Saved
+        return if (!wasRunning) PresetMutationOutcome.Saved
         else if (restartOrFalse()) PresetMutationOutcome.Applied
         else if (writeConfigOrFalse(oldConfig)) PresetMutationOutcome.RestartFailedRolledBack
         else PresetMutationOutcome.RollbackFailed

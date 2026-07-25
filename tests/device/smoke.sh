@@ -679,6 +679,7 @@ preflight_device() {
     check_remote_path "$pd_report" "$MODULE_DIR/zapret2/scripts/zapret-start.sh" f 755
     check_remote_path "$pd_report" "$MODULE_DIR/zapret2/scripts/zapret-stop.sh" f 755
     check_remote_path "$pd_report" "$MODULE_DIR/zapret2/scripts/zapret-restart.sh" f 755
+    check_remote_path "$pd_report" "$MODULE_DIR/zapret2/scripts/zapret-apply-preset.sh" f 755
     check_remote_path "$pd_report" "$MODULE_DIR/zapret2/scripts/zapret-status.sh" f 755
     check_remote_path "$pd_report" "$MODULE_DIR/zapret2/scripts/zapret-full-rollback.sh" f 755
     check_remote_path "$pd_report" "$pd_binary" f 755
