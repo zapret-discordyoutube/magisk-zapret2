@@ -288,8 +288,8 @@ object ServiceLifecycleController {
          * retired, metadata committed — but could not re-read one firewall family it had already
          * torn down; that receipt withholds [FullRollbackReport.firewallClean] and nothing else,
          * and the reboot it already demands removes anything that survived. Nothing is left for
-         * the user to retry, so it must be reported as done with the unverified step named by
-         * [rolledBackWithUnverifiedCleanup], never as a failure. The observed status still has to
+         * the user to retry, so it must be reported as done with the unverified step named
+         * beside it, never as a failure. The observed status still has to
          * agree that the service is down, exactly as it does for [success].
          */
         val rolledBack: Boolean
@@ -302,13 +302,6 @@ object ServiceLifecycleController {
                             !it.firewallClean
                     } == true
                 )
-
-        /**
-         * Rolled back, but the module could not verify every cleanup step it performed. The
-         * receipt reserves exactly one case for this — a firewall family it could not re-read —
-         * and the mandatory reboot clears it regardless.
-         */
-        val rolledBackWithUnverifiedCleanup: Boolean get() = rolledBack && !success
 
         fun diagnosticText(): String = listOfNotNull(
             error?.takeIf(String::isNotBlank),

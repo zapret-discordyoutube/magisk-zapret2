@@ -156,6 +156,20 @@ assert_line "$OUT.signal-hosts" 'Z2_RB_STATUS=partial'
 [ -f "$MOD/system/etc/hosts" ] && [ -f "$STATE/hosts.rollback.backup" ] || fail "source was unlinked before backup durability/journal ordering"
 grep -Fqx 'phase=process-clean' "$STATE/full-rollback.transaction" || fail "signal regressed or advanced an uncommitted hosts phase"
 
+# The generation being rolled back committed a status snapshot claiming an
+# owned, IPv6-active service. It describes what the rollback is about to
+# remove, so it must not survive the rollback.
+cat > "$STATE/status.snapshot" <<EOF
+status=ok
+boot_id=$(cat /proc/sys/kernel/random/boot_id)
+ipv4_active=1
+ipv6_active=1
+ruleset_verified=1
+owner_metadata_verified=1
+qnum=200
+EOF
+chmod 0600 "$STATE/status.snapshot"
+
 PATH="$MOCK:$PATH" STATE_DIR="$STATE" Z2_MOCK_LOG="$LOG" sh "$MOD/zapret2/scripts/zapret-full-rollback.sh" --machine > "$OUT"
 [ "$(wc -l < "$OUT")" = 10 ] || fail "machine output is not exactly ten fields"
 assert_line "$OUT" 'Z2_RB_STATUS=complete'
@@ -277,6 +291,13 @@ rc=$?
 set -e
 [ "$rc" = 1 ] || fail "corrupt PID publication did not block stop"
 [ ! -s "$LOG" ] || fail "corrupt PID publication allowed firewall mutation"
+
+# A committed status snapshot describes the generation the rollback dismantled.
+# Leaving it behind makes the next observation replay those facts — an owned,
+# degraded service — over a module that is disabled and stopped, which the app
+# reads as a failed rollback.
+[ ! -e "$STATE/status.snapshot" ] && [ ! -L "$STATE/status.snapshot" ] ||
+    fail "completed rollback left the status snapshot of the generation it removed"
 
 # An IPv6 frontend that exists but cannot answer must never strand the journal:
 # the artifact it would leave behind fences start, stop, uninstall and purge

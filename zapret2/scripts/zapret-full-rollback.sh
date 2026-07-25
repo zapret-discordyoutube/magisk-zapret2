@@ -369,7 +369,11 @@ process_clean() { scan_exact_owned_nfqws >/dev/null 2>&1; [ -z "$OWNED_SCAN_PIDS
 
 cleanup_diagnostics() {
     local path
-    for path in "$CMDLINE_FILE" "$STARTUP_LOG" "$ERROR_LOG" "$DEBUG_LOG"; do
+    # The committed status snapshot describes the generation this rollback
+    # just dismantled. Leaving it behind makes the next observation replay
+    # those facts — an owned, degraded service — over a module that is
+    # disabled and stopped, which reads as a failed rollback.
+    for path in "$CMDLINE_FILE" "$STARTUP_LOG" "$ERROR_LOG" "$DEBUG_LOG" "$STATUS_SNAPSHOT"; do
         if state_file_is_secure "$path"; then rm -f "$path" 2>/dev/null || true; fi
     done
 }

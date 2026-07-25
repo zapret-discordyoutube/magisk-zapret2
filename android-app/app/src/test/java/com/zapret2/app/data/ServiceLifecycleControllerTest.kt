@@ -2,6 +2,7 @@ package com.zapret2.app.data
 
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -1073,7 +1074,7 @@ class ServiceLifecycleControllerTest {
 
         assertFalse(result.success)
         assertTrue(result.rolledBack)
-        assertTrue(result.rolledBackWithUnverifiedCleanup)
+        assertNotEquals(ServiceLifecycleController.FullRollbackOutcome.COMPLETE, result.outcome)
         assertTrue(result.report?.satisfiesRolledBackContract == true)
         assertFalse(result.report?.satisfiesCompleteContract == true)
     }
@@ -1085,7 +1086,7 @@ class ServiceLifecycleControllerTest {
         )
 
         assertTrue(result.rolledBack)
-        assertFalse(result.rolledBackWithUnverifiedCleanup)
+        assertEquals(ServiceLifecycleController.FullRollbackOutcome.COMPLETE, result.outcome)
     }
 
     @Test
@@ -1138,7 +1139,6 @@ class ServiceLifecycleControllerTest {
             "blockedBeforeAnything" to blockedBeforeAnything,
         ).forEach { (name, result) ->
             assertFalse(name, result.rolledBack)
-            assertFalse(name, result.rolledBackWithUnverifiedCleanup)
         }
     }
 
@@ -1149,7 +1149,6 @@ class ServiceLifecycleControllerTest {
         )
 
         assertFalse(crashed.rolledBack)
-        assertFalse(crashed.rolledBackWithUnverifiedCleanup)
     }
 
     private fun fullRollbackResult(
