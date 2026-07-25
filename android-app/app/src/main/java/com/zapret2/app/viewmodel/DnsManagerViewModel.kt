@@ -147,9 +147,16 @@ class DnsManagerViewModel @Inject constructor(
                         selectedDirectServices = emptySet(),
                         operation = null,
                         loadingText = null,
-                        loadError = UiText.Dynamic(
-                            error.message ?: "runtime.ini: UNAVAILABLE: ${error.javaClass.simpleName}",
-                        ),
+                        // The message here is the module's own error envelope,
+                        // which reaches the screen as body copy. Every other
+                        // user-visible dynamic diagnostic in the app goes
+                        // through the shared redaction boundary and its length
+                        // bound; this one used to skip both, and had no
+                        // localized answer when there was no message at all.
+                        loadError = error.message
+                            ?.takeIf { it.isNotBlank() }
+                            ?.let { UiText.Dynamic(sanitizedBoundedUiDiagnostic(it)) }
+                            ?: UiText.resource(R.string.dns_load_error_body),
                     )
                 }
             } finally {
@@ -420,7 +427,9 @@ class DnsManagerViewModel @Inject constructor(
                     state.loadError
                 },
                 message = if (outcome is ApplyOutcome.ModuleFailed) {
-                    UiText.Dynamic(outcome.diagnostic)
+                    // Originates in module stdout/stderr, so it crosses the
+                    // same boundary as any other diagnostic shown to the user.
+                    UiText.Dynamic(sanitizedBoundedUiDiagnostic(outcome.diagnostic))
                 } else {
                     UiText.resource(
                         when (outcome) {
