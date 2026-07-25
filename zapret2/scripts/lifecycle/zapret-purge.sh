@@ -217,9 +217,11 @@ commit_purge() {
     if [ "$firewall_clean" = 0 ]; then
         # "complete" is a contract, not a mood: it asserts a verified-clean
         # firewall, which this run cannot. Everything else did succeed, so the
-        # honest receipt is a partial one naming the single unproven fact.
+        # honest receipt is a partial one naming the single unproven fact —
+        # and the return code still says the module is gone, because callers
+        # use it to decide whether APK-private data may now be cleared.
         purge_report partial 1 0 1 1 1 1 "Zapret2 module data was permanently removed, but the IPv6 ruleset could not be verified; the pending reboot clears it"
-        return 1
+        return 0
     fi
     purge_report complete 1 1 1 1 1 1 "Zapret2 module data was permanently removed; APK preserved; reboot required"
 }

@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RB_STATUS=error
 RB_PROCESS_CLEAN=0
 RB_FIREWALL_CLEAN=0
+RB_IPV6_UNVERIFIED=0
 RB_ROLLBACK_ARMED=0
 RB_HOSTS_PRESERVED=0
 RB_USER_DATA_PRESERVED=1
@@ -433,14 +434,23 @@ if ! phase_at_least firewall-clean; then
     if ! audit_owned_firewall_for_cleanup; then partial "persisted firewall generation is ambiguous; firewall and listener retained: $FIREWALL_CLEANUP_PREFLIGHT_ERROR"; fi
     if ! cleanup_owned_firewall audited || ! firewall_clean; then partial "verified owned firewall cleanup is incomplete; listener retained"; fi
     # Z2_RB_FIREWALL_CLEAN asserts a verified-clean firewall, so a family that
-    # had to be skipped as unqueryable cannot be reported under it.
-    [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" != 1 ] ||
-        partial "IPv6 mangle table could not be queried; the owned IPv4 ruleset is removed but IPv6 stays unverified until the reboot"
+    # had to be skipped as unqueryable cannot be reported under it. Stopping
+    # here would be worse than reporting it: the journal would stay at an
+    # earlier phase and fence start, stop and uninstall until someone deleted
+    # the state by hand, on a device where the condition repeats every boot.
+    # Finish the rollback and carry the fact into the receipt instead.
+    [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" != 1 ] || RB_IPV6_UNVERIFIED=1
     write_transaction firewall-clean || failed "cannot advance rollback journal after firewall cleanup"
 else
     firewall_clean || partial "rollback journal says firewall-clean but a clean full snapshot cannot be proved"
+    # A resumed run cannot see the earlier pass's skip, so re-derive it: the
+    # journal records the phase, not why the phase was allowed to pass.
+    if command -v ip6tables >/dev/null 2>&1 && ! z2_fw_tool_available ip6tables; then
+        RB_IPV6_UNVERIFIED=1
+    fi
 fi
 RB_FIREWALL_CLEAN=1
+[ "${RB_IPV6_UNVERIFIED:-0}" != 1 ] || RB_FIREWALL_CLEAN=0
 
 if ! phase_at_least process-clean; then
     if ! stop_pidfile_process || ! process_clean; then partial "verified module process cleanup is incomplete"; fi
@@ -472,6 +482,12 @@ if ! durability_sync; then
     failed "rollback journal removal could not be synchronized; recovery journal retained"
 fi
 
+if [ "${RB_IPV6_UNVERIFIED:-0}" = 1 ]; then
+    # Everything the rollback owns is done and the journal is retired, so the
+    # module is not fenced — but "complete" asserts a verified-clean firewall,
+    # and this run could not query IPv6. Report what is true.
+    partial "full rollback finished and the module is disabled, but the IPv6 mangle table could not be queried; the required reboot clears any remaining IPv6 rules"
+fi
 RB_STATUS=complete
 RB_DIAGNOSTIC="full rollback complete; reboot required; user strategies and lists preserved"
 finish_result 0

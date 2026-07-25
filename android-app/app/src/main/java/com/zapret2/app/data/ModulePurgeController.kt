@@ -67,6 +67,15 @@ object ModulePurgeController {
         val success: Boolean get() = outcome == Outcome.COMPLETE
         val rebootRequired: Boolean get() = report?.rebootRequired == true
 
+        /**
+         * Whether the module itself is gone, which a partial receipt can also state — the module
+         * reports partial when everything it owns was removed but one fact could not be verified,
+         * such as an IPv6 ruleset the reboot clears anyway. APK-private data belongs to a module
+         * that no longer exists in that case too, so clearing it must not wait for a full receipt.
+         */
+        val moduleFullyRemoved: Boolean
+            get() = report?.let { it.moduleRemoved && it.stateRemoved && it.externalRemoved } == true
+
         fun diagnosticText(): String = listOfNotNull(
             error?.takeIf(String::isNotBlank),
             report?.diagnostic?.takeIf(String::isNotBlank),
@@ -95,7 +104,7 @@ object ModulePurgeController {
                 ServiceLifecycleController.runExclusiveLifecycleTask {
                     withContext(NonCancellable) {
                         val moduleResult = purgeInsideExclusiveTask()
-                        if (moduleResult.success && !appDataCleaner.clear()) {
+                        if (moduleResult.moduleFullyRemoved && !appDataCleaner.clear()) {
                             moduleResult.copy(
                                 outcome = Outcome.PARTIAL,
                                 error = "Module data was removed, but APK-private state could not be cleared",

@@ -90,7 +90,7 @@ main() {
     acquire_lifecycle_lock ||
         stop_error_exit LIFECYCLE LIFECYCLE_BUSY STOP_LOCK 1 "zapret2 lifecycle is busy"
     if ! audit_recovery_artifacts lifecycle; then
-        message="stop blocked by recovery state: ${RECOVERY_ARTIFACT_DIAGNOSTIC:-unsafe recovery artifact}; reboot to let boot recovery retire it"
+        message="stop blocked by recovery state: ${RECOVERY_ARTIFACT_DIAGNOSTIC:-unsafe recovery artifact}$(recovery_block_remedy)"
         release_lifecycle_lock
         stop_error_exit LIFECYCLE RECOVERY_BLOCKED STOP_RECOVERY 0 "$message"
     fi

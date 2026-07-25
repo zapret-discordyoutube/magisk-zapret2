@@ -560,6 +560,18 @@ enumerate_recovery_artifacts() {
     return "$rc"
 }
 
+# Only an "unsafe" generation is retired by the boot pass. Rollback evidence is
+# durable on purpose and survives every reboot, so telling the user to reboot
+# would send them in circles.
+recovery_block_remedy() {
+    case "${RECOVERY_ARTIFACT_CLASS:-}" in
+        unsafe) printf '%s' "; reboot to let boot recovery retire it" ;;
+        rollback-partial) printf '%s' "; finish the interrupted full rollback, then reboot" ;;
+        rollback-complete) printf '%s' "; a completed full rollback is pending — reboot and reinstall the module" ;;
+        *) ;;
+    esac
+}
+
 audit_recovery_artifacts() {
     local scope="$1" AUDIT_NFQWS2_OVERRIDE="${2:-}" artifact
     local rollback_seen=0 unsafe_seen=0 rollback_meta=0 rollback_tx=0 rollback_extra=0

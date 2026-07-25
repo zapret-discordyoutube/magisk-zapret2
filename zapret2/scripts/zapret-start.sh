@@ -569,7 +569,7 @@ main() {
     if ! audit_recovery_artifacts lifecycle; then
         release_lifecycle_lock
         start_error_exit LIFECYCLE RECOVERY_BLOCKED START_RECOVERY 0 \
-            "${RECOVERY_ARTIFACT_DIAGNOSTIC:-recovery artifacts block start}; reboot to let boot recovery retire it"
+            "${RECOVERY_ARTIFACT_DIAGNOSTIC:-recovery artifacts block start}$(recovery_block_remedy)"
     fi
     if ! uninstall_tombstone_allows_start; then
         message="start blocked by uninstall serialization: $UNINSTALL_TOMBSTONE_ERROR"
