@@ -43,8 +43,16 @@ unzip -o "$ZIPFILE" -x 'META-INF/*' -d "$MODPATH" >&2 ||
 # regular file, and surface anything that is neither (link/special file).
 UNSUPPORTED_ENTRY="$(find "$MODPATH" \( -type d -exec chmod 0755 {} + \) -o \( -type f -exec chmod 0644 {} + \) -o -print)" ||
     abort "! Cannot apply package permissions"
-[ -z "$UNSUPPORTED_ENTRY" ] ||
-    abort "! Extracted module contains a link or special file"
+if [ -n "$UNSUPPORTED_ENTRY" ]; then
+    # -exec … + is always true, so only entries that are neither a directory
+    # nor a regular file reach -print. Confirm that before blaming the archive:
+    # a find whose -exec reports failure would otherwise send the packager
+    # hunting for a symlink that does not exist.
+    if [ -d "$UNSUPPORTED_ENTRY" ] || [ -f "$UNSUPPORTED_ENTRY" ]; then
+        abort "! Cannot apply package permissions to ${UNSUPPORTED_ENTRY#"$MODPATH"/}"
+    fi
+    abort "! Extracted module contains a link or special file: ${UNSUPPORTED_ENTRY#"$MODPATH"/}"
+fi
 [ "$(grep -c '^id=zapret2$' "$MODPATH/module.prop" 2>/dev/null)" = 1 ] ||
     abort "! Refusing package with unexpected module identity"
 

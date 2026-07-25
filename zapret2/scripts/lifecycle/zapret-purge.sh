@@ -207,12 +207,19 @@ commit_purge() {
     if [ "$cleanup_rc" -ne 0 ] || [ -e "$Z2_PURGE_CANONICAL_MODULE_DIR" ] ||
        [ -L "$Z2_PURGE_CANONICAL_MODULE_DIR" ] || [ -e "$Z2_PURGE_CANONICAL_STATE_DIR" ] ||
        [ -L "$Z2_PURGE_CANONICAL_STATE_DIR" ]; then
-        purge_report partial 1 "$firewall_clean" 0 0 0 1 "service and firewall are clean, but one or more module artifacts remain"
+        if [ "$firewall_clean" = 0 ]; then
+            purge_report partial 1 0 0 0 0 1 "one or more module artifacts remain, and the IPv6 ruleset could not be verified"
+        else
+            purge_report partial 1 1 0 0 0 1 "service and firewall are clean, but one or more module artifacts remain"
+        fi
         return 1
     fi
     if [ "$firewall_clean" = 0 ]; then
-        purge_report complete 1 0 1 1 1 1 "Zapret2 module data was permanently removed; IPv6 rules could not be verified and are cleared by the reboot; APK preserved"
-        return 0
+        # "complete" is a contract, not a mood: it asserts a verified-clean
+        # firewall, which this run cannot. Everything else did succeed, so the
+        # honest receipt is a partial one naming the single unproven fact.
+        purge_report partial 1 0 1 1 1 1 "Zapret2 module data was permanently removed, but the IPv6 ruleset could not be verified; the pending reboot clears it"
+        return 1
     fi
     purge_report complete 1 1 1 1 1 1 "Zapret2 module data was permanently removed; APK preserved; reboot required"
 }

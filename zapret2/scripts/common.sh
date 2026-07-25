@@ -2455,6 +2455,44 @@ audit_owned_firewall_for_cleanup() {
     return 0
 }
 
+# Teardown may skip an IPv6 family it cannot query only when something proves
+# this generation published nothing there. That decision was being made
+# separately by stop, full rollback, start's rollback and the failure snapshot,
+# and the four copies disagreed — so it lives here now, with one priority
+# order: what the running transaction did, then the authenticated owner
+# record, then a snapshot committed with a verified ruleset, then the
+# conservative default.
+#
+# Publishes two answers to two different questions:
+#   CLEANUP_IPV6_OWNERSHIP_EXPECTED — may an unqueryable family be skipped?
+#   IPV6_PUBLICATION_RECORDED       — is there positive evidence we published?
+CLEANUP_IPV6_OWNERSHIP_EXPECTED=1
+IPV6_PUBLICATION_RECORDED=0
+resolve_ipv6_ownership_expectation() {
+    local owner_available="${1:-0}"
+    CLEANUP_IPV6_OWNERSHIP_EXPECTED=1
+    IPV6_PUBLICATION_RECORDED=0
+    if [ "${IPV6_TOUCHED:-0}" = 1 ] || [ "${IPV6_BUILT:-0}" = 1 ] ||
+       [ "${IPV6_ACTIVE:-0}" = 1 ]; then
+        IPV6_PUBLICATION_RECORDED=1
+        return 0
+    fi
+    if [ "$owner_available" = 1 ]; then
+        CLEANUP_IPV6_OWNERSHIP_EXPECTED="${OWNER_STATE_IPV6_ACTIVE:-1}"
+        IPV6_PUBLICATION_RECORDED="${OWNER_STATE_IPV6_ACTIVE:-0}"
+        return 0
+    fi
+    case "${STATUS_FILE_STATUS:-}" in
+        ok|stopped)
+            [ "${STATUS_FILE_RULESET_VERIFIED:-0}" = 1 ] &&
+                CLEANUP_IPV6_OWNERSHIP_EXPECTED="${STATUS_FILE_IPV6_ACTIVE:-1}"
+            IPV6_PUBLICATION_RECORDED="${STATUS_FILE_IPV6_ACTIVE:-0}"
+            ;;
+        ?*) IPV6_PUBLICATION_RECORDED="${STATUS_FILE_IPV6_ACTIVE:-0}" ;;
+    esac
+    return 0
+}
+
 FIREWALL_IPV6_SKIPPED_UNPROVEN=0
 cleanup_owned_firewall() {
     local baseline_mode="${1:-owned}" rc=0 result

@@ -41,7 +41,14 @@ write_stop_status() {
     STATUS_CONNBYTES_SUPPORTED="${STATUS_CONNBYTES_SUPPORTED:-0}"
     STATUS_MULTIPORT_SUPPORTED="${STATUS_MULTIPORT_SUPPORTED:-0}"
     STATUS_MARK_SUPPORTED="${STATUS_MARK_SUPPORTED:-0}"
-    STATUS_FALLBACK_MODE=0; STATUS_DIAGNOSTICS="$message"
+    # A note is diagnostic only: a completed stop must not publish an errors=
+    # line, and an error must not lose its message to a note.
+    STATUS_FALLBACK_MODE=0
+    if [ "$state" = stopped ]; then
+        STATUS_ERRORS=""; STATUS_DIAGNOSTICS="${STOP_NOTE:-}"
+    else
+        STATUS_DIAGNOSTICS="$message"
+    fi
     if [ "$state" = stopped ]; then
         STATUS_ERROR_STATUS=OK; STATUS_ERROR_DOMAIN=NONE; STATUS_ERROR_CODE=NONE
         STATUS_ERROR_STAGE=NONE; STATUS_ERROR_DETAIL=""
@@ -83,7 +90,7 @@ main() {
     acquire_lifecycle_lock ||
         stop_error_exit LIFECYCLE LIFECYCLE_BUSY STOP_LOCK 1 "zapret2 lifecycle is busy"
     if ! audit_recovery_artifacts lifecycle; then
-        message="stop blocked by recovery state: ${RECOVERY_ARTIFACT_DIAGNOSTIC:-unsafe recovery artifact}"
+        message="stop blocked by recovery state: ${RECOVERY_ARTIFACT_DIAGNOSTIC:-unsafe recovery artifact}; reboot to let boot recovery retire it"
         release_lifecycle_lock
         stop_error_exit LIFECYCLE RECOVERY_BLOCKED STOP_RECOVERY 0 "$message"
     fi
@@ -107,31 +114,8 @@ main() {
         STOP_RUNTIME_OWNED=1
     fi
     STOP_QNUM="${STATUS_FILE_QNUM:-}"
-    # Two different questions, two different defaults.
-    #
-    # CLEANUP_IPV6_OWNERSHIP_EXPECTED answers "may an unqueryable IPv6 family
-    # be skipped?" — only an authenticated owner record, or a snapshot whose
-    # ruleset was verified when committed, proves there is nothing to remove;
-    # anything else stays conservative, because an error snapshot records what
-    # could not be proven rather than a proof of absence.
-    #
-    # IPV6_PUBLICATION_RECORDED answers "did we ever publish IPv6 rules?" and
-    # needs positive evidence: with no ip6tables frontend at all the module
-    # could not have published any, so the absence of a record is not a reason
-    # to refuse the stop.
-    CLEANUP_IPV6_OWNERSHIP_EXPECTED=1
-    IPV6_PUBLICATION_RECORDED=0
-    if [ "$OWNER_STATE_AVAILABLE" = 1 ]; then
-        STOP_QNUM="$OWNER_STATE_QNUM"
-        CLEANUP_IPV6_OWNERSHIP_EXPECTED="${OWNER_STATE_IPV6_ACTIVE:-1}"
-        IPV6_PUBLICATION_RECORDED="${OWNER_STATE_IPV6_ACTIVE:-0}"
-    elif { [ "${STATUS_FILE_STATUS:-}" = ok ] || [ "${STATUS_FILE_STATUS:-}" = stopped ]; } &&
-         [ "${STATUS_FILE_RULESET_VERIFIED:-0}" = 1 ]; then
-        CLEANUP_IPV6_OWNERSHIP_EXPECTED="${STATUS_FILE_IPV6_ACTIVE:-1}"
-        IPV6_PUBLICATION_RECORDED="${STATUS_FILE_IPV6_ACTIVE:-0}"
-    elif [ -n "${STATUS_FILE_STATUS:-}" ]; then
-        IPV6_PUBLICATION_RECORDED="${STATUS_FILE_IPV6_ACTIVE:-0}"
-    fi
+    [ "$OWNER_STATE_AVAILABLE" != 1 ] || STOP_QNUM="$OWNER_STATE_QNUM"
+    resolve_ipv6_ownership_expectation "$OWNER_STATE_AVAILABLE"
     if [ -z "$STOP_QNUM" ]; then
         # Neither the committed snapshot nor an owner record carries the queue
         # number (first stop on a fresh boot); fall back to the configured one.
@@ -226,10 +210,10 @@ main() {
         if ! remove_transient_diagnostics; then
             log_msg "WARNING: one or more transient diagnostics could not be removed safely"
         fi
-        stop_note=""
+        STOP_NOTE=""
         [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" != 1 ] ||
-            stop_note="IPv6 mangle table unavailable; rules from an earlier generation, if any, were left for the next reboot"
-        if write_stop_status stopped "$stop_note"; then
+            STOP_NOTE="IPv6 mangle table unavailable; rules from an earlier generation, if any, were left for the next reboot"
+        if write_stop_status stopped ""; then
             STOP_STATUS_COMMITTED=1
         else
             # Process and firewall cleanup is already verified.  A diagnostic

@@ -331,15 +331,13 @@ write_ok_status() {
 rollback_start() {
     local rc=0
     ROLLBACK_ERRORS=""
-    # This transaction knows which families it touched, so it can tell "IPv6
-    # was never published" from "IPv6 cannot be queried". IPV6_TOUCHED covers
-    # the case where publication committed but verification did not, which
-    # IPV6_BUILT alone would report as untouched.
-    CLEANUP_IPV6_OWNERSHIP_EXPECTED=1
-    if [ "${IPV6_TOUCHED:-0}" = 0 ] && [ "${IPV6_BUILT:-0}" = 0 ] &&
-       [ "${IPV6_ACTIVE:-0}" = 0 ] && [ "${STATUS_FILE_IPV6_ACTIVE:-0}" = 0 ]; then
-        CLEANUP_IPV6_OWNERSHIP_EXPECTED=0
+    OWNER_STATE_AVAILABLE_FOR_ROLLBACK=0
+    if read_owner_state >/dev/null 2>&1 && owner_state_is_current_boot; then
+        OWNER_STATE_AVAILABLE_FOR_ROLLBACK=1
     fi
+    # The shared resolver weighs this transaction's own facts first, so a
+    # publication that committed without verifying still counts as touched.
+    resolve_ipv6_ownership_expectation "$OWNER_STATE_AVAILABLE_FOR_ROLLBACK"
     if [ "$FIREWALL_MUTATED" = 1 ]; then
         cleanup_owned_firewall >/dev/null 2>&1 ||
             { rc=1; ROLLBACK_ERRORS="stable firewall namespace cleanup failed"; }
@@ -405,7 +403,8 @@ snapshot_owned_state() {
         ip6tables -t mangle -C INPUT -j "$Z2_FW_IN_CHAIN" >/dev/null 2>&1 &&
             SNAP_ANCHORS=$((SNAP_ANCHORS + 1))
     elif { ! command -v ip6tables >/dev/null 2>&1 || ! z2_fw_tool_available ip6tables; } &&
-         { [ "${STATUS_FILE_IPV6_ACTIVE:-0}" = 1 ] || [ "${IPV6_BUILT:-0}" = 1 ] || [ "${IPV6_ACTIVE:-0}" = 1 ]; }; then
+         { resolve_ipv6_ownership_expectation 0
+           [ "$IPV6_PUBLICATION_RECORDED" = 1 ]; }; then
         # An unqueryable frontend is not a disproof. Recording ipv6_active=0
         # here would publish "no IPv6 rules" as a fact, and a later stop reads
         # this snapshot to decide whether IPv6 needs teardown at all.
@@ -560,7 +559,7 @@ main() {
     if ! audit_recovery_artifacts lifecycle; then
         release_lifecycle_lock
         start_error_exit LIFECYCLE RECOVERY_BLOCKED START_RECOVERY 0 \
-            "${RECOVERY_ARTIFACT_DIAGNOSTIC:-recovery artifacts block start}"
+            "${RECOVERY_ARTIFACT_DIAGNOSTIC:-recovery artifacts block start}; reboot to let boot recovery retire it"
     fi
     if ! uninstall_tombstone_allows_start; then
         message="start blocked by uninstall serialization: $UNINSTALL_TOMBSTONE_ERROR"

@@ -405,19 +405,12 @@ preflight_hosts || blocked "hosts overlay or existing backup is unsafe or confli
 load_effective_core_config_readonly >/dev/null 2>&1 || blocked "runtime.ini core values are invalid"
 restore_status_facts
 STOP_QNUM="${STATUS_FILE_QNUM:-${QNUM:-}}"
-# Same rule as stop: only an authenticated owner record or a snapshot that was
-# committed with a verified ruleset may claim IPv6 was never published. The
-# status facts default to zero when no snapshot exists, so absence of evidence
-# must not read as evidence of absence.
-CLEANUP_IPV6_OWNERSHIP_EXPECTED=1
-if { [ "${STATUS_FILE_STATUS:-}" = ok ] || [ "${STATUS_FILE_STATUS:-}" = stopped ]; } &&
-   [ "${STATUS_FILE_RULESET_VERIFIED:-0}" = 1 ]; then
-    CLEANUP_IPV6_OWNERSHIP_EXPECTED="$STATUS_FILE_IPV6_ACTIVE"
-fi
+RB_OWNER_AVAILABLE=0
 if read_owner_state >/dev/null 2>&1; then
+    RB_OWNER_AVAILABLE=1
     STOP_QNUM="$OWNER_STATE_QNUM"
-    CLEANUP_IPV6_OWNERSHIP_EXPECTED="$OWNER_STATE_IPV6_ACTIVE"
 fi
+resolve_ipv6_ownership_expectation "$RB_OWNER_AVAILABLE"
 
 arm_runtime_config || failed "cannot atomically disable autostart in runtime.ini"
 arm_disable || failed "cannot publish exact module disable fence"
@@ -439,6 +432,10 @@ fi
 if ! phase_at_least firewall-clean; then
     if ! audit_owned_firewall_for_cleanup; then partial "persisted firewall generation is ambiguous; firewall and listener retained: $FIREWALL_CLEANUP_PREFLIGHT_ERROR"; fi
     if ! cleanup_owned_firewall audited || ! firewall_clean; then partial "verified owned firewall cleanup is incomplete; listener retained"; fi
+    # Z2_RB_FIREWALL_CLEAN asserts a verified-clean firewall, so a family that
+    # had to be skipped as unqueryable cannot be reported under it.
+    [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" != 1 ] ||
+        partial "IPv6 mangle table could not be queried; the owned IPv4 ruleset is removed but IPv6 stays unverified until the reboot"
     write_transaction firewall-clean || failed "cannot advance rollback journal after firewall cleanup"
 else
     firewall_clean || partial "rollback journal says firewall-clean but a clean full snapshot cannot be proved"

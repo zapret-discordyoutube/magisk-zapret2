@@ -71,4 +71,23 @@ uninstall_line=$(grep -nF '/system/bin/sh "$UNINSTALL_SCRIPT"' "$PURGE" | head -
 grep -Fq '"$PURGE_REQUEST"' "$ROOT/uninstall.sh" ||
     fail "normal uninstall does not retire an abandoned purge request"
 
+# Z2_PURGE_STATUS=complete is a contract the app enforces: it asserts every
+# other field is affirmative, and a receipt that reports complete alongside an
+# unverified firewall is rejected wholesale as a protocol violation. Every
+# emitted receipt must therefore satisfy the contract it declares.
+awk '
+    /purge_report complete/ {
+        for (i = 1; i <= NF; i++) if ($i == "complete") break
+        for (j = i + 1; j <= i + 6; j++) if ($j != 1) { print NR ": " $0; bad = 1 }
+    }
+    END { exit bad ? 1 : 0 }
+' "$PURGE" || fail "a complete purge receipt reports a fact it did not verify"
+
+# The unverifiable-IPv6 hand-off between uninstall and purge must stay wired:
+# uninstall names the condition, purge downgrades the receipt because of it.
+grep -Fq 'Z2_FIREWALL_IPV6_UNVERIFIED' "$ROOT/uninstall.sh" ||
+    fail "uninstall no longer names an unverifiable IPv6 ruleset"
+grep -Fq 'Z2_FIREWALL_IPV6_UNVERIFIED' "$PURGE" ||
+    fail "purge no longer reacts to an unverifiable IPv6 ruleset"
+
 echo "Purge contract shell tests passed"

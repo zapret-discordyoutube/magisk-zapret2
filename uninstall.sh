@@ -89,47 +89,14 @@ command -v audit_recovery_artifacts >/dev/null 2>&1 || {
 
 INSTALL_GENERATION_META="$MODPATH/zapret2/install-generation.meta"
 
-mode_is_0600() {
-    local path="$1" mode listing
-    if command -v stat >/dev/null 2>&1; then
-        mode="$(stat -c '%a' "$path" 2>/dev/null)" || return 1
-        [ "$mode" = 600 ]
-        return
-    fi
-    listing="$(ls -ldn "$path" 2>/dev/null)" || return 1
-    set -- $listing
-    case "${1:-}" in -rw-------*) return 0 ;; *) return 1 ;; esac
-}
-
 valid_archive_sha256() {
     [ "${#1}" -eq 64 ] 2>/dev/null || return 1
     case "$1" in *[!0-9a-f]*) return 1 ;; *) return 0 ;; esac
 }
 
-read_install_generation_meta() {
-    local key value version="" module="" generation="" archive=""
-    local seen_version=0 seen_module=0 seen_generation=0 seen_archive=0 size
-    [ -f "$INSTALL_GENERATION_META" ] && [ ! -L "$INSTALL_GENERATION_META" ] &&
-        path_uid_is_root "$INSTALL_GENERATION_META" && mode_is_0600 "$INSTALL_GENERATION_META" || return 1
-    size="$(wc -c < "$INSTALL_GENERATION_META" 2>/dev/null)" || return 1
-    is_decimal "$size" && [ "$size" -gt 0 ] 2>/dev/null && [ "$size" -le 1024 ] 2>/dev/null || return 1
-    while IFS='=' read -r key value; do
-        case "$key" in
-            version) [ "$seen_version" -eq 0 ] || return 1; version="$value"; seen_version=1 ;;
-            module_dir) [ "$seen_module" -eq 0 ] || return 1; module="$value"; seen_module=1 ;;
-            generation) [ "$seen_generation" -eq 0 ] || return 1; generation="$value"; seen_generation=1 ;;
-            archive_sha256) [ "$seen_archive" -eq 0 ] || return 1; archive="$value"; seen_archive=1 ;;
-            *) return 1 ;;
-        esac
-    done < "$INSTALL_GENERATION_META"
-    [ "$seen_version" -eq 1 ] && [ "$version" = 1 ] &&
-        [ "$seen_module" -eq 1 ] && [ "$module" = "$MODPATH" ] &&
-        [ "$seen_generation" -eq 1 ] && is_safe_token "$generation" &&
-        [ "${#generation}" -le 128 ] 2>/dev/null &&
-        [ "$seen_archive" -eq 1 ] && valid_archive_sha256 "$archive" || return 1
-    INSTALL_META_GENERATION="$generation"
-    INSTALL_META_ARCHIVE_SHA256="$archive"
-}
+# The generation record is parsed by common.sh, which authenticates it against
+# MODDIR — set to MODPATH above, so this script checks the same identity with
+# the stricter implementation (it also proves the link count).
 
 read_completed_rollback_meta() {
     local key value version="" module="" token="" generation="" archive=""
@@ -566,6 +533,7 @@ manager_remove_locked_state() {
             if [ "$probe" -ge 5 ]; then
                 # Marker consumed by zapret-purge.sh: the caller must not
                 # report a verified-clean firewall after this.
+                MANAGER_REMOVE_IPV6_UNVERIFIED=1
                 report_warning "Z2_FIREWALL_IPV6_UNVERIFIED: IPv6 mangle backend stayed unavailable; any IPv6 rules are left to the pending reboot"
                 continue
             fi
@@ -586,7 +554,11 @@ manager_remove_locked_state() {
     z2_purge_remove_managed_tree "$Z2_PURGE_CANONICAL_STATE_DIR" || return 1
     sync >/dev/null 2>&1 || return 1
     [ ! -e "$STATE_DIR" ] && [ ! -L "$STATE_DIR" ] || return 1
-    report_notice "Root-manager removal marker verified; all Zapret2 service, firewall, and private state was removed"
+    if [ "${MANAGER_REMOVE_IPV6_UNVERIFIED:-0}" = 1 ]; then
+        report_notice "Root-manager removal marker verified; all Zapret2 service and private state was removed, and the unverifiable IPv6 ruleset is cleared by the pending reboot"
+    else
+        report_notice "Root-manager removal marker verified; all Zapret2 service, firewall, and private state was removed"
+    fi
     return 0
 }
 

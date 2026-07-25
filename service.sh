@@ -67,18 +67,18 @@ fi
 
 # Wait for boot to complete. resetprop -w blocks on the property instead of
 # forking getprop once a second; fall back to the poll loop without it.
-if command -v resetprop >/dev/null 2>&1; then
-    until [ "$(getprop sys.boot_completed)" = "1" ]; do
-        # No old value: resetprop then blocks until the property changes from
-        # whatever it is now. Passing one would return immediately, because
-        # sys.boot_completed does not exist until init sets it.
-        resetprop -w sys.boot_completed >/dev/null 2>&1 || sleep 1
-    done
-else
-    until [ "$(getprop sys.boot_completed)" = "1" ]; do
+BOOT_STATE="$(getprop sys.boot_completed)"
+while [ "$BOOT_STATE" != "1" ]; do
+    # Wait on the property rather than polling it, but hand resetprop the
+    # value we just observed: waiting on "whatever it is now" would block
+    # forever if the property reached 1 between our read and its own.
+    if command -v resetprop >/dev/null 2>&1; then
+        resetprop -w sys.boot_completed "$BOOT_STATE" >/dev/null 2>&1 || sleep 1
+    else
         sleep 1
-    done
-fi
+    fi
+    BOOT_STATE="$(getprop sys.boot_completed)"
+done
 
 # When autostart runs, zapret-start.sh performs the identical recovery audit
 # under its own lifecycle lock, so a healthy boot needs one cycle instead of
@@ -166,7 +166,6 @@ case "$RUNTIME_CONFIG_STATUS" in
 esac
 
 log "$(core_config_source_message)"
-log "Category state source: $CATEGORIES_FILE"
 
 if [ "$AUTOSTART" = "1" ]; then
     log "Autostart enabled, launching zapret2..."
