@@ -1,5 +1,6 @@
 package com.zapret2.app.ui
 
+import com.zapret2.app.sourceRegion
 import java.io.File
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -25,9 +26,10 @@ class ControlResultDialogPolicyTest {
             "FullRollbackResultDialog" to "control_full_rollback_failure_unknown",
             "ModulePurgeResultDialog" to "control_purge_failure_unknown",
         ).forEach { (dialog, blankFallback) ->
-            val body = source
-                .substringAfter("private fun $dialog(")
-                .substringBefore("\n@Composable")
+            val body = source.sourceRegion(
+                after = "private fun $dialog(",
+                before = "\n@Composable",
+            )
 
             assertTrue("$dialog lost its diagnostic block", body.contains("result.diagnostic"))
             assertTrue(
@@ -55,8 +57,10 @@ class ControlResultDialogPolicyTest {
     fun failedPurgeDialogStatesThatTheModuleIsStillScheduledForRemoval() {
         val body = productionFile("ui/screen/ControlScreen.kt")
             .readText()
-            .substringAfter("private fun ModulePurgeResultDialog(")
-            .substringBefore("\n@Composable")
+            .sourceRegion(
+                after = "private fun ModulePurgeResultDialog(",
+                before = "\n@Composable",
+            )
 
         assertTrue(
             "the purge result dialog stopped naming the pending module removal",

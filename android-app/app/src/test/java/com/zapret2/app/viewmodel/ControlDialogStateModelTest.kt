@@ -324,21 +324,38 @@ class ControlDialogStateModelTest {
                         firewallClean,
                     report.satisfiesCompleteContract,
                 )
-                ServiceLifecycleController.FullRollbackOutcome.entries.forEach { outcome ->
-                    val result = ServiceLifecycleController.FullRollbackResult(
-                        outcome = outcome,
-                        report = report,
-                    )
-                    val dialog = FullRollbackUiState.Result(
-                        outcome = result.outcome,
-                        rolledBack = result.rolledBack,
-                        rebootRequired = result.rebootRequired,
-                        diagnostic = "",
-                    )
-                    val label = "$outcome/$status/firewallClean=$firewallClean"
+                ServiceLifecycleController.FullRollbackOutcome.entries
+                    // COMPLETE is the one outcome whose verdict skips the receipt fields, and
+                    // production mints it only after the same receipt satisfied its whole
+                    // contract — asserted immediately above. Pairing it with a receipt that
+                    // withheld the firewall proof is therefore not a state the app can reach,
+                    // and asserting over it would only pin the fixture against itself.
+                    .filterNot { it == ServiceLifecycleController.FullRollbackOutcome.COMPLETE &&
+                        !report.satisfiesCompleteContract }
+                    .forEach { outcome ->
+                        val result = ServiceLifecycleController.FullRollbackResult(
+                            outcome = outcome,
+                            report = report,
+                        )
+                        val dialog = FullRollbackUiState.Result(
+                            outcome = result.outcome,
+                            rolledBack = result.rolledBack,
+                            rebootRequired = result.rebootRequired,
+                            diagnostic = "",
+                        )
+                        val label = "$outcome/$status/firewallClean=$firewallClean"
 
-                    if (dialog.unverifiedCleanup) assertFalse(label, firewallClean)
-                }
+                        // Two-sided, like the purge twin above: the sentence must appear for
+                        // every rollback the app honoured on a withheld firewall proof, and for
+                        // nothing else. The one-directional `if (unverifiedCleanup) …` guard this
+                        // replaces was vacuous in 55 of 56 iterations, so hard-wiring
+                        // `unverifiedCleanup` to false passed it.
+                        assertEquals(
+                            label,
+                            result.rolledBack && !firewallClean,
+                            dialog.unverifiedCleanup,
+                        )
+                    }
             }
         }
     }

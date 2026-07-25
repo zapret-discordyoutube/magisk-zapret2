@@ -1151,13 +1151,33 @@ object ServiceLifecycleController {
         if (!ownerVerified && generation.isNotEmpty()) return false
         if ((active || ipv4 || ipv6 || rules > 0 || flag("Z2_UNINSTALL_TOMBSTONE")) && !owned) return false
         if (rulesVerified && rules != expected) return false
-        if (status != "stopped" && rulesVerified && !ownerVerified) return false
+        // A ruleset certification without owner metadata is a contradiction only while there is a
+        // runtime to certify. The exemption used to be keyed on `status == "stopped"`, but the
+        // grade is not the measurement: `zapret-status.sh` forces `Z2_OWNED=1` for facts outside
+        // the runtime — an uninstall tombstone, an insecure state directory — and that alone
+        // downgrades a measured-quiet teardown to `degraded` without changing a single measured
+        // field. The stopped fast path that produced `Z2_RULESET_VERIFIED=1` had already required
+        // no pidfile and no owner state, so the certification means the same thing under either
+        // grade. A payload that still reports a process, an active ruleset or counted rules is
+        // rejected exactly as before.
+        val runtimeQuiescent = !process && !active && !ipv4 && !ipv6 &&
+            pid == null && pidStarttime == null && rules == 0
+        if (rulesVerified && !ownerVerified && !runtimeQuiescent) return false
         if (flag("Z2_UPDATE_BLOCKED") && status != "degraded") return false
         return when (status) {
+            // `Z2_UNINSTALL_TOMBSTONE` is deliberately not required to be clear here. The module
+            // sets it from the existence of the uninstall evidence or the `remove` marker
+            // (`zapret-status.sh`), and its `ok` decision never consults it — so a healthy,
+            // running service on a module the user just marked for removal in the root manager
+            // publishes `ok` with the flag set, byte for byte. Rejecting that graded the whole
+            // 33-field record `unknown`, which surfaced as UNAVAILABLE and switched off
+            // `canPurgeModule`/`canFullRollback` precisely when they are the way out. The service
+            // really is `ok`; the pending removal is a separate fact the app already carries in
+            // [ServiceStatus.uninstallTombstone].
             "ok" -> owned && process && active && pidVerified && ownerVerified &&
                 qnum != null && ipv4 && flag("Z2_NFQUEUE") && flag("Z2_QUEUE_BYPASS") &&
                 rulesVerified && expected > 0 && ipv4Rules > 0 && rules == expected &&
-                !flag("Z2_UPDATE_BLOCKED") && !flag("Z2_UNINSTALL_TOMBSTONE")
+                !flag("Z2_UPDATE_BLOCKED")
             // Every measurable fact a teardown owns must be zero, and no ownership,
             // process, queue or gate may survive it. `Z2_RULESET_VERIFIED` is the one
             // field deliberately not required here: it is a certification, not a

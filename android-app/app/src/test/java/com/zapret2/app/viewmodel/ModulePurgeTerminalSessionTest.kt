@@ -7,6 +7,7 @@ import com.zapret2.app.data.ModulePurgeController
 import com.zapret2.app.data.NetworkStatsManager
 import com.zapret2.app.data.PendingModuleState
 import com.zapret2.app.data.ServiceLifecycleController
+import com.zapret2.app.sourceRegion
 import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -293,9 +294,7 @@ class ModulePurgeTerminalSessionTest {
      * `refreshStatus()` returns early afterwards — so anything it leaves behind stays on screen
      * for the life of the process, sourced from a killed process and a deleted module. Before this
      * was fixed the screen showed "Stopped" with an uptime of the dead nfqws2, its whole process
-     * card, the NFQUEUE capability badge and the module's own red diagnostic.
-     *
-     * The projection is the same one `refreshStatus()` publishes for a module it cannot query.
+     * card and the module's own red diagnostic.
      */
     @Test
     fun purgeResetRetiresEveryRuntimeFactOfTheErasedModule() {
@@ -305,7 +304,6 @@ class ModulePurgeTerminalSessionTest {
         assertNotEquals(ProcessStats(), installed.processStats)
         assertNotEquals(NetworkStatsManager.IptablesDetail(), installed.iptablesDetail)
         assertNotNull(installed.moduleDiagnostic)
-        assertTrue(installed.nfqueueSupported)
 
         val reset = installed.afterModulePurge(
             purgeControllerResult(completeReceipt(), commandSucceeded = true),
@@ -316,19 +314,77 @@ class ModulePurgeTerminalSessionTest {
         assertEquals(ProcessStats(), reset.processStats)
         assertEquals(NetworkStatsManager.IptablesDetail(), reset.iptablesDetail)
         assertNull(reset.moduleDiagnostic)
-        assertFalse(reset.nfqueueSupported)
         assertEquals(ModuleInstallState.MISSING, reset.moduleInstallState)
         assertEquals(PendingModuleState.NONE, reset.pendingModuleState)
         assertTrue(reset.modulePurgeCompleted)
+    }
 
-        // The same projection `refreshStatus()` reaches for a module it cannot query.
+    /**
+     * The reset must not invent an answer the app measured for itself.
+     *
+     * `ControlUiState.nfqueueSupported` is the app's own kernel probe
+     * (`Zapret2ModuleRepository.buildProbeCommand()` reads `/proc/net/netfilter/nf_queue` and the
+     * iptables target tables), so it answers the same with or without a module. Publishing `false`
+     * from the purge rendered the NFQUEUE badge red with "unavailable" for TalkBack, and because
+     * the same reset arms the terminal gate nothing could correct it before a process restart —
+     * after which the identical device, still without the module, reported the badge green. The
+     * module's own `Z2_NFQUEUE` lives in `iptablesDetail`, which the reset does retire.
+     *
+     * The parity claim is checked field by field, not on the status alone: the reset is compared
+     * against the whole projection `refreshStatus()` publishes for a module it cannot query, with
+     * the three module-scoped divergences named explicitly. Any future field that drifts out of
+     * that projection fails here.
+     */
+    @Test
+    fun purgeResetKeepsTheKernelCapabilityTheAppMeasuredForItself() {
+        val installed = installedControlState()
+        // Guard: a fixture whose probe already said "no" cannot prove the measurement survived.
+        assertTrue(installed.nfqueueSupported)
+
+        val reset = installed.afterModulePurge(
+            purgeControllerResult(completeReceipt(), commandSucceeded = true),
+        )
+
+        assertTrue(
+            "the purge must not overwrite the app's own kernel probe",
+            reset.nfqueueSupported,
+        )
+
+        val erasedEnvironment = ModuleEnvironmentSnapshot(
+            activeState = ModuleInstallState.MISSING,
+            pendingState = PendingModuleState.NONE,
+            nfqueueSupported = installed.nfqueueSupported,
+        )
+        // Written out as `refreshStatus()` writes it for `ModuleServiceAccess.NOT_INSTALLED`,
+        // over the same screen state, so a divergence in either direction fails this comparison.
+        val moduleUnqueryable = installed.copy(
+            isRunning = false,
+            canStopService = false,
+            status = requireNotNull(erasedEnvironment.serviceAccess.statusWithoutQuery()),
+            uptime = "",
+            iptablesActive = false,
+            nfqueueRulesCount = 0,
+            iptablesDetail = NetworkStatsManager.IptablesDetail(),
+            processStats = ProcessStats(),
+            moduleInstallState = erasedEnvironment.activeState,
+            pendingModuleState = erasedEnvironment.pendingState,
+            moduleMutationState = ModuleMutationState.IDLE,
+            moduleVersion = erasedEnvironment.displayedVersion,
+            nfqueueSupported = erasedEnvironment.nfqueueSupported,
+            hasAuthoritativeRuntimeSettings = false,
+        )
+
         assertEquals(
-            ControlStatus.NOT_INSTALLED,
-            ModuleEnvironmentSnapshot(
-                activeState = ModuleInstallState.MISSING,
-                pendingState = PendingModuleState.NONE,
-                nfqueueSupported = false,
-            ).serviceAccess.statusWithoutQuery(),
+            "afterModulePurge diverges from the unqueryable-module projection " +
+                "beyond the three facts only a purge knows",
+            moduleUnqueryable.copy(
+                // Module-scoped and correct: the boot flag and the diagnostic both belonged to a
+                // module that no longer exists, and only a purge can arm the terminal gate.
+                autostart = false,
+                moduleDiagnostic = null,
+                modulePurgeCompleted = true,
+            ),
+            reset,
         )
     }
 
@@ -424,8 +480,10 @@ class ModulePurgeTerminalSessionTest {
     fun everyStatusPublicationInTheViewModelGoesThroughTheTerminalPurgeGate() {
         val source = productionFile("viewmodel/ControlViewModel.kt").readText()
         val refreshStatus = source
-            .substringAfter("private suspend fun refreshStatus(): ServiceSnapshot {")
-            .substringBefore("\n    fun refreshStatusManually()")
+            .sourceRegion(
+                after = "private suspend fun refreshStatus(): ServiceSnapshot {",
+                before = "\n    fun refreshStatusManually()",
+            )
 
         assertTrue(
             "refreshStatus must not even query a module this session already erased",
@@ -440,9 +498,10 @@ class ModulePurgeTerminalSessionTest {
             gated,
         )
 
-        val purgeLaunch = source
-            .substringAfter("private fun startModulePurge(reason: ModulePurgeLaunchReason) {")
-            .substringBefore("private fun showModulePurgeResult(")
+        val purgeLaunch = source.sourceRegion(
+            after = "private fun startModulePurge(reason: ModulePurgeLaunchReason) {",
+            before = "private fun showModulePurgeResult(",
+        )
         assertTrue(
             "the purge must arm the terminal gate through afterModulePurge",
             purgeLaunch.contains("afterModulePurge(result)"),

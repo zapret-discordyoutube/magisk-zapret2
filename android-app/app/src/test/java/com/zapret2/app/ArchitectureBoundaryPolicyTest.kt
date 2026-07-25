@@ -58,9 +58,10 @@ class ArchitectureBoundaryPolicyTest {
     @Test
     fun privilegedModuleEnvironmentReadsAreDispatchedOffTheCallingScope() {
         val repository = productionFile("data/Zapret2ModuleRepository.kt").readText()
-        val versionRead = repository
-            .substringAfter("private suspend fun readVerifiedVersion(")
-            .substringBefore("private fun parseExactKeyValues(")
+        val versionRead = repository.sourceRegion(
+            after = "private suspend fun readVerifiedVersion(",
+            before = "private fun parseExactKeyValues(",
+        )
         val blockingFileOperations = Regex("RootFileIo\\.(?:read|write|ensureDirectory|removeFile)")
 
         assertEquals(1, blockingFileOperations.findAll(repository).count())

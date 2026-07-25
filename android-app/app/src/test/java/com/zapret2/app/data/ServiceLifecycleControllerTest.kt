@@ -2,7 +2,6 @@ package com.zapret2.app.data
 
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -1002,6 +1001,189 @@ class ServiceLifecycleControllerTest {
         }
     }
 
+    /**
+     * A healthy running service on a module the user has marked for removal.
+     *
+     * `zapret-status.sh` sets `Z2_UNINSTALL_TOMBSTONE=1` from the uninstall evidence or the
+     * `$MODDIR/remove` marker, and its `ok` decision — owner metadata verified, ruleset verified,
+     * matching queue number — never consults that flag. So this exact 33-field record is what the
+     * module prints, and the app used to grade the whole thing `unknown` for it. That is reachable
+     * in one gesture: the app reconciles its module environment once per process, so marking the
+     * module for removal in the root manager while the app is open leaves the cached state READY,
+     * the status script is still called, and the payload it prints is this one.
+     *
+     * The service really is `ok`. The pending removal is a separate fact, and the app already
+     * carries it separately in [ServiceLifecycleController.ServiceStatus.uninstallTombstone].
+     */
+    @Test
+    fun parseStatusOutput_acceptsARunningServiceOnAModuleMarkedForRemoval() {
+        val status = ServiceLifecycleController.parseStatusOutput(runningMarkedForRemovalStatusLines())
+
+        assertTrue(status.metadataComplete)
+        assertEquals("ok", status.declaredStatus)
+        assertTrue(status.healthy)
+        assertTrue(status.uninstallTombstone)
+        assertNull(status.error)
+    }
+
+    /**
+     * Mutation sweep for the one bit that relaxation freed.
+     *
+     * Every other field of the running record must still be nailed down by a rule of its own, or
+     * the relaxation would have opened a door for a corrupted payload rather than an honest one.
+     * `Z2_UNINSTALL_TOMBSTONE` is absent from the list on purpose — it is the relaxation — and it
+     * is covered by the assertion below it, which shows the record is graded identically with the
+     * flag clear.
+     */
+    @Test
+    fun parseStatusOutput_relaxesOnlyTheRemovalMarkInARunningService() {
+        val contradictions = listOf(
+            "Z2_STATUS" to "stopped",
+            "Z2_STATUS" to "degraded",
+            "Z2_OWNED" to "0",
+            "Z2_PROCESS" to "0",
+            "Z2_ACTIVE" to "0",
+            "Z2_PID" to "",
+            "Z2_PID_VERIFIED" to "0",
+            "Z2_PID_STARTTIME" to "",
+            "Z2_OWNER_GENERATION" to "",
+            "Z2_OWNER_METADATA_VERIFIED" to "0",
+            "Z2_QNUM" to "",
+            "Z2_IPV4" to "0",
+            "Z2_RULES" to "4",
+            "Z2_EXPECTED_RULES" to "4",
+            "Z2_IPV4_RULES" to "0",
+            "Z2_IPV6_RULES" to "0",
+            "Z2_RULESET_VERIFIED" to "0",
+            "Z2_NFQUEUE" to "0",
+            "Z2_QUEUE_BYPASS" to "0",
+            "Z2_UPDATE_BLOCKED" to "1",
+            "Z2_CHAINS" to "0",
+            "Z2_ANCHORS" to "0",
+            "Z2_ANCHORS" to "5",
+        )
+
+        contradictions.forEach { (field, value) ->
+            val status = ServiceLifecycleController.parseStatusOutput(
+                runningMarkedForRemovalStatusLines().map {
+                    if (it.startsWith("$field=")) "$field=$value" else it
+                },
+            )
+
+            assertFalse("$field=$value must fail closed", status.metadataComplete)
+            assertFalse("$field=$value must not report a healthy service", status.healthy)
+            assertEquals("$field=$value", "unknown", status.declaredStatus)
+        }
+
+        // The relaxed bit, and only it: clearing the mark changes nothing about the grade.
+        val withoutTheMark = ServiceLifecycleController.parseStatusOutput(
+            runningMarkedForRemovalStatusLines().map {
+                if (it.startsWith("Z2_UNINSTALL_TOMBSTONE=")) "Z2_UNINSTALL_TOMBSTONE=0" else it
+            },
+        )
+        assertTrue(withoutTheMark.metadataComplete)
+        assertTrue(withoutTheMark.healthy)
+        assertFalse(withoutTheMark.uninstallTombstone)
+    }
+
+    /**
+     * A teardown that measured itself complete but is still owned by something outside the runtime.
+     *
+     * After a clean stop the snapshot holds `stopped` with `ruleset_verified=1`, so the next
+     * observation takes the stopped fast path, measures zero rules in both families and computes
+     * `Z2_RULESET_VERIFIED=1`. The uninstall tombstone then forces `Z2_OWNED=1`, which is enough
+     * to keep the grade at `degraded` — nothing measured changed. The app rejected that record
+     * because it read the *grade* rather than the measurement, which cost the user
+     * `canPurgeModule`/`canFullRollback` in the one state where they are the way out.
+     */
+    @Test
+    fun parseStatusOutput_acceptsAQuietTeardownOwnedOnlyFromOutsideTheRuntime() {
+        val status = ServiceLifecycleController.parseStatusOutput(tombstoneOwnedQuietStatusLines())
+
+        assertTrue(status.metadataComplete)
+        assertEquals("degraded", status.declaredStatus)
+        assertTrue(status.uninstallTombstone)
+        assertTrue(status.rulesetVerified)
+        assertFalse(status.ownerMetadataVerified)
+        assertFalse(status.processRunning)
+        assertFalse(status.iptablesActive)
+        assertFalse(status.healthy)
+        assertFalse(status.provesLiveRuntime)
+        // `Z2_OWNED=1` is exactly why it is not a completed stop, and that stays true.
+        assertFalse(status.fullyStopped)
+        assertNull(status.error)
+    }
+
+    /**
+     * Mutation sweep for the narrowed certification rule.
+     *
+     * The rule that used to reject this payload — a ruleset certification without owner metadata
+     * outside a `stopped` grade — now asks whether there is a runtime left to certify instead of
+     * asking for the grade. Every field that would reintroduce one must still fail closed.
+     *
+     * Four fields are deliberately not contradictions of this shape and are asserted below the
+     * sweep instead of inside it:
+     *  - `Z2_NFQUEUE`/`Z2_QUEUE_BYPASS` are kernel capability echoes here
+     *    (`Z2_NFQUEUE="$STATUS_FILE_NFQUEUE_SUPPORTED"` on the module's `degraded` branch), not
+     *    measurements of a live queue, so either value is honest.
+     *  - `Z2_UNINSTALL_TOMBSTONE=0` is the same record reached through the other route that forces
+     *    `Z2_OWNED=1` on a quiet teardown: an insecure state directory.
+     *  - `Z2_RULESET_VERIFIED=0` is the same teardown with the certification withheld.
+     *
+     * `Z2_CHAINS` is untouched by any rule under a `degraded` grade, before this change as after,
+     * so it is out of scope here; `Z2_ANCHORS` is covered through `anchors > chains`.
+     */
+    @Test
+    fun parseStatusOutput_relaxesOnlyTheCertificationInAQuietOwnedTeardown() {
+        val contradictions = listOf(
+            "Z2_STATUS" to "ok",
+            "Z2_STATUS" to "stopped",
+            "Z2_OWNED" to "0",
+            "Z2_PROCESS" to "1",
+            "Z2_ACTIVE" to "1",
+            "Z2_PID" to "4242",
+            "Z2_PID_VERIFIED" to "1",
+            "Z2_PID_STARTTIME" to "98765",
+            "Z2_OWNER_GENERATION" to "generation-1",
+            "Z2_OWNER_METADATA_VERIFIED" to "1",
+            "Z2_IPV4" to "1",
+            "Z2_IPV6" to "1",
+            "Z2_RULES" to "3",
+            "Z2_EXPECTED_RULES" to "3",
+            "Z2_IPV4_RULES" to "2",
+            "Z2_IPV6_RULES" to "1",
+            "Z2_UPDATE_BLOCKED" to "1",
+            "Z2_ANCHORS" to "1",
+        )
+
+        contradictions.forEach { (field, value) ->
+            val status = ServiceLifecycleController.parseStatusOutput(
+                tombstoneOwnedQuietStatusLines().map {
+                    if (it.startsWith("$field=")) "$field=$value" else it
+                },
+            )
+
+            assertFalse("$field=$value must fail closed", status.metadataComplete)
+            assertEquals("$field=$value", "unknown", status.declaredStatus)
+        }
+
+        listOf(
+            "Z2_NFQUEUE" to "1",
+            "Z2_QUEUE_BYPASS" to "1",
+            "Z2_UNINSTALL_TOMBSTONE" to "0",
+            "Z2_RULESET_VERIFIED" to "0",
+        ).forEach { (field, value) ->
+            val status = ServiceLifecycleController.parseStatusOutput(
+                tombstoneOwnedQuietStatusLines().map {
+                    if (it.startsWith("$field=")) "$field=$value" else it
+                },
+            )
+
+            assertTrue("$field=$value is an honest shape of this record", status.metadataComplete)
+            assertEquals("$field=$value", "degraded", status.declaredStatus)
+        }
+    }
+
     @Test
     fun parseStatusOutput_rejectsWhitespaceAndPrefixKeyInjection() {
         val whitespaceKey = ServiceLifecycleController.parseStatusOutput(
@@ -1212,9 +1394,17 @@ class ServiceLifecycleControllerTest {
         // Re-adding a `serviceStatus.fullyStopped` requirement to the partial branch fails here.
         assertFalse(result.serviceStatus?.fullyStopped == true)
         assertTrue(result.rolledBack)
-        assertNotEquals(ServiceLifecycleController.FullRollbackOutcome.COMPLETE, result.outcome)
         assertTrue(result.report?.satisfiesRolledBackContract == true)
         assertFalse(result.report?.satisfiesCompleteContract == true)
+        // Not the fixture's word for the outcome: this receipt, from the command that really
+        // prints it (`zapret-full-rollback.sh` exits 1 for `partial`), is graded by production.
+        assertEquals(
+            ServiceLifecycleController.FullRollbackOutcome.PARTIAL,
+            ServiceLifecycleController.gradeFullRollbackReceipt(
+                checkNotNull(result.report),
+                ServiceLifecycleController.CommandResult(success = false, exitCode = 1),
+            ),
+        )
     }
 
     /**
@@ -1298,9 +1488,26 @@ class ServiceLifecycleControllerTest {
         val result = fullRollbackResult(
             outcome = ServiceLifecycleController.FullRollbackOutcome.COMPLETE,
         )
+        val report = checkNotNull(result.report)
 
         assertTrue(result.rolledBack)
-        assertEquals(ServiceLifecycleController.FullRollbackOutcome.COMPLETE, result.outcome)
+        assertTrue(report.satisfiesCompleteContract)
+        // COMPLETE is the one grade production refuses to mint from the receipt alone: the grader
+        // hands the decision back to the caller, which only then demands the whole contract and a
+        // verified stop. The same receipt from a command that failed is graded, and rejected.
+        assertNull(
+            ServiceLifecycleController.gradeFullRollbackReceipt(
+                report,
+                ServiceLifecycleController.CommandResult(success = true, exitCode = 0),
+            ),
+        )
+        assertEquals(
+            ServiceLifecycleController.FullRollbackOutcome.COMMAND_FAILED,
+            ServiceLifecycleController.gradeFullRollbackReceipt(
+                report,
+                ServiceLifecycleController.CommandResult(success = false, exitCode = 1),
+            ),
+        )
     }
 
     @Test

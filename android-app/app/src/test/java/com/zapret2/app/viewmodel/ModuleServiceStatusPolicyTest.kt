@@ -7,7 +7,10 @@ import com.zapret2.app.data.ModuleMutationState
 import com.zapret2.app.data.ModuleEnvironmentSnapshot
 import com.zapret2.app.data.PendingModuleState
 import com.zapret2.app.data.ServiceLifecycleController
+import com.zapret2.app.data.runningMarkedForRemovalStatusLines
+import com.zapret2.app.data.tombstoneOwnedQuietStatusLines
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -222,6 +225,44 @@ class ModuleServiceStatusPolicyTest {
             ),
         ),
     ) { "the module's own stop receipt must parse" }
+
+    /**
+     * The recovery actions must survive the module being marked for removal.
+     *
+     * `canPurgeModule` and `canFullRollback` both require the projected status to be one of
+     * RUNNING/DEGRADED/STOPPED. Rejecting either payload the module prints in that state graded it
+     * `unknown`, which carried "Invalid or incomplete Zapret2 machine status output" into
+     * `ServiceStatus.error`, which `projectedControlStatus` turns into UNAVAILABLE — switching both
+     * actions off in the exact state where erasing or rolling back is the way out.
+     */
+    @Test
+    fun moduleMarkedForRemoval_keepsEraseAndRollbackReachableInBothPayloadsItPrints() {
+        mapOf(
+            "running service" to runningMarkedForRemovalStatusLines(),
+            "quiet teardown owned only by the removal mark" to tombstoneOwnedQuietStatusLines(),
+        ).forEach { (label, lines) ->
+            val serviceStatus = ServiceLifecycleController.parseStatusOutput(lines)
+
+            assertTrue(label, serviceStatus.metadataComplete)
+            assertTrue(label, serviceStatus.uninstallTombstone)
+            assertNull("$label must not be graded as a broken payload", serviceStatus.error)
+
+            val state = ControlUiState(
+                status = projectedControlStatus(
+                    serviceStatus = serviceStatus,
+                    canStopService = serviceStatus.provesLiveRuntime,
+                ),
+                hasRootAccess = true,
+                canStopService = serviceStatus.provesLiveRuntime,
+                moduleInstallState = ModuleInstallState.READY,
+                moduleMutationState = ModuleMutationState.IDLE,
+            )
+
+            assertNotEquals(label, ControlStatus.UNAVAILABLE, state.status)
+            assertTrue("$label must keep the erase action reachable", state.canPurgeModule)
+            assertTrue("$label must keep the rollback action reachable", state.canFullRollback)
+        }
+    }
 
     private fun statusWithoutQuery(
         activeState: ModuleInstallState,

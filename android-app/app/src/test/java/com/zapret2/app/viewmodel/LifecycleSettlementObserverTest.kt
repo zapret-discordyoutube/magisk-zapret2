@@ -1,6 +1,7 @@
 package com.zapret2.app.viewmodel
 
 import com.zapret2.app.data.ModuleMutationState
+import com.zapret2.app.sourceRegion
 import java.io.File
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -82,12 +83,14 @@ class LifecycleSettlementObserverTest {
     @Test
     fun controlScreen_reobservesTransientLifecycleAndStopsOffScreen() {
         val source = productionFile("ControlViewModel.kt").readText()
-        val transientBranch = source
-            .substringAfter("if (lifecycleMutationState != ModuleMutationState.IDLE)")
-            .substringBefore("val netStats =")
-        val screenStop = source
-            .substringAfter("fun onScreenStopped()")
-            .substringBefore("fun clearMessage()")
+        val transientBranch = source.sourceRegion(
+            after = "if (lifecycleMutationState != ModuleMutationState.IDLE)",
+            before = "val netStats =",
+        )
+        val screenStop = source.sourceRegion(
+            after = "fun onScreenStopped()",
+            before = "fun clearMessage()",
+        )
 
         assertTrue(transientBranch.contains("lifecycleSettlementObserver.ensureObserving()"))
         assertTrue(transientBranch.contains("networkType = currentNetworkType"))

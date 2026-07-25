@@ -1,7 +1,7 @@
 package com.zapret2.app.data
 
+import com.zapret2.app.viewmodel.ModulePurgeUiState
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -10,20 +10,13 @@ class ModulePurgeControllerTest {
 
     @Test
     fun prepareProtocol_acceptsOnlyExactCompleteOneTimeRecord() {
-        val valid = listOf(
-            "Z2_PURGE_PREPARE_VERSION=1",
-            "Z2_PURGE_PREPARE_STATUS=armed",
-            "Z2_PURGE_PREPARE_TOKEN=app.1234.token",
-            "Z2_PURGE_PREPARE_DIAGNOSTIC=armed",
-            "Z2_PURGE_PREPARE_COMPLETE=1",
-        )
+        val valid = prepareRecord()
 
         val parsed = ModulePurgeController.parsePrepareOutput(valid)
         assertTrue(parsed is ModulePurgeController.ParseResult.Valid)
-        assertEquals(
-            "app.1234.token",
-            (parsed as ModulePurgeController.ParseResult.Valid).value.token,
-        )
+        val report = (parsed as ModulePurgeController.ParseResult.Valid).value
+        assertEquals("app.1234.token", report.token)
+        assertTrue(report.armed)
         assertTrue(
             ModulePurgeController.parsePrepareOutput(valid.dropLast(1))
                 is ModulePurgeController.ParseResult.Invalid,
@@ -32,6 +25,110 @@ class ModulePurgeControllerTest {
             ModulePurgeController.parsePrepareOutput(valid + "Z2_PURGE_PREPARE_COMPLETE=1")
                 is ModulePurgeController.ParseResult.Invalid,
         )
+    }
+
+    /**
+     * A record the parser cannot trust at all is still rejected outright, and none of these may
+     * arm the commit.
+     */
+    @Test
+    fun prepareProtocol_rejectsUnknownStatusOrVersionAndNeverArmsOnABadToken() {
+        listOf(
+            "Z2_PURGE_PREPARE_VERSION" to "2",
+            "Z2_PURGE_PREPARE_STATUS" to "refused",
+            "Z2_PURGE_PREPARE_STATUS" to "",
+        ).forEach { (key, value) ->
+            assertTrue(
+                "$key=$value must be rejected outright",
+                ModulePurgeController.parsePrepareOutput(prepareRecord(overrides = mapOf(key to value)))
+                    is ModulePurgeController.ParseResult.Invalid,
+            )
+        }
+
+        listOf("", "app 1234 token", "app/1234", "a".repeat(129)).forEach { token ->
+            val parsed = ModulePurgeController.parsePrepareOutput(
+                prepareRecord(overrides = mapOf("Z2_PURGE_PREPARE_TOKEN" to token)),
+            )
+            assertFalse(
+                "token '$token' must never arm the commit",
+                (parsed as ModulePurgeController.ParseResult.Valid).value.armed,
+            )
+            assertEquals(
+                "Purge prepare protocol rejected the one-time confirmation",
+                parsed.value.refusalError,
+            )
+        }
+    }
+
+    /**
+     * The reported defect. `prepare_purge` refuses for eight distinct reasons and names each one
+     * in `Z2_PURGE_PREPARE_DIAGNOSTIC`; a stale uninstall tombstone is the one whose remedy is
+     * documented (`docs/USER_OPERATIONS_RU.md`). The parser used to discard the whole record and
+     * report only "Purge prepare protocol rejected the one-time confirmation", which reads like a
+     * version mismatch, and `CommandResult.diagnosticText()` could not recover the sentence: it
+     * collects stderr and `ERROR:`/`DIAGNOSTIC:` prefixes, and `Z2_PURGE_PREPARE_DIAGNOSTIC=` is
+     * neither. The commit path never lost its receipt this way.
+     */
+    @Test
+    fun prepareRefusalCarriesTheModulesOwnReasonToTheUser() {
+        val refusals = mapOf(
+            "blocked" to listOf(
+                "another update or rollback transaction is active",
+                "uninstall evidence is active, malformed, or unsafe",
+                "installed module identity is unsafe",
+                "another irreversible purge confirmation is already armed",
+                "module removal marker is unsafe",
+                "stale purge request is unsafe",
+                "root access is required",
+            ),
+            "error" to listOf(
+                "secure purge state is unavailable",
+                "cannot create one-time purge token",
+            ),
+        )
+
+        refusals.forEach { (status, diagnostics) ->
+            diagnostics.forEach { diagnostic ->
+                // prepare_purge prints an empty token beside every refusal, and returns 1.
+                val record = prepareRecord(
+                    overrides = mapOf(
+                        "Z2_PURGE_PREPARE_STATUS" to status,
+                        "Z2_PURGE_PREPARE_TOKEN" to "",
+                        "Z2_PURGE_PREPARE_DIAGNOSTIC" to diagnostic,
+                    ),
+                )
+                val prepareCommand = ServiceLifecycleController.CommandResult(
+                    success = false,
+                    stdout = record,
+                    exitCode = 1,
+                )
+                // The record carries no `ERROR:`/`DIAGNOSTIC:` prefix and nothing reaches stderr,
+                // so the transport has nothing of its own to say. This is the whole defect.
+                assertEquals(diagnostic, "", prepareCommand.diagnosticText())
+
+                val parsed = ModulePurgeController.parsePrepareOutput(record)
+                assertTrue(diagnostic, parsed is ModulePurgeController.ParseResult.Valid)
+                val report = (parsed as ModulePurgeController.ParseResult.Valid).value
+                assertFalse(diagnostic, report.armed)
+
+                // What `purgeInsideExclusiveTask` builds for a prepare it could not arm, and what
+                // `showModulePurgeResult` then renders.
+                val result = ModulePurgeController.Result(
+                    outcome = ModulePurgeController.Outcome.COMMAND_FAILED,
+                    prepareReport = report,
+                    command = prepareCommand,
+                    error = report.refusalError,
+                )
+
+                assertEquals(
+                    "the user must be told why the purge was refused",
+                    "Module purge was refused before anything was removed\n$diagnostic",
+                    result.diagnosticText(),
+                )
+                assertFalse(diagnostic, result.moduleDirectoryRemoved)
+                assertFalse(diagnostic, result.erased)
+            }
+        }
     }
 
     @Test
@@ -79,23 +176,29 @@ class ModulePurgeControllerTest {
 
     @Test
     fun partialReceiptThatRemovedEverythingIsErasedWithAnUnverifiedCleanupReservation() {
-        val result = purgeResult(
-            outcome = ModulePurgeController.Outcome.PARTIAL,
+        // The outcome is graded by production from the receipt and the command, not handed to the
+        // fixture, so asserting it is an assertion about `classifyReport` rather than about the
+        // argument the test just passed in. `commit_purge` returns 0 on this path on purpose —
+        // "the return code still says the module is gone" — which is why the erase is admitted.
+        val result = gradedPurgeResult(
             status = "partial",
             overrides = mapOf("Z2_PURGE_FIREWALL_CLEAN" to "0"),
+            commandSucceeded = true,
         )
 
+        assertEquals(ModulePurgeController.Outcome.PARTIAL, result.outcome)
         assertTrue(result.moduleFullyRemoved)
         assertTrue(result.erased)
-        assertNotEquals(ModulePurgeController.Outcome.COMPLETE, result.outcome)
+        assertTrue(purgeDialog(result).unverifiedCleanup)
     }
 
     @Test
     fun completeReceiptIsErasedWithoutAnyReservation() {
-        val result = purgeResult(outcome = ModulePurgeController.Outcome.COMPLETE)
+        val result = gradedPurgeResult(status = "complete", commandSucceeded = true)
 
-        assertTrue(result.erased)
         assertEquals(ModulePurgeController.Outcome.COMPLETE, result.outcome)
+        assertTrue(result.erased)
+        assertFalse(purgeDialog(result).unverifiedCleanup)
     }
 
     @Test
@@ -214,11 +317,14 @@ class ModulePurgeControllerTest {
 
                         assertEquals(label, expected, result.moduleFullyRemoved)
                         assertEquals(label, expected, result.erased)
-                        // The screen reserves the IPv6 caveat for exactly what stayed unproven.
+                        // The screen reserves the IPv6 caveat for exactly what stayed unproven,
+                        // across the command dimension the dialog's own test does not enumerate.
+                        // The expected side is the fixture's firewall bit; the actual side is the
+                        // production predicate the dialog renders.
                         assertEquals(
                             label,
-                            result.erased && !firewallClean,
-                            result.erased && result.outcome != ModulePurgeController.Outcome.COMPLETE,
+                            expected && !firewallClean,
+                            purgeDialog(result).unverifiedCleanup,
                         )
                     }
                 }
@@ -271,6 +377,50 @@ class ModulePurgeControllerTest {
         exitCode = if (success) 0 else 1,
         error = if (success) null else "Root command timed out",
     )
+
+    private fun prepareRecord(
+        overrides: Map<String, String> = emptyMap(),
+    ): List<String> = listOf(
+        "Z2_PURGE_PREPARE_VERSION" to "1",
+        "Z2_PURGE_PREPARE_STATUS" to "armed",
+        "Z2_PURGE_PREPARE_TOKEN" to "app.1234.token",
+        "Z2_PURGE_PREPARE_DIAGNOSTIC" to "armed",
+        "Z2_PURGE_PREPARE_COMPLETE" to "1",
+    ).map { (key, value) -> "$key=${overrides[key] ?: value}" }
+
+    /** The screen predicate this controller's verdict feeds, so assertions can read it directly. */
+    private fun purgeDialog(result: ModulePurgeController.Result) = ModulePurgeUiState.Result(
+        outcome = result.outcome,
+        erased = result.erased,
+        rebootRequired = result.rebootRequired,
+        diagnostic = "",
+    )
+
+    /**
+     * A result whose outcome comes from [ModulePurgeController.classifyReport], the way
+     * `purgeInsideExclusiveTask` builds it — as opposed to [purgeResult], which lets a test pair an
+     * arbitrary outcome with an arbitrary receipt to prove the two must agree.
+     */
+    private fun gradedPurgeResult(
+        status: String,
+        overrides: Map<String, String> = emptyMap(),
+        commandSucceeded: Boolean,
+    ): ModulePurgeController.Result {
+        val lines = completeReport().map { line ->
+            val key = line.substringBefore('=')
+            val value = if (key == "Z2_PURGE_STATUS") status else overrides[key]
+            if (value == null) line else "$key=$value"
+        }
+        val report = (
+            ModulePurgeController.parseReportOutput(lines)
+                as ModulePurgeController.ParseResult.Valid
+            ).value
+        return ModulePurgeController.Result(
+            outcome = ModulePurgeController.classifyReport(report, commandSucceeded),
+            report = report,
+            command = commandResult(commandSucceeded),
+        )
+    }
 
     private fun purgeResult(
         outcome: ModulePurgeController.Outcome,

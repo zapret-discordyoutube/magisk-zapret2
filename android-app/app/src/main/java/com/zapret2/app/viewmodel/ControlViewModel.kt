@@ -182,7 +182,6 @@ enum class ControlErrorKind(@param:StringRes val titleRes: Int) {
     STOP_SERVICE(R.string.control_service_stop_failed),
     SERVICE_OPERATION(R.string.control_service_operation_failed),
     UPDATE(R.string.control_update_failed),
-    RESTART_SERVICE(R.string.control_service_restart_failed),
 }
 
 enum class ControlLastResult(@param:StringRes val messageRes: Int) {
@@ -433,13 +432,28 @@ sealed interface ModulePurgeUiState {
  * and nothing would correct it for the lifetime of the ViewModel: the environment is reconciled
  * once, from `loadInitialState()`.
  *
- * The projection below is the same one `refreshStatus()` publishes for a module it cannot query
- * (`ModuleServiceAccess.NOT_INSTALLED`), and it has to be: the reset also arms
- * [ControlUiState.modulePurgeCompleted], so no later status read is allowed to correct it. Every
- * field that described the runtime of the erased module — the status label, the uptime, the process
- * card, the firewall detail, the NFQUEUE capability badge, the module's own diagnostic — is retired
- * here, or it would stay on screen forever, sourced from a process and a module that are both gone.
+ * On every fact the module owns, the projection below is the one `refreshStatus()` publishes for a
+ * module it cannot query (`ModuleServiceAccess.NOT_INSTALLED`), and it has to be: the reset also
+ * arms [ControlUiState.modulePurgeCompleted], so no later status read is allowed to correct it.
+ * Every field that described the runtime of the erased module — the status label, the uptime, the
+ * process card, the firewall detail, the module's own diagnostic — is retired here, or it would
+ * stay on screen forever, sourced from a process and a module that are both gone.
  * See [withModuleStatusPublication].
+ *
+ * Three fields deliberately diverge from that projection, and only these three:
+ *  - `moduleDiagnostic = null` and `autostart = false` are module-scoped facts the status path has
+ *    no reason to touch, because it never removes a module. The diagnostic was printed by
+ *    `zapret-status.sh`, which went with the directory, and autostart is the module's own boot
+ *    flag; both describe something that no longer exists.
+ *  - [ControlUiState.modulePurgeCompleted] is the terminal gate itself, which only a purge arms.
+ *
+ * [ControlUiState.nfqueueSupported] is explicitly *not* among them. It is not a module fact: the
+ * app measures it itself with `Zapret2ModuleRepository.buildProbeCommand()`, which asks the kernel
+ * (`/proc/net/netfilter/nf_queue`, `iptables -j NFQUEUE`) and answers the same whether or not the
+ * module is installed. Publishing `false` here invented a kernel verdict the app never took, and
+ * because the gate blocks every later publication it could not be corrected before a process
+ * restart — after which the very same device reported the badge green again. The module's own
+ * `Z2_NFQUEUE` is a different field, [ControlUiState.iptablesDetail], and that one is retired.
  */
 internal fun ControlUiState.afterModulePurge(result: ModulePurgeController.Result): ControlUiState =
     if (!result.moduleDirectoryRemoved) {
@@ -454,7 +468,6 @@ internal fun ControlUiState.afterModulePurge(result: ModulePurgeController.Resul
             processStats = ProcessStats(),
             iptablesDetail = NetworkStatsManager.IptablesDetail(),
             moduleDiagnostic = null,
-            nfqueueSupported = false,
             moduleInstallState = ModuleInstallState.MISSING,
             pendingModuleState = PendingModuleState.NONE,
             moduleMutationState = ModuleMutationState.IDLE,
@@ -657,7 +670,6 @@ private const val MAX_ERROR_DETAIL_LENGTH = 12_000
 private const val UPDATE_STATUS_REFRESH_DELAY_MS = 1_000L
 private val CONTROL_ERROR_DETAIL_RESOURCES = setOf(
     R.string.control_environment_probe_failed,
-    R.string.control_restart_unhealthy,
     R.string.control_runtime_rollback_failed,
     R.string.control_service_expected_state_error,
     R.string.control_update_apk_file_invalid,
@@ -1393,7 +1405,6 @@ class ControlViewModel @Inject constructor(
             ControlErrorKind.START_SERVICE,
             ControlErrorKind.STOP_SERVICE,
             ControlErrorKind.SERVICE_OPERATION,
-            ControlErrorKind.RESTART_SERVICE,
             -> recordLastResult(ControlLastResult.SERVICE_FAILED)
             ControlErrorKind.INITIALIZATION -> Unit
         }
@@ -2215,35 +2226,6 @@ class ControlViewModel @Inject constructor(
     private suspend fun refreshStatusAfterUpdate() {
         delay(UPDATE_STATUS_REFRESH_DELAY_MS)
         if (screenStarted) refreshServiceStatusOnce()
-    }
-
-    private suspend fun restartService() {
-        try {
-            val currentStatus = refreshStatus()
-            if (!currentStatus.isRunning) return
-            val result = ServiceLifecycleController.restart()
-            val verifiedState = refreshStatus()
-            if (result.success && verifiedState.isRunning) {
-                serviceEventBus.notifyServiceRestarted(ServiceEventSource.CONTROL)
-                return
-            }
-            val diagnostic = result.diagnosticText()
-            showErrorDialog(
-                kind = ControlErrorKind.RESTART_SERVICE,
-                details = if (diagnostic.isBlank()) {
-                    UiText.Resource(R.string.control_restart_unhealthy)
-                } else {
-                    UiText.Dynamic(diagnostic)
-                },
-            )
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            showErrorDialog(
-                kind = ControlErrorKind.RESTART_SERVICE,
-                details = UiText.Resource(R.string.control_restart_unhealthy),
-            )
-        }
     }
 
 }

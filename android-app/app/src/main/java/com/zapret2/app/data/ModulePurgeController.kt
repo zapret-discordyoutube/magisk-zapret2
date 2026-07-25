@@ -11,6 +11,7 @@ object ModulePurgeController {
     private const val PURGE_SCRIPT =
         "${RootModuleContract.ACTIVE_MODULE_DIR}/${ModulePackageContract.PURGE_SCRIPT_PATH}"
     private val purgeInProgress = AtomicBoolean(false)
+    private val PREPARE_TOKEN_PATTERN = Regex("[A-Za-z0-9._-]{1,128}")
 
     enum class Status(val wireValue: String) {
         COMPLETE("complete"),
@@ -23,10 +24,41 @@ object ModulePurgeController {
         }
     }
 
+    /** The three statuses `purge_prepare_report` prints; every refusal is one of the latter two. */
+    enum class PrepareStatus(val wireValue: String) {
+        ARMED("armed"),
+        BLOCKED("blocked"),
+        ERROR("error");
+
+        companion object {
+            fun fromWireValue(value: String): PrepareStatus? =
+                entries.firstOrNull { it.wireValue == value }
+        }
+    }
+
     data class PrepareReport(
+        val status: PrepareStatus,
         val token: String,
         val diagnostic: String,
-    )
+    ) {
+        /** Only an `armed` record with a usable one-time token authorises the commit. */
+        val armed: Boolean
+            get() = status == PrepareStatus.ARMED && token.matches(PREPARE_TOKEN_PATTERN)
+
+        /**
+         * What went wrong, in the app's own words, beside the module's [diagnostic].
+         *
+         * A `blocked`/`error` record is the module refusing the confirmation for a reason it
+         * names; an `armed` one that failed this predicate could only have printed a token the
+         * app must not hand back, which is a protocol violation and nothing the user can act on.
+         */
+        val refusalError: String
+            get() = if (status == PrepareStatus.ARMED) {
+                "Purge prepare protocol rejected the one-time confirmation"
+            } else {
+                "Module purge was refused before anything was removed"
+            }
+    }
 
     data class Report(
         val status: Status,
@@ -72,6 +104,12 @@ object ModulePurgeController {
     data class Result(
         val outcome: Outcome,
         val report: Report? = null,
+        /**
+         * The `--prepare` record, kept for exactly the same reason [report] is: when the module
+         * refuses the one-time confirmation it names the reason in the record's own diagnostic,
+         * and that sentence is the only place the remedy appears. Null once the commit ran.
+         */
+        val prepareReport: PrepareReport? = null,
         val command: ServiceLifecycleController.CommandResult? = null,
         val error: String? = null,
         /** False only when the module receipt was honoured but APK-private state survived it. */
@@ -131,8 +169,14 @@ object ModulePurgeController {
          * it insists on proving through unrelated evidence.
          *
          * [Report.moduleRemoved] is the module's direct measurement of that single fact, so it is
-         * what this reads. [Outcome.COMPLETE] and [Outcome.PARTIAL] are the only outcomes that
-         * carry a receipt at all; every other one means the record was rejected or never printed.
+         * what this reads. The outcome filter is *not* there because the other outcomes lack a
+         * receipt — [purgeInsideExclusiveTask] attaches [report] whenever the record parsed, so
+         * [Outcome.BLOCKED], [Outcome.ERROR] and [Outcome.INVALID_PROTOCOL] carry one too. It is
+         * there because those outcomes mean the app and the receipt disagree, and a disagreement
+         * is not evidence. That the filter is also redundant against today's module — every
+         * `purge_report blocked`/`error` call in `zapret-purge.sh` passes a literal `0` for
+         * `module_removed`, because each of them runs before the module touches anything — is a
+         * property of the module, not of the app, and is exactly what this must not depend on.
          * [ServiceLifecycleController.CommandResult.success] is deliberately not required: the
          * full eleven-field record with its `Z2_PURGE_COMPLETE=1` terminator can only be printed
          * by `purge_report` itself, so a command cut short cannot reach this predicate — and a
@@ -169,9 +213,15 @@ object ModulePurgeController {
             appDataCleared = false,
         )
 
+        /**
+         * `Z2_PURGE_PREPARE_DIAGNOSTIC=` matches none of the prefixes
+         * [ServiceLifecycleController.CommandResult.diagnosticText] collects (`ERROR:`,
+         * `DIAGNOSTIC:`, stderr), so a refused prepare has no other route to the dialog.
+         */
         fun diagnosticText(): String = listOfNotNull(
             error?.takeIf(String::isNotBlank),
             report?.diagnostic?.takeIf(String::isNotBlank),
+            prepareReport?.diagnostic?.takeIf(String::isNotBlank),
             command?.diagnosticText()?.takeIf(String::isNotBlank),
         ).distinct().joinToString("\n")
     }
@@ -229,7 +279,16 @@ object ModulePurgeController {
                 error = prepared.error,
             )
         }
-        val token = (prepared as ParseResult.Valid).value.token
+        val prepareReport = (prepared as ParseResult.Valid).value
+        if (!prepareReport.armed) {
+            return Result(
+                outcome = if (prepareCommand.success) Outcome.INVALID_PROTOCOL else Outcome.COMMAND_FAILED,
+                prepareReport = prepareReport,
+                command = prepareCommand,
+                error = prepareReport.refusalError,
+            )
+        }
+        val token = prepareReport.token
         val commitCommand = ServiceLifecycleController.executeRoot(
             "/system/bin/sh ${RootFileIo.shellQuote(PURGE_SCRIPT)} --commit app " +
                 "${RootFileIo.shellQuote(token)} --machine",
@@ -268,6 +327,18 @@ object ModulePurgeController {
         else -> Outcome.ERROR
     }
 
+    /**
+     * Strict parser for the exact five-field `--prepare` machine protocol.
+     *
+     * Symmetric with [parseReportOutput]: a well-formed record is carried through as itself, and
+     * the caller grades it. `prepare_purge` prints the same five fields for all eight of its
+     * refusals — a live rollback transaction, unsafe uninstall evidence, an unsafe module
+     * identity, an already-armed confirmation, and so on — each with its own
+     * `Z2_PURGE_PREPARE_DIAGNOSTIC`, which is the only text that points at the remedy. Rejecting
+     * those records here threw that sentence away and left the user with a bare protocol
+     * complaint that reads like a version mismatch. Only a record the parser cannot trust at all
+     * — wrong version, unknown status, malformed or truncated — is [ParseResult.Invalid].
+     */
     internal fun parsePrepareOutput(lines: List<String>): ParseResult<PrepareReport> {
         val values = parseExactRecord(
             lines = lines,
@@ -280,14 +351,18 @@ object ModulePurgeController {
             ),
             terminal = "Z2_PURGE_PREPARE_COMPLETE=1",
         ) ?: return ParseResult.Invalid("Purge prepare protocol is incomplete or malformed")
-        val token = values.getValue("Z2_PURGE_PREPARE_TOKEN")
-        if (values["Z2_PURGE_PREPARE_VERSION"] != "1" ||
-            values["Z2_PURGE_PREPARE_STATUS"] != "armed" ||
-            !token.matches(Regex("[A-Za-z0-9._-]{1,128}"))
-        ) {
-            return ParseResult.Invalid("Purge prepare protocol rejected the one-time confirmation")
+        if (values["Z2_PURGE_PREPARE_VERSION"] != "1") {
+            return ParseResult.Invalid("Purge prepare protocol contains invalid values")
         }
-        return ParseResult.Valid(PrepareReport(token, values.getValue("Z2_PURGE_PREPARE_DIAGNOSTIC")))
+        val status = PrepareStatus.fromWireValue(values.getValue("Z2_PURGE_PREPARE_STATUS"))
+            ?: return ParseResult.Invalid("Purge prepare protocol contains an unknown status")
+        return ParseResult.Valid(
+            PrepareReport(
+                status = status,
+                token = values.getValue("Z2_PURGE_PREPARE_TOKEN"),
+                diagnostic = values.getValue("Z2_PURGE_PREPARE_DIAGNOSTIC"),
+            ),
+        )
     }
 
     internal fun parseReportOutput(lines: List<String>): ParseResult<Report> {

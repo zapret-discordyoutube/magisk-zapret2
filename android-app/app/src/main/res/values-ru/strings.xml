@@ -176,7 +176,6 @@
     <string name="control_service_stop_failed">Не удалось остановить службу</string>
     <string name="control_service_operation_failed">Ошибка операции со службой</string>
     <string name="control_update_failed">Ошибка обновления</string>
-    <string name="control_service_restart_failed">Не удалось перезапустить службу</string>
     <string name="control_network_checking">Проверка сети…</string>
     <string name="control_unknown_error">Неизвестная ошибка</string>
     <string name="control_wifi_only_disable_failed">Не удалось отключить режим «Только Wi-Fi»</string>
@@ -238,7 +237,6 @@
     <string name="control_update_partial_details">Обновление завершено частично: %1$s</string>
     <string name="control_update_partial_reboot">Обновление завершено частично. Для установленного модуля требуется перезагрузка.</string>
     <string name="control_update_partial_reboot_details">Обновление завершено частично. Для установленного модуля требуется перезагрузка. Подробности: %1$s</string>
-    <string name="control_restart_unhealthy">После перезапуска служба работает некорректно</string>
     <string name="dns_routing">Маршрутизация DNS</string>
     <string name="dns_selection_summary">Выбрано: %1$s · %2$s</string>
     <string name="dns_preset">Набор DNS</string>
