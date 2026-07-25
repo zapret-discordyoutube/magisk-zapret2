@@ -419,4 +419,44 @@ done
 cp "$MOCK/iptables" "$MOCK/ip6tables"
 chmod 0755 "$MOCK/ip6tables"
 
+# The preflight reads the IPv6 family and finds nothing of ours in it, then the
+# frontend goes busy before the rollback verifies its own work. Asking the
+# kernel again and discarding that proof turns a rollback that proved the
+# family empty into one reporting it unverified — and then records an IPv6
+# publication its own preflight had disproved. The preflight spends two probes
+# and the teardown one, so anything past the third belongs to the verification.
+rm -f "$STATE/full-rollback.transaction" "$STATE/full-rollback.meta" \
+    "$STATE/hosts.rollback.backup" "$STATE/status.snapshot" \
+    "$STATE/owner.meta" "$STATE/nfqws2.pid" "$STATE/runtime.owner" "$MOD/disable"
+sed 's/^autostart=.*/autostart=1/' "$MOD/zapret2/runtime.ini" > "$MOD/zapret2/runtime.ini.tmp"
+mv "$MOD/zapret2/runtime.ini.tmp" "$MOD/zapret2/runtime.ini"
+chmod 0644 "$MOD/zapret2/runtime.ini"
+cat > "$MOCK/ip6tables" <<'EOF'
+#!/bin/sh
+n=0
+[ ! -f "$Z2_IP6_FLIP_COUNT" ] || IFS= read -r n < "$Z2_IP6_FLIP_COUNT"
+n=$((n + 1))
+printf '%s\n' "$n" > "$Z2_IP6_FLIP_COUNT"
+[ "$n" -le "${Z2_IP6_FLIP_AFTER:-3}" ] || exit 42
+exec iptables "$@"
+EOF
+chmod 0755 "$MOCK/ip6tables"
+rm -f "$CASE/ip6flip"
+set +e
+PATH="$MOCK:$PATH" STATE_DIR="$STATE" Z2_MOCK_LOG="$LOG" \
+    Z2_IP6_FLIP_COUNT="$CASE/ip6flip" Z2_IP6_FLIP_AFTER=3 FIREWALL_PROBE_ATTEMPTS=1 \
+    sh "$MOD/zapret2/scripts/zapret-full-rollback.sh" --machine > "$OUT.ipv6-lost-proof"
+rc=$?
+set -e
+probe_calls=0
+[ ! -f "$CASE/ip6flip" ] || IFS= read -r probe_calls < "$CASE/ip6flip"
+[ "$probe_calls" -gt 3 ] ||
+    fail "the rollback never re-probed IPv6 after teardown; the case proves nothing"
+assert_line "$OUT.ipv6-lost-proof" 'Z2_RB_STATUS=complete'
+assert_line "$OUT.ipv6-lost-proof" 'Z2_RB_FIREWALL_CLEAN=1'
+[ "$rc" = 0 ] ||
+    fail "a rollback whose own preflight proved the family empty did not complete"
+cp "$MOCK/iptables" "$MOCK/ip6tables"
+chmod 0755 "$MOCK/ip6tables"
+
 echo "Full rollback shell tests passed"

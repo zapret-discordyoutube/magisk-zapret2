@@ -354,11 +354,20 @@ preserve_hosts() {
 firewall_clean() {
     command -v iptables >/dev/null 2>&1 || return 1
     owned_family_absent iptables || return 1
-    # An IPv6 frontend that cannot be queried is only acceptable when this
-    # generation is known never to have published IPv6 rules.
+    # An IPv6 frontend that cannot be queried is acceptable on two different
+    # proofs, and asking the kernel again is not one of them. Either this
+    # generation is known never to have published IPv6 rules, or this very
+    # transaction's preflight already read the family and found nothing of
+    # ours in it — both callers below run one first, and nothing publishes
+    # between the two. Discarding the second proof and re-probing turns a
+    # rollback that proved the family empty into one that reports it
+    # unverified, and then records an IPv6 publication its own preflight
+    # disproved.
     if command -v ip6tables >/dev/null 2>&1; then
         owned_family_absent ip6tables ||
-            { [ "${CLEANUP_IPV6_OWNERSHIP_EXPECTED:-1}" = 0 ] && ! z2_fw_tool_available ip6tables; } ||
+            { ! z2_fw_tool_available ip6tables &&
+                { [ "${CLEANUP_IPV6_OWNERSHIP_EXPECTED:-1}" = 0 ] ||
+                    [ "${FIREWALL_IPV6_AUDITED_EMPTY:-0}" = 1 ]; }; } ||
             return 1
     elif [ "${IPV6_PUBLICATION_RECORDED:-0}" = 1 ]; then
         # No frontend at all: the module could only have published there while
