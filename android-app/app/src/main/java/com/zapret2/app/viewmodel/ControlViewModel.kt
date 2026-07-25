@@ -325,9 +325,14 @@ sealed interface ModulePurgeUiState {
     data object InProgress : ModulePurgeUiState
     data class Result(
         val outcome: ModulePurgeController.Outcome,
+        val erased: Boolean,
         val rebootRequired: Boolean,
         val diagnostic: String,
-    ) : ModulePurgeUiState
+    ) : ModulePurgeUiState {
+        /** Erased, with one cleanup step the module could not verify and the reboot clears. */
+        val unverifiedCleanup: Boolean
+            get() = erased && outcome != ModulePurgeController.Outcome.COMPLETE
+    }
 }
 
 internal object FullRollbackAvailabilityPolicy {
@@ -595,6 +600,9 @@ internal fun restoreControlUiState(savedStateHandle: SavedStateHandle): ControlU
         outcome?.let {
             ModulePurgeUiState.Result(
                 outcome = it,
+                // Only a failed erase is ever persisted: a successful one retires its dialog
+                // together with the app-owned storage it just wiped.
+                erased = false,
                 rebootRequired = savedStateHandle
                     .restoreTypedOrRemove<Boolean>(KEY_PURGE_REBOOT_REQUIRED) == true,
                 diagnostic = sanitizedBoundedUiDiagnostic(
@@ -1075,7 +1083,10 @@ class ControlViewModel @Inject constructor(
             viewModelScope.launch {
                 try {
                     val result = ModulePurgeController.purge(modulePurgeAppDataCleaner)
-                    if (result.report?.satisfiesCompleteContract == true) {
+                    // The module directory is gone in every erased outcome, including the partial
+                    // receipt that only left one reboot-cleared fact unproven, so the screen must
+                    // stop describing an installed module the user can no longer act on.
+                    if (result.erased) {
                         _uiState.update {
                             it.copy(
                                 autostart = false,
@@ -1106,12 +1117,13 @@ class ControlViewModel @Inject constructor(
 
     private fun showModulePurgeResult(result: ModulePurgeController.Result) {
         val diagnostic = sanitizedBoundedUiDiagnostic(result.diagnosticText())
-        val lastResult = if (result.success) {
+        val erased = result.erased
+        val lastResult = if (erased) {
             ControlLastResult.PURGE_COMPLETED
         } else {
             ControlLastResult.PURGE_FAILED
         }
-        if (result.success) {
+        if (erased) {
             // Keep the success dialog only in memory; a clean reset must not recreate
             // its own persisted app state after the app-owned storage was cleared.
             purgeOperation.retireSuccessfulTerminalState()

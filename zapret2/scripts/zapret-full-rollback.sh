@@ -432,25 +432,38 @@ fi
 
 if ! phase_at_least firewall-clean; then
     if ! audit_owned_firewall_for_cleanup; then partial "persisted firewall generation is ambiguous; firewall and listener retained: $FIREWALL_CLEANUP_PREFLIGHT_ERROR"; fi
-    if ! cleanup_owned_firewall audited || ! firewall_clean; then partial "verified owned firewall cleanup is incomplete; listener retained"; fi
     # Z2_RB_FIREWALL_CLEAN asserts a verified-clean firewall, so a family that
-    # had to be skipped as unqueryable cannot be reported under it. Stopping
-    # here would be worse than reporting it: the journal would stay at an
-    # earlier phase and fence start, stop and uninstall until someone deleted
-    # the state by hand, on a device where the condition repeats every boot.
-    # Finish the rollback and carry the fact into the receipt instead.
-    [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" != 1 ] || RB_IPV6_UNVERIFIED=1
-    write_transaction firewall-clean || failed "cannot advance rollback journal after firewall cleanup"
-else
-    firewall_clean || partial "rollback journal says firewall-clean but a clean full snapshot cannot be proved"
-    # A resumed run cannot see the earlier pass's skip, so re-derive it: the
-    # journal records the phase, not why the phase was allowed to pass.
-    if command -v ip6tables >/dev/null 2>&1 && ! z2_fw_tool_available ip6tables; then
+    # could not be queried cannot be reported under it. But refusing outright
+    # is worse than reporting it: the journal would stay at an earlier phase
+    # and fence start, stop, uninstall and purge until someone deleted the
+    # state by hand — on a device where the condition repeats every boot. The
+    # IPv4 family is the one this rollback can always prove; if that is gone
+    # and only an unqueryable IPv6 frontend remains, finish and say so.
+    if ! cleanup_owned_firewall audited || ! firewall_clean; then
+        if command -v ip6tables >/dev/null 2>&1 && ! z2_fw_tool_available ip6tables &&
+           owned_family_absent iptables; then
+            RB_IPV6_UNVERIFIED=1
+        else
+            partial "verified owned firewall cleanup is incomplete; listener retained"
+        fi
+    elif [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" = 1 ]; then
         RB_IPV6_UNVERIFIED=1
     fi
+    write_transaction firewall-clean || failed "cannot advance rollback journal after firewall cleanup"
+else
+    # A resumed run cannot see the earlier pass's skip, so re-derive it: the
+    # journal records the phase, not why the phase was allowed to pass. An
+    # unqueryable IPv6 frontend must not strand the journal here either — the
+    # reboot this rollback already requires clears any rules it leaves.
+    if command -v ip6tables >/dev/null 2>&1 && ! z2_fw_tool_available ip6tables; then
+        RB_IPV6_UNVERIFIED=1
+        owned_family_absent iptables ||
+            partial "rollback journal says firewall-clean but the owned IPv4 ruleset is still present"
+    else
+        firewall_clean || partial "rollback journal says firewall-clean but a clean full snapshot cannot be proved"
+    fi
 fi
-RB_FIREWALL_CLEAN=1
-[ "${RB_IPV6_UNVERIFIED:-0}" != 1 ] || RB_FIREWALL_CLEAN=0
+if [ "${RB_IPV6_UNVERIFIED:-0}" = 1 ]; then RB_FIREWALL_CLEAN=0; else RB_FIREWALL_CLEAN=1; fi
 
 if ! phase_at_least process-clean; then
     if ! stop_pidfile_process || ! process_clean; then partial "verified module process cleanup is incomplete"; fi

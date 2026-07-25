@@ -45,13 +45,19 @@ UNSUPPORTED_ENTRY="$(find "$MODPATH" \( -type d -exec chmod 0755 {} + \) -o \( -
     abort "! Cannot apply package permissions"
 if [ -n "$UNSUPPORTED_ENTRY" ]; then
     # -exec … + is always true, so only entries that are neither a directory
-    # nor a regular file reach -print. Confirm that before blaming the archive:
-    # a find whose -exec reports failure would otherwise send the packager
-    # hunting for a symlink that does not exist.
-    if [ -d "$UNSUPPORTED_ENTRY" ] || [ -f "$UNSUPPORTED_ENTRY" ]; then
-        abort "! Cannot apply package permissions to ${UNSUPPORTED_ENTRY#"$MODPATH"/}"
+    # nor a regular file reach -print. find uses lstat and the shell's -d/-f
+    # follow symlinks, so ask -L first: a symlink to a directory or file is
+    # still a symlink, and reporting it as a permission problem would send the
+    # packager hunting for something that does not exist.
+    UNSUPPORTED_FIRST="${UNSUPPORTED_ENTRY%%
+*}"
+    if [ -L "$UNSUPPORTED_FIRST" ]; then
+        abort "! Extracted module contains a link: ${UNSUPPORTED_FIRST#"$MODPATH"/}"
     fi
-    abort "! Extracted module contains a link or special file: ${UNSUPPORTED_ENTRY#"$MODPATH"/}"
+    if [ -d "$UNSUPPORTED_FIRST" ] || [ -f "$UNSUPPORTED_FIRST" ]; then
+        abort "! Cannot apply package permissions to ${UNSUPPORTED_FIRST#"$MODPATH"/}"
+    fi
+    abort "! Extracted module contains a special file: ${UNSUPPORTED_FIRST#"$MODPATH"/}"
 fi
 [ "$(grep -c '^id=zapret2$' "$MODPATH/module.prop" 2>/dev/null)" = 1 ] ||
     abort "! Refusing package with unexpected module identity"

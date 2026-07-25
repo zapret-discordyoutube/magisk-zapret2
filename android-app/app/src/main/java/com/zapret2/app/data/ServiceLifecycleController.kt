@@ -31,8 +31,11 @@ object ServiceLifecycleController {
     private val appUpdateInProgress = AtomicBoolean(false)
     private val fullRollbackInProgress = AtomicBoolean(false)
 
+    /** The original `--machine` payload, which predates the `Z2_PROTOCOL` field entirely. */
+    private const val LEGACY_UNVERSIONED_STATUS_PROTOCOL = 1
+
     /** Machine status protocols, newest first; older entries exist only for older module packages. */
-    private val statusProtocolCascade = listOf(6, 5, 4, 3, 1)
+    private val statusProtocolCascade = listOf(6, 5, 4, 3, LEGACY_UNVERSIONED_STATUS_PROTOCOL)
 
     private data class NegotiatedStatusProtocol(val version: Int, val generation: Long)
 
@@ -682,31 +685,43 @@ object ServiceLifecycleController {
      * A package that predates the current protocol answers every newer request with the
      * unsupported-protocol contract, so replaying the whole cascade would spend four rejected
      * `zapret-status.sh` processes on every refresh. The version that answered is therefore tried
-     * first on later observations. Whenever the remembered version is no longer understood, or the
-     * generation that proved it has been retired, the negotiation is dropped and the full cascade
-     * runs again from the newest protocol, so a package generation change costs one extra
-     * observation and never a downgraded payload.
+     * first on later observations, and normally keeps answering for the rest of the process,
+     * because a replaced package only becomes the active module after a reboot. Whenever the
+     * remembered version stops being understood, or the generation that proved it is retired
+     * before or during the probe that used it, the answer is dropped and the full cascade runs
+     * again from the newest protocol, so a retired negotiation costs one extra observation and
+     * never a downgraded payload.
      */
     internal suspend fun observeNegotiatedStatus(
         probe: suspend (Int) -> CommandResult,
     ): ServiceStatus {
         // Captured before the first probe so that any invalidation racing this cascade wins.
-        val generation = statusProtocolGeneration.get()
+        var generation = statusProtocolGeneration.get()
         negotiatedStatusProtocol.get()
             ?.takeIf { it.generation == generation }
             ?.let { remembered ->
                 val cached = probe(remembered.version)
-                if (!cached.isUnsupportedMachineProtocol()) return parseStatusCommandResult(cached)
+                // An invalidation that landed while this probe was suspended retires the answer
+                // too: it was produced by the protocol of a generation that is no longer trusted.
+                val stillCurrent = statusProtocolGeneration.get() == generation
+                if (stillCurrent && !cached.isUnsupportedMachineProtocol()) {
+                    return parseStatusCommandResult(cached)
+                }
                 negotiatedStatusProtocol.compareAndSet(remembered, null)
+                // Re-read so the cascade below stamps the generation it actually raced against
+                // rather than the one the discarded fast path started with.
+                generation = statusProtocolGeneration.get()
             }
         var unsupported: ServiceStatus? = null
         statusProtocolCascade.forEach { version ->
             val result = probe(version)
             val status = parseStatusCommandResult(result)
             if (!result.isUnsupportedMachineProtocol()) {
-                // Only a payload that satisfied the strict parser proves which protocol the
-                // installed script speaks; anything else stays unnegotiated and fails closed.
-                if (status.metadataComplete) {
+                // Only a strictly parsed payload that names the version this step asked for
+                // proves which protocol the installed script speaks. A complete payload from
+                // another protocol proves only that something answered coherently, so it is
+                // returned but never remembered, and the next observation re-negotiates.
+                if (status.metadataComplete && result.declaresStatusProtocol(version)) {
                     negotiatedStatusProtocol.set(NegotiatedStatusProtocol(version, generation))
                 }
                 return status
@@ -717,11 +732,29 @@ object ServiceLifecycleController {
     }
 
     /**
+     * Whether the payload names the exact protocol version the cascade asked for.
+     *
+     * The legacy `--machine` request predates the version field, so its payload proves itself by
+     * carrying no `Z2_PROTOCOL` line at all.
+     */
+    private fun CommandResult.declaresStatusProtocol(version: Int): Boolean {
+        val declared = stdout.filter { it.startsWith("Z2_PROTOCOL=") }
+        return if (version == LEGACY_UNVERSIONED_STATUS_PROTOCOL) {
+            declared.isEmpty()
+        } else {
+            declared.singleOrNull() == "Z2_PROTOCOL=$version"
+        }
+    }
+
+    /**
      * Retires the negotiated protocol so the next observation re-negotiates from the newest version.
      *
-     * The installation authority calls this when it observes a different verified module
-     * generation, because a replaced package may speak a newer machine protocol than the one this
-     * process negotiated. Tests reuse it to reset this singleton between cases.
+     * Environment reconciliation calls this whenever the verified active version it reads differs
+     * from the one it read before. In production that happens once per process, before the first
+     * status observation: the active module is fixed at boot, so the package this process
+     * negotiated against cannot be swapped underneath it. This is therefore a backstop that keeps
+     * the cache honest if reconciliation ever runs more than once, not a live re-negotiation path;
+     * tests reuse it to reset this singleton between cases.
      *
      * Bumping [statusProtocolGeneration] retires the stored negotiation and every cascade that is
      * already in flight in one write, so an invalidation is authoritative from the instant it

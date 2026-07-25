@@ -154,8 +154,10 @@ class Zapret2ModuleRepository @Inject constructor() {
             environment = environment.copy(pendingState = PendingModuleState.PARTIAL)
         }
 
-        // A different verified generation may speak a newer machine status protocol than the one
-        // the lifecycle boundary negotiated with the previous package.
+        // The active module is fixed at boot, so within one process this observation transitions
+        // once, from null to the version the lifecycle boundary will negotiate against and keep.
+        // Retiring the negotiation on that transition costs nothing, because nothing has been
+        // negotiated yet, and it keeps the cache honest if reconciliation is ever repeated.
         if (activeVersion != observedActiveVersion) {
             observedActiveVersion = activeVersion
             ServiceLifecycleController.invalidateStatusProtocolNegotiation()

@@ -278,4 +278,56 @@ set -e
 [ "$rc" = 1 ] || fail "corrupt PID publication did not block stop"
 [ ! -s "$LOG" ] || fail "corrupt PID publication allowed firewall mutation"
 
+# An IPv6 frontend that exists but cannot answer must never strand the journal:
+# the artifact it would leave behind fences start, stop, uninstall and purge
+# until someone deletes the state by hand, and the condition repeats on every
+# boot of such a device. The rollback finishes, retires the journal and says
+# in the receipt that IPv6 stayed unverified.
+rb_ipv6_case() {
+    rm -f "$STATE/full-rollback.transaction" "$STATE/full-rollback.meta" \
+        "$STATE/nfqws2.pid" "$STATE/owner.meta" "$STATE/runtime.owner" "$MOD/disable"
+    sed 's/^autostart=.*/autostart=1/' "$MOD/zapret2/runtime.ini" > "$MOD/zapret2/runtime.ini.tmp"
+    mv "$MOD/zapret2/runtime.ini.tmp" "$MOD/zapret2/runtime.ini"
+    chmod 0644 "$MOD/zapret2/runtime.ini"
+    cat > "$MOCK/ip6tables" <<'EOF'
+#!/bin/sh
+exit 42
+EOF
+    chmod 0755 "$MOCK/ip6tables"
+}
+
+rb_ipv6_case
+set +e
+PATH="$MOCK:$PATH" STATE_DIR="$STATE" Z2_MOCK_LOG="$LOG" \
+    sh "$MOD/zapret2/scripts/zapret-full-rollback.sh" --machine > "$OUT.ipv6"
+rc=$?
+set -e
+assert_line "$OUT.ipv6" 'Z2_RB_STATUS=partial'
+assert_line "$OUT.ipv6" 'Z2_RB_FIREWALL_CLEAN=0'
+assert_line "$OUT.ipv6" 'Z2_RB_COMPLETE=1'
+[ ! -e "$STATE/full-rollback.transaction" ] ||
+    fail "an unverifiable IPv6 family stranded the rollback journal"
+[ -f "$STATE/full-rollback.meta" ] || fail "rollback did not commit its completion record"
+
+# The resumed branch must reach the same verdict: the journal records which
+# phase completed, not why it was allowed to.
+rm -f "$STATE/full-rollback.meta"
+cat > "$STATE/full-rollback.transaction" <<EOF
+version=1
+module_dir=$MOD
+token=resume-token
+phase=firewall-clean
+EOF
+chmod 0600 "$STATE/full-rollback.transaction"
+set +e
+PATH="$MOCK:$PATH" STATE_DIR="$STATE" Z2_MOCK_LOG="$LOG" \
+    sh "$MOD/zapret2/scripts/zapret-full-rollback.sh" --machine > "$OUT.ipv6-resume"
+rc=$?
+set -e
+assert_line "$OUT.ipv6-resume" 'Z2_RB_FIREWALL_CLEAN=0'
+[ ! -e "$STATE/full-rollback.transaction" ] ||
+    fail "a resumed rollback stranded the journal on an unverifiable IPv6 family"
+cp "$MOCK/iptables" "$MOCK/ip6tables"
+chmod 0755 "$MOCK/ip6tables"
+
 echo "Full rollback shell tests passed"

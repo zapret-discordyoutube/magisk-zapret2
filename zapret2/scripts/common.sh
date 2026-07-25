@@ -567,7 +567,7 @@ recovery_block_remedy() {
     case "${RECOVERY_ARTIFACT_CLASS:-}" in
         unsafe) printf '%s' "; reboot to let boot recovery retire it" ;;
         rollback-partial) printf '%s' "; finish the interrupted full rollback, then reboot" ;;
-        rollback-complete) printf '%s' "; a completed full rollback is pending — reboot and reinstall the module" ;;
+        rollback-complete) printf '%s' "; a completed full rollback is pending — remove the module in your root manager first, then reinstall it" ;;
         *) ;;
     esac
 }

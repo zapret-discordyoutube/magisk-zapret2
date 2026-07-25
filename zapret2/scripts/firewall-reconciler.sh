@@ -126,14 +126,15 @@ z2_fw_ensure_scratch_dir() {
 }
 
 # Scratch names end in the creating PID, so residue from a previous boot whose
-# PID the kernel handed us again would fence this transaction forever. The
-# creator is provably gone, and this caller owns the lifecycle lock, so the
-# abandoned file is ours to drop.
+# PID the kernel handed us again would otherwise fence every transaction
+# forever — and a liveness sweep cannot help, because the PID in the name is
+# ours and therefore alive. Nothing else can hold this name: we own the
+# lifecycle lock and have not written it yet in this process, so whatever is
+# there was abandoned by a process that no longer exists.
 z2_fw_claim_scratch_path() {
     local path="$1"
     { [ -e "$path" ] || [ -L "$path" ]; } || return 0
-    command -v retire_dead_scratch_files >/dev/null 2>&1 || return 1
-    retire_dead_scratch_files >/dev/null 2>&1 || return 1
+    rm -rf "$path" 2>/dev/null || return 1
     [ ! -e "$path" ] && [ ! -L "$path" ]
 }
 
@@ -141,14 +142,16 @@ z2_fw_run_restore() {
     local restore="$1" tool="$2" phase="$3" batch="$4"
     local capture wait_supported=0 attempts=0 rc=1 cleanup_rc=0 detail
     capture="$STATE_DIR/tmp/firewall-restore.${tool}.$$.error"
+    # Reset the result fields before the first failure exit, or a failure here
+    # would report the exit code of the previous phase.
+    Z2_FW_LAST_RESTORE_EXIT=0
+    Z2_FW_LAST_RESTORE_DETAIL=""
+    Z2_FW_LAST_FAILURE_CLASS=""
     z2_fw_ensure_scratch_dir || {
         Z2_FW_LAST_FAILURE_CLASS=STATE_UNAVAILABLE
         Z2_FW_LAST_RESTORE_DETAIL="unavailable firewall scratch directory"
         return 1
     }
-    Z2_FW_LAST_RESTORE_EXIT=0
-    Z2_FW_LAST_RESTORE_DETAIL=""
-    Z2_FW_LAST_FAILURE_CLASS=""
     state_path_is_managed_file "$capture" || {
         Z2_FW_LAST_FAILURE_CLASS=STATE_UNAVAILABLE
         Z2_FW_LAST_RESTORE_DETAIL="unsafe firewall diagnostic path"

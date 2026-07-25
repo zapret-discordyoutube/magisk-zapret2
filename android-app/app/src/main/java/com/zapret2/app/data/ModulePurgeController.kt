@@ -63,8 +63,9 @@ object ModulePurgeController {
         val report: Report? = null,
         val command: ServiceLifecycleController.CommandResult? = null,
         val error: String? = null,
+        /** False only when the module receipt was honoured but APK-private state survived it. */
+        val appDataCleared: Boolean = true,
     ) {
-        val success: Boolean get() = outcome == Outcome.COMPLETE
         val rebootRequired: Boolean get() = report?.rebootRequired == true
 
         /**
@@ -72,9 +73,28 @@ object ModulePurgeController {
          * reports partial when everything it owns was removed but one fact could not be verified,
          * such as an IPv6 ruleset the reboot clears anyway. APK-private data belongs to a module
          * that no longer exists in that case too, so clearing it must not wait for a full receipt.
+         * A receipt that admits touching the APK broke the contract outright and proves nothing.
          */
         val moduleFullyRemoved: Boolean
-            get() = report?.let { it.moduleRemoved && it.stateRemoved && it.externalRemoved } == true
+            get() = report?.let {
+                it.moduleRemoved && it.stateRemoved && it.externalRemoved && !it.apkTouched
+            } == true
+
+        /**
+         * The user-visible verdict: the module is gone and the APK-private state that belonged to
+         * it went with it. Nothing is left to retry — the purge script was removed along with the
+         * module — so an erase that only failed to prove one reboot-cleared fact must be reported
+         * as done, with [erasedWithUnverifiedCleanup] naming the reservation, and never as a
+         * failure the user could act on.
+         */
+        val erased: Boolean get() = moduleFullyRemoved && appDataCleared
+
+        /**
+         * Erased, but the module could not verify every cleanup step it performed. The receipt
+         * reserves exactly one case for this — a ruleset it could not re-read — and the pending
+         * reboot clears it regardless.
+         */
+        val erasedWithUnverifiedCleanup: Boolean get() = erased && outcome != Outcome.COMPLETE
 
         fun diagnosticText(): String = listOfNotNull(
             error?.takeIf(String::isNotBlank),
@@ -108,6 +128,7 @@ object ModulePurgeController {
                             moduleResult.copy(
                                 outcome = Outcome.PARTIAL,
                                 error = "Module data was removed, but APK-private state could not be cleared",
+                                appDataCleared = false,
                             )
                         } else {
                             moduleResult
