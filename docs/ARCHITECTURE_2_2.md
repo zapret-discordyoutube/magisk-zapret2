@@ -167,6 +167,24 @@ surviving journal surfaces on the very next lifecycle observation as
 `RECOVERY_BLOCKED`, which names the remedy. The field is worth adding the
 next time the receipt version is raised for other reasons.
 
+## 4b. Older defects found during review and left for a later change
+
+These predate the redesign and were confirmed but not changed here, because
+each alters a fence or an on-disk format and the redesign was already large:
+
+- **The uninstall tombstone is never retired.** `uninstall.sh` invoked
+  directly (without the root manager's `remove` marker) succeeds and leaves
+  `uninstall.tombstone`, which `uninstall_tombstone_allows_start` refuses on
+  sight — so a module that stays installed can never start again. Removal
+  through the root manager is unaffected: it deletes the whole state tree.
+  The user-facing remedy is documented in `USER_OPERATIONS_RU.md`.
+- **The compiled argv is not bound to the install generation.** The binding
+  covers the preset name, the preset digest and the `runtime.ini` digest, so a
+  module update whose preset and runtime are byte-identical reuses the argv
+  compiled by the previous release. The validation receipt *is*
+  generation-bound, so the artifact is re-validated by a fresh dry-run — but
+  it is not recompiled.
+
 ## 5. Deferred (designed, not shipped in 2.2.0)
 
 - **Single-endpoint preset application.** The app currently performs the

@@ -636,6 +636,19 @@ main() {
     if normal_health_ok; then
         if [ "$REPLACE" = 0 ]; then
             DIAGNOSTICS="already healthy; no process or firewall churn"
+            # This path publishes a status without building anything, so the
+            # capability facts have to come from the generation that did.
+            # Leaving them unset would republish the defaults and claim
+            # connbytes support the running ruleset may not have.
+            IPV4_CONNBYTES="$OWNER_STATE_IPV4_CONNBYTES"
+            IPV4_MULTIPORT="$OWNER_STATE_IPV4_MULTIPORT"
+            IPV4_MARK="$OWNER_STATE_IPV4_MARK"
+            IPV6_CONNBYTES="$OWNER_STATE_IPV6_CONNBYTES"
+            FALLBACK_MODE=0
+            if [ "$IPV4_CONNBYTES" != 1 ] ||
+               { [ "$HEALTH_IPV6" = 1 ] && [ "$IPV6_CONNBYTES" != 1 ]; }; then
+                FALLBACK_MODE=1
+            fi
             write_ok_status "$HEALTH_RULES" "$HEALTH_PID" "$HEALTH_IPV6" || fail_start "cannot write lifecycle status"
             receipt_lifecycle_state=idle; receipt_owner_kind=none
             if [ "$LOCK_HELD" = inherited ]; then
