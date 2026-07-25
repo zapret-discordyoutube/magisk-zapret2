@@ -244,7 +244,16 @@ manager_action() {
     if z2_purge_request_is_live && [ "$Z2_PURGE_REQUEST_SOURCE" = manager ]; then
         token="$Z2_PURGE_REQUEST_TOKEN"
         echo "Second confirmation received. Permanently removing Zapret2 module data..."
-        commit_purge manager "$token" || return 1
+        if ! commit_purge manager "$token"; then
+            # The removal fence is durable from the moment it is published, so
+            # a failure here still leaves the module scheduled for removal.
+            # Saying only "failed" would leave the user expecting a module
+            # that the next boot deletes.
+            if module_removal_pending; then
+                echo "The module stays scheduled for removal and is deleted at the next boot; reinstall it afterwards if you want it back." >&2
+            fi
+            return 1
+        fi
         if clear_installed_apk_private_data; then
             echo "Zapret2 app data cleared; installed APK preserved. Reboot required."
         else
