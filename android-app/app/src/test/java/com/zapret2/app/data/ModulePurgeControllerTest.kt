@@ -1,6 +1,7 @@
 package com.zapret2.app.data
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -86,7 +87,7 @@ class ModulePurgeControllerTest {
 
         assertTrue(result.moduleFullyRemoved)
         assertTrue(result.erased)
-        assertTrue(result.erasedWithUnverifiedCleanup)
+        assertNotEquals(ModulePurgeController.Outcome.COMPLETE, result.outcome)
     }
 
     @Test
@@ -94,7 +95,7 @@ class ModulePurgeControllerTest {
         val result = purgeResult(outcome = ModulePurgeController.Outcome.COMPLETE)
 
         assertTrue(result.erased)
-        assertFalse(result.erasedWithUnverifiedCleanup)
+        assertEquals(ModulePurgeController.Outcome.COMPLETE, result.outcome)
     }
 
     @Test

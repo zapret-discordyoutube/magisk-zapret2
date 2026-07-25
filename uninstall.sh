@@ -261,7 +261,7 @@ firewall_is_clean() {
                 return 1
             fi
             UNINSTALL_IPV6_UNVERIFIED=1
-            report_warning "IPv6 mangle backend stayed unavailable; IPv6 ownership could not be re-verified"
+            report_warning "Z2_FIREWALL_IPV6_UNVERIFIED: IPv6 mangle backend stayed unavailable; IPv6 ownership could not be re-verified"
             return 0
         fi
         owned_family_present ip6tables; family_state=$?
@@ -800,5 +800,12 @@ if state_directory_has_preserved_children; then
     exit 1
 fi
 
-echo "Zapret2 stopped, verified clean, and uninstalled"
+if [ "${UNINSTALL_IPV6_UNVERIFIED:-0}" = 1 ]; then
+    # The uninstall did everything it owns, but one family could not be
+    # re-read. Saying "verified clean" here would claim a proof this run does
+    # not have; the reboot uninstall already requires clears that family.
+    echo "Zapret2 stopped and uninstalled; the IPv6 ruleset could not be re-verified and is cleared by the reboot"
+else
+    echo "Zapret2 stopped, verified clean, and uninstalled"
+fi
 exit 0

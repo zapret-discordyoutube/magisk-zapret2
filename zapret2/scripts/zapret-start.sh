@@ -373,10 +373,14 @@ firewall_is_clean_after_rollback() {
 # decision a caller may already have resolved: the resolver publishes both
 # answers into globals, and only one of them belongs to this question.
 snapshot_ipv6_publication_recorded() {
-    local saved="${CLEANUP_IPV6_OWNERSHIP_EXPECTED:-1}" recorded
-    resolve_ipv6_ownership_expectation 0
+    local saved_expected="${CLEANUP_IPV6_OWNERSHIP_EXPECTED:-1}"
+    local saved_recorded="${IPV6_PUBLICATION_RECORDED:-0}" recorded
+    # Same inputs as the teardown decision, including the owner record: two
+    # callers asking one question about one generation must not disagree.
+    resolve_ipv6_ownership_expectation "${OWNER_STATE_AVAILABLE_FOR_ROLLBACK:-0}"
     recorded="$IPV6_PUBLICATION_RECORDED"
-    CLEANUP_IPV6_OWNERSHIP_EXPECTED="$saved"
+    CLEANUP_IPV6_OWNERSHIP_EXPECTED="$saved_expected"
+    IPV6_PUBLICATION_RECORDED="$saved_recorded"
     [ "$recorded" = 1 ]
 }
 

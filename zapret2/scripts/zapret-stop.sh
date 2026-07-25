@@ -201,8 +201,8 @@ main() {
         # the whole retirement postcondition without another /proc walk.
         if [ -e "$PIDFILE" ] || [ -L "$PIDFILE" ] || [ -e "$OWNER_STATE" ] || [ -L "$OWNER_STATE" ]; then
             rc=1
-            if [ -n "$errors" ]; then errors="$errors; ownership metadata retained because process identity is ambiguous"
-            else errors="ownership metadata retained because process identity is ambiguous"; fi
+            if [ -n "$errors" ]; then errors="$errors; ownership publication survived a verified teardown"
+            else errors="ownership publication survived a verified teardown"; fi
         fi
     fi
 

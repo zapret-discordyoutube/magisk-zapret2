@@ -84,17 +84,10 @@ object ModulePurgeController {
          * The user-visible verdict: the module is gone and the APK-private state that belonged to
          * it went with it. Nothing is left to retry — the purge script was removed along with the
          * module — so an erase that only failed to prove one reboot-cleared fact must be reported
-         * as done, with [erasedWithUnverifiedCleanup] naming the reservation, and never as a
-         * failure the user could act on.
+         * as done, with the reservation named beside it, and never as a failure the user could
+         * act on.
          */
         val erased: Boolean get() = moduleFullyRemoved && appDataCleared
-
-        /**
-         * Erased, but the module could not verify every cleanup step it performed. The receipt
-         * reserves exactly one case for this — a ruleset it could not re-read — and the pending
-         * reboot clears it regardless.
-         */
-        val erasedWithUnverifiedCleanup: Boolean get() = erased && outcome != Outcome.COMPLETE
 
         fun diagnosticText(): String = listOfNotNull(
             error?.takeIf(String::isNotBlank),

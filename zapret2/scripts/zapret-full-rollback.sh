@@ -438,7 +438,8 @@ if ! phase_at_least firewall-clean; then
     # and fence start, stop, uninstall and purge until someone deleted the
     # state by hand — on a device where the condition repeats every boot. The
     # IPv4 family is the one this rollback can always prove; if that is gone
-    # and only an unqueryable IPv6 frontend remains, finish and say so.
+    # and the IPv6 frontend is unusable — missing outright, or unqueryable
+    # through repeated probes — finish and say so.
     if ! cleanup_owned_firewall audited || ! firewall_clean; then
         if firewall_family_persistently_unavailable ip6tables && owned_family_absent iptables; then
             RB_IPV6_UNVERIFIED=1
@@ -498,7 +499,7 @@ if [ "${RB_IPV6_UNVERIFIED:-0}" = 1 ]; then
     # Everything the rollback owns is done and the journal is retired, so the
     # module is not fenced — but "complete" asserts a verified-clean firewall,
     # and this run could not query IPv6. Report what is true.
-    partial "full rollback finished and the module is disabled, but the IPv6 mangle table could not be queried; the required reboot clears any remaining IPv6 rules"
+    partial "full rollback finished and the module is disabled, but the IPv6 mangle table is unavailable; the required reboot clears any remaining IPv6 rules"
 fi
 RB_STATUS=complete
 RB_DIAGNOSTIC="full rollback complete; reboot required; user strategies and lists preserved"

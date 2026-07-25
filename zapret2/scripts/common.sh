@@ -2515,7 +2515,10 @@ firewall_family_persistently_unavailable() {
     # A zero, negative or non-numeric budget would skip the loop entirely and
     # report "permanently unavailable" without probing once — the fail-open
     # this function exists to prevent.
-    is_decimal "$attempts" && [ "$attempts" -ge 1 ] 2>/dev/null || attempts=5
+    # Bounded on both sides: the caller holds the lifecycle lock while this
+    # runs, so an unbounded budget would hold it for hours.
+    is_decimal "$attempts" && [ "$attempts" -ge 1 ] 2>/dev/null &&
+        [ "$attempts" -le 60 ] 2>/dev/null || attempts=5
     command -v "$tool" >/dev/null 2>&1 || return 0
     while [ "$attempt" -lt "$attempts" ]; do
         z2_fw_tool_available "$tool" && return 1
