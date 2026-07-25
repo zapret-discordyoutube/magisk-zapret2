@@ -530,7 +530,7 @@ internal fun ControlUiState.withModuleStatusPublication(
  * installs them separately, the `ApkInstallerPending` and `Partial` update outcomes leave the APK
  * ahead of the module until the next reboot, and a sideloaded APK does the same.
  */
-private const val REMOVAL_FENCE_FIRST_MODULE_VERSION_CODE = 2_020_000L
+private const val REMOVAL_FENCE_FIRST_MODULE_VERSION_CODE = 2_010_006L
 
 /**
  * Whether the installed module is one whose `partial` purge receipt proves the removal fence was

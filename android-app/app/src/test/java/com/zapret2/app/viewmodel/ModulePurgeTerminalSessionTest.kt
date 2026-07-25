@@ -605,7 +605,7 @@ class ModulePurgeTerminalSessionTest {
 
     private companion object {
         /** The oldest module release whose `partial` receipt proves the removal fence is up. */
-        const val FENCE_FIRST_MODULE_VERSION = "v2.2.0"
+        const val FENCE_FIRST_MODULE_VERSION = "v2.1.6"
 
         /** The newest shipped release that prints `partial` when the fence could NOT be published. */
         const val PRE_FENCE_MODULE_VERSION = "v2.1.5"
