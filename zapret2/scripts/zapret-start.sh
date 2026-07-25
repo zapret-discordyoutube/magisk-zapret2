@@ -18,6 +18,7 @@ LAUNCHED_ARGV_SHA256=""
 LAUNCH_OWNS_PIDFILE=0
 IPV4_BUILT=0
 IPV6_BUILT=0
+IPV6_TOUCHED=0
 IPV4_RULES=0
 IPV6_RULES=0
 DIAGNOSTICS=""
@@ -330,11 +331,13 @@ write_ok_status() {
 rollback_start() {
     local rc=0
     ROLLBACK_ERRORS=""
-    # This transaction knows exactly which families it published, so it can
-    # tell "IPv6 was never built" from "IPv6 cannot be queried".
+    # This transaction knows which families it touched, so it can tell "IPv6
+    # was never published" from "IPv6 cannot be queried". IPV6_TOUCHED covers
+    # the case where publication committed but verification did not, which
+    # IPV6_BUILT alone would report as untouched.
     CLEANUP_IPV6_OWNERSHIP_EXPECTED=1
-    if [ "${IPV6_BUILT:-0}" = 0 ] && [ "${IPV6_ACTIVE:-0}" = 0 ] &&
-       [ "${STATUS_FILE_IPV6_ACTIVE:-0}" = 0 ]; then
+    if [ "${IPV6_TOUCHED:-0}" = 0 ] && [ "${IPV6_BUILT:-0}" = 0 ] &&
+       [ "${IPV6_ACTIVE:-0}" = 0 ] && [ "${STATUS_FILE_IPV6_ACTIVE:-0}" = 0 ]; then
         CLEANUP_IPV6_OWNERSHIP_EXPECTED=0
     fi
     if [ "$FIREWALL_MUTATED" = 1 ]; then
@@ -713,6 +716,10 @@ main() {
     IPV6_ACTIVE=0; IPV6_BUILT=0; IPV6_RULES=0
     IPV6_CONNBYTES=0; IPV6_MULTIPORT=1; IPV6_MARK=1
     if z2_fw_tool_available ip6tables && z2_fw_restore_available ip6tables; then
+        # From here on this transaction may have written IPv6 objects, whether
+        # or not it goes on to verify them. Rollback must not read a failed
+        # publication as "IPv6 was never touched".
+        IPV6_TOUCHED=1
         if z2_fw_reconcile_family ip6tables audited; then
             IPV6_CONNBYTES="$Z2_FW_CONNBYTES"
             IPV6_RULES="$Z2_FW_RULES"; IPV6_BUILT=1; IPV6_ACTIVE=1

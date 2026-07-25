@@ -564,7 +564,9 @@ manager_remove_locked_state() {
                 [ "$probe" -ge 5 ] || sleep 1
             done
             if [ "$probe" -ge 5 ]; then
-                report_warning "IPv6 mangle backend stayed unavailable; any IPv6 rules are left to the pending reboot"
+                # Marker consumed by zapret-purge.sh: the caller must not
+                # report a verified-clean firewall after this.
+                report_warning "Z2_FIREWALL_IPV6_UNVERIFIED: IPv6 mangle backend stayed unavailable; any IPv6 rules are left to the pending reboot"
                 continue
             fi
         fi

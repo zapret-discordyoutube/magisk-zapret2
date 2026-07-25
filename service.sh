@@ -103,6 +103,35 @@ log "=== Zapret2 service starting ==="
 
 log "Boot completed; starting the network-independent firewall lifecycle"
 
+# Every lifecycle entry point audits recovery state before doing its work, and
+# that audit can refuse. Only a refusal *by* recovery state may run the
+# boot-only recovery pass: it happens before the entry point mutates anything,
+# so the pass still sees previous-boot state only. Any other failure may have
+# published a process or rules during this boot, and discarding state wholesale
+# would then destroy live evidence rather than stale generations.
+run_start_script() {
+    START_OUTPUT="$(/system/bin/sh "$START_SCRIPT" "$@" 2>&1)"
+    START_RC=$?
+    [ -z "$START_OUTPUT" ] || log "$START_OUTPUT"
+    case "$START_RC:$START_OUTPUT" in
+        0:*) return 0 ;;
+        *Z2_ERROR_CODE=RECOVERY_BLOCKED*) ;;
+        *) return "$START_RC" ;;
+    esac
+    log "Lifecycle entry was refused by recovery state; running previous-boot recovery"
+    if ! recover_boot_stale_runtime_state; then
+        log "ERROR: Previous-boot runtime recovery failed: ${BOOT_RECOVERY_DIAGNOSTIC:-unsafe recovery state}"
+        return "$START_RC"
+    fi
+    if [ "$BOOT_INCOMPATIBLE_STATE_RETIRED" = 1 ]; then
+        log "Incompatible boot-local state was discarded"
+    fi
+    START_OUTPUT="$(/system/bin/sh "$START_SCRIPT" "$@" 2>&1)"
+    START_RC=$?
+    [ -z "$START_OUTPUT" ] || log "$START_OUTPUT"
+    return "$START_RC"
+}
+
 # Check if autostart is enabled.  This preflight is read-only; any migration is
 # performed by zapret-start.sh only after update/lifecycle serialization.
 load_effective_core_config_readonly
@@ -110,14 +139,16 @@ CONFIG_RC=$?
 
 if [ "$CONFIG_RC" -ne 0 ]; then
     log "runtime.ini requires serialized repair: ${RUNTIME_CONFIG_ERROR:-unknown error}"
-    REPAIR_OUTPUT="$(sh "$START_SCRIPT" --repair-runtime-only 2>&1)"
+    # The repair runs after the start script's own recovery audit, so a
+    # previous-boot artifact would otherwise fence config repair on every boot
+    # forever — the boot pass is the only authority that can clear it.
+    run_start_script --repair-runtime-only
     REPAIR_RC=$?
     if [ "$REPAIR_RC" -ne 0 ]; then
-        log "ERROR: Serialized runtime.ini repair failed (exit $REPAIR_RC): $REPAIR_OUTPUT"
+        log "ERROR: Serialized runtime.ini repair failed (exit $REPAIR_RC)"
         log "=== Zapret2 service script failed ==="
         exit 1
     fi
-    log "$REPAIR_OUTPUT"
     if ! load_effective_core_config_readonly; then
         log "ERROR: Repaired runtime.ini still failed strict read-only validation"
         log "=== Zapret2 service script failed ==="
@@ -143,30 +174,8 @@ if [ "$AUTOSTART" = "1" ]; then
     # zapret-start.sh gates runtime state, module removal, and uninstall
     # tombstones, and its own audit retires proven cross-boot publications
     # under the lifecycle lock — so a healthy boot needs no separate pass.
-    START_OUTPUT="$(/system/bin/sh "$START_SCRIPT" 2>&1)"
+    run_start_script
     START_RC=$?
-    [ -z "$START_OUTPUT" ] || log "$START_OUTPUT"
-    # Only a start refused *by* recovery state may run the boot recovery pass:
-    # that refusal happens before the start mutates anything, so the pass still
-    # sees previous-boot state only. Any other failure may have published a
-    # process or rules during this boot, and discarding state wholesale would
-    # then destroy live evidence rather than stale generations.
-    case "$START_RC:$START_OUTPUT" in
-        0:*) ;;
-        *Z2_ERROR_CODE=RECOVERY_BLOCKED*)
-            log "Autostart was refused by recovery state; running previous-boot recovery"
-            if ! recover_boot_stale_runtime_state; then
-                log "ERROR: Previous-boot runtime recovery failed: ${BOOT_RECOVERY_DIAGNOSTIC:-unsafe recovery state}"
-            else
-                if [ "$BOOT_INCOMPATIBLE_STATE_RETIRED" = 1 ]; then
-                    log "Incompatible boot-local state was discarded"
-                fi
-                START_OUTPUT="$(/system/bin/sh "$START_SCRIPT" 2>&1)"
-                START_RC=$?
-                [ -z "$START_OUTPUT" ] || log "$START_OUTPUT"
-            fi
-            ;;
-    esac
     if [ "$START_RC" -eq 0 ]; then
         log "Autostart command completed successfully (exit $START_RC)"
     else

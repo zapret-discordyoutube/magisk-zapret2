@@ -2455,9 +2455,11 @@ audit_owned_firewall_for_cleanup() {
     return 0
 }
 
+FIREWALL_IPV6_SKIPPED_UNPROVEN=0
 cleanup_owned_firewall() {
     local baseline_mode="${1:-owned}" rc=0 result
     case "$baseline_mode" in owned|audited) ;; *) return 1;; esac
+    FIREWALL_IPV6_SKIPPED_UNPROVEN=0
     command -v z2_fw_cleanup_family >/dev/null 2>&1 || return 1
     z2_fw_cleanup_family iptables "$baseline_mode"
     result=$?
@@ -2467,8 +2469,11 @@ cleanup_owned_firewall() {
             z2_fw_cleanup_family ip6tables "$baseline_mode" || rc=1
         elif [ "${CLEANUP_IPV6_OWNERSHIP_EXPECTED:-1}" = 0 ]; then
             # Our own committed record says this generation never published
-            # IPv6 rules, so an unqueryable frontend cannot be hiding any.
-            :
+            # IPv6 rules, so an unqueryable frontend cannot be hiding any from
+            # us. An older generation's rules could still be there, and this is
+            # the one thing teardown cannot rule out — say so rather than let
+            # a clean result imply it was checked.
+            FIREWALL_IPV6_SKIPPED_UNPROVEN=1
         else
             # Otherwise a present frontend whose mangle table cannot be queried
             # proves nothing: treating an unproven family as clean is exactly

@@ -164,7 +164,7 @@ publish_remove_marker() {
 }
 
 commit_purge() {
-    local source="$1" token="$2" uninstall_output uninstall_rc=0 cleanup_rc=0
+    local source="$1" token="$2" uninstall_output uninstall_rc=0 cleanup_rc=0 firewall_clean=1
     case "$source" in app|manager|cli) ;; *) purge_report error 0 0 0 0 0 0 "invalid purge source"; return 1 ;; esac
     z2_purge_is_safe_token "$token" || { purge_report error 0 0 0 0 0 0 "invalid purge token"; return 1; }
     [ "$(id -u 2>/dev/null)" = 0 ] || { purge_report blocked 0 0 0 0 0 0 "root access is required"; return 1; }
@@ -197,11 +197,22 @@ commit_purge() {
     z2_purge_remove_managed_tree "$Z2_PURGE_CANONICAL_STATE_DIR" || cleanup_rc=1
     sync >/dev/null 2>&1 || cleanup_rc=1
 
+    # uninstall.sh may legitimately leave an unverifiable IPv6 family to the
+    # pending reboot. That is not a clean firewall, and the receipt must not
+    # claim otherwise just because removal itself succeeded.
+    firewall_clean=1
+    case "$uninstall_output" in
+        *Z2_FIREWALL_IPV6_UNVERIFIED*) firewall_clean=0 ;;
+    esac
     if [ "$cleanup_rc" -ne 0 ] || [ -e "$Z2_PURGE_CANONICAL_MODULE_DIR" ] ||
        [ -L "$Z2_PURGE_CANONICAL_MODULE_DIR" ] || [ -e "$Z2_PURGE_CANONICAL_STATE_DIR" ] ||
        [ -L "$Z2_PURGE_CANONICAL_STATE_DIR" ]; then
-        purge_report partial 1 1 0 0 0 1 "service and firewall are clean, but one or more module artifacts remain"
+        purge_report partial 1 "$firewall_clean" 0 0 0 1 "service and firewall are clean, but one or more module artifacts remain"
         return 1
+    fi
+    if [ "$firewall_clean" = 0 ]; then
+        purge_report complete 1 0 1 1 1 1 "Zapret2 module data was permanently removed; IPv6 rules could not be verified and are cleared by the reboot; APK preserved"
+        return 0
     fi
     purge_report complete 1 1 1 1 1 1 "Zapret2 module data was permanently removed; APK preserved; reboot required"
 }

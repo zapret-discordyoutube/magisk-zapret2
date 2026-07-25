@@ -186,6 +186,8 @@ main() {
         else errors="IPv6 owned rules cannot be disproved because ip6tables is unavailable; daemon teardown was not attempted"; fi
     else
         firewall_detached=1
+        [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" != 1 ] ||
+            log_msg "WARNING: the IPv6 mangle table could not be queried; rules from an earlier generation, if any, were not removed"
     fi
 
     if [ "$firewall_detached" = 1 ] && ! stop_pidfile_process; then
