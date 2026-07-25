@@ -306,7 +306,11 @@ grep -Fq -- '--commit-candidate' "$ROOT/zapret2/scripts/zapret-apply-preset.sh" 
 [ "$(grep -c 'immutable-exec|0755|zapret2/scripts/zapret-apply-preset.sh' \
     "$ROOT/zapret2/runtime-manifest.tsv")" = 1 ] ||
     fail "the apply transaction is not declared exactly once in the runtime manifest"
-[ "$(stat -c %a "$ROOT/zapret2/scripts/zapret-apply-preset.sh")" = 755 ] ||
-    fail "the apply transaction is not packaged as an executable"
+# The executable bit is applied from the manifest at install time, exactly as
+# it is for every sibling script, so the packaging contract — not the mode a
+# checkout's umask happened to produce — is what this pins.
+[ "$(grep -c '"immutable-exec|0755|zapret2/scripts/zapret-apply-preset.sh"' \
+    "$ROOT/zapret2/scripts/package-contract.sh")" = 1 ] ||
+    fail "the apply transaction is not enumerated as a packaged executable"
 
 echo "Preset apply transaction shell tests passed"
