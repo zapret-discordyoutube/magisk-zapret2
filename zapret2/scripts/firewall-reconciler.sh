@@ -110,16 +110,17 @@ z2_fw_diagnostic_is_connbytes_unsupported() {
 }
 
 z2_fw_ensure_scratch_dir() {
+    # common.sh owns the authenticated implementation; the standalone fallback
+    # exists only for tests that source this reconciler on its own.
     if command -v ensure_state_tmp_dir >/dev/null 2>&1; then
         ensure_state_tmp_dir
         return
     fi
     umask 077
-    if [ -e "$STATE_DIR/tmp" ] || [ -L "$STATE_DIR/tmp" ]; then
-        [ -d "$STATE_DIR/tmp" ] && [ ! -L "$STATE_DIR/tmp" ] || return 1
-    else
-        mkdir "$STATE_DIR/tmp" 2>/dev/null || [ -d "$STATE_DIR/tmp" ] || return 1
+    if [ ! -e "$STATE_DIR/tmp" ] && [ ! -L "$STATE_DIR/tmp" ]; then
+        mkdir "$STATE_DIR/tmp" 2>/dev/null
     fi
+    [ -d "$STATE_DIR/tmp" ] && [ ! -L "$STATE_DIR/tmp" ] || return 1
     chmod 0700 "$STATE_DIR/tmp" 2>/dev/null || return 1
 }
 

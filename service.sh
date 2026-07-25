@@ -77,10 +77,10 @@ else
     done
 fi
 
-# When autostart will run, zapret-start.sh performs the identical recovery
-# audit under its own lifecycle lock; a second standalone lock/audit cycle
-# here would prove the same facts twice. The standalone recovery pass below
-# is kept for the paths that never reach zapret-start.sh.
+# When autostart runs, zapret-start.sh performs the identical recovery audit
+# under its own lifecycle lock, so a healthy boot needs one cycle instead of
+# two. The standalone pass runs on the paths that never reach zapret-start.sh,
+# and as the retry path when a start is blocked by recovery state.
 if [ "$MODULE_DISABLED" = 1 ]; then
     if ! command -v recover_boot_stale_runtime_state >/dev/null 2>&1 ||
        ! recover_boot_stale_runtime_state; then
@@ -90,12 +90,6 @@ if [ "$MODULE_DISABLED" = 1 ]; then
     log "Module disable marker is present; previous-boot recovery completed and startup was skipped"
     exit 0
 fi
-
-# The boot entry point is the only caller allowed to discard an incompatible
-# previous-boot state generation wholesale; zapret-start.sh honours this flag
-# under its own lock.
-ZAPRET2_BOOT_RECOVERY=1
-export ZAPRET2_BOOT_RECOVERY
 
 if ! prepare_lifecycle_log; then
     LOG_READY=0
@@ -143,9 +137,25 @@ log "Category state source: $CATEGORIES_FILE"
 if [ "$AUTOSTART" = "1" ]; then
     log "Autostart enabled, launching zapret2..."
     # Package updates are activated by the root manager only at boot.
-    # zapret-start.sh gates runtime state, module removal, and uninstall tombstones.
+    # zapret-start.sh gates runtime state, module removal, and uninstall
+    # tombstones, and its own audit retires proven cross-boot publications
+    # under the lifecycle lock — so a healthy boot needs no separate pass.
     /system/bin/sh "$START_SCRIPT"
     START_RC=$?
+    if [ "$START_RC" -ne 0 ]; then
+        # Only the boot entry point may discard an unsafe previous-boot state
+        # generation wholesale. Run that pass now and retry the start once.
+        log "Autostart failed (exit $START_RC); running previous-boot recovery"
+        if ! recover_boot_stale_runtime_state; then
+            log "ERROR: Previous-boot runtime recovery failed: ${BOOT_RECOVERY_DIAGNOSTIC:-unsafe recovery state}"
+        else
+            if [ "$BOOT_INCOMPATIBLE_STATE_RETIRED" = 1 ]; then
+                log "Incompatible boot-local state was discarded"
+            fi
+            /system/bin/sh "$START_SCRIPT"
+            START_RC=$?
+        fi
+    fi
     if [ "$START_RC" -eq 0 ]; then
         log "Autostart command completed successfully (exit $START_RC)"
     else

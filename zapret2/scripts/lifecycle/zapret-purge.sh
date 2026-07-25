@@ -184,7 +184,9 @@ commit_purge() {
     publish_remove_marker || { purge_report error 0 0 0 0 0 0 "cannot publish the permanent module-removal gate"; return 1; }
     uninstall_output="$(MODPATH="$MODDIR" /system/bin/sh "$UNINSTALL_SCRIPT" 2>&1)" || uninstall_rc=$?
     if [ "$uninstall_rc" -ne 0 ]; then
-        purge_report blocked 0 0 0 0 0 1 "verified service/firewall uninstall failed: $uninstall_output"
+        # The fence is already published, so this is not a "nothing happened"
+        # rejection: the module is retired at the next boot either way.
+        purge_report partial 0 0 0 0 0 1 "verified service/firewall uninstall failed: $uninstall_output"
         return 1
     fi
 

@@ -147,9 +147,10 @@ main() {
         if [ -n "$errors" ]; then errors="$errors; owned firewall cleanup failed"
         else errors="owned firewall cleanup failed: ${FIREWALL_CLEANUP_PREFLIGHT_ERROR:-ambiguous ownership}; daemon teardown was not attempted"; fi
     elif ! command -v ip6tables >/dev/null 2>&1 && [ "${STATUS_FILE_IPV6_ACTIVE:-0}" = 1 ]; then
-        # z2_fw_apply_cleanup already proved per-family absence as its own
-        # postcondition; the only fact it cannot prove is IPv6 state on a
-        # device that lost its ip6tables frontend.
+        # cleanup_owned_firewall proves per-family absence as the postcondition
+        # of each family it touches, and fails when a present frontend cannot
+        # be queried. The one fact left is a device that lost its ip6tables
+        # frontend entirely while the last commit recorded IPv6 rules.
         rc=1
         STOP_ERROR_DOMAIN=FIREWALL; STOP_ERROR_CODE=POSTCONDITION_FAILED; STOP_ERROR_STAGE=STOP_FIREWALL
         if [ -n "$errors" ]; then errors="$errors; owned firewall artifacts remain"

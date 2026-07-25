@@ -253,12 +253,14 @@ state_path_is_managed_file() {
 
 ensure_state_tmp_dir() {
     umask 077
-    if [ -e "$Z2_STATE_TMP" ] || [ -L "$Z2_STATE_TMP" ]; then
-        [ -d "$Z2_STATE_TMP" ] && [ ! -L "$Z2_STATE_TMP" ] || return 1
-        path_uid_is_root "$Z2_STATE_TMP" || return 1
-    else
-        mkdir "$Z2_STATE_TMP" 2>/dev/null || [ -d "$Z2_STATE_TMP" ] || return 1
+    if [ ! -e "$Z2_STATE_TMP" ] && [ ! -L "$Z2_STATE_TMP" ]; then
+        mkdir "$Z2_STATE_TMP" 2>/dev/null
     fi
+    # Validate unconditionally: a losing mkdir race must never be accepted on
+    # the strength of [ -d ] alone, which follows a symlink planted between
+    # the existence test and the mkdir.
+    [ -d "$Z2_STATE_TMP" ] && [ ! -L "$Z2_STATE_TMP" ] || return 1
+    path_uid_is_root "$Z2_STATE_TMP" || return 1
     chmod 0700 "$Z2_STATE_TMP" 2>/dev/null || return 1
 }
 
@@ -487,9 +489,10 @@ retire_obsolete_state_artifacts() {
         { [ -e "$path" ] || [ -L "$path" ]; } || continue
         rm -f "$path" 2>/dev/null || return 1
     done
-    # Previous-boot scratch cannot belong to any live operation; sweeping it
-    # here is limited to the boot boundary so a concurrent app-side preset
-    # preview is never raced during normal runtime audits.
+    # Previous-boot scratch cannot belong to any live operation. The sweep is
+    # confined to recover_boot_stale_runtime_state, the only setter of this
+    # flag, so a concurrent app-side preset preview is never raced during
+    # ordinary runtime audits.
     if [ "${BOOT_STALE_RUNTIME_RECOVERY:-0}" = 1 ] &&
        { [ -e "$Z2_STATE_TMP" ] || [ -L "$Z2_STATE_TMP" ]; }; then
         rm -rf "$Z2_STATE_TMP" 2>/dev/null || return 1
@@ -2420,8 +2423,16 @@ cleanup_owned_firewall() {
     z2_fw_cleanup_family iptables "$baseline_mode"
     result=$?
     [ "$result" = 0 ] || rc=1
-    if z2_fw_tool_available ip6tables; then
-        z2_fw_cleanup_family ip6tables "$baseline_mode" || rc=1
+    if command -v ip6tables >/dev/null 2>&1; then
+        # A present frontend whose mangle table cannot be queried proves
+        # nothing about IPv6 ownership. Skipping it here would let callers
+        # treat an unproven family as clean, so fail instead.
+        if z2_fw_tool_available ip6tables; then
+            z2_fw_cleanup_family ip6tables "$baseline_mode" || rc=1
+        else
+            FIREWALL_CLEANUP_PREFLIGHT_ERROR="IPv6 mangle backend became unavailable during cleanup"
+            rc=1
+        fi
     fi
     return "$rc"
 }

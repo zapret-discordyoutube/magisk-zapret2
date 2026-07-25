@@ -401,8 +401,10 @@ validate_preset_file() {
 
 collect_capture_ports() {
     local preset_file="$1" output extra ports_valid=1
-    if [ -n "${STATE_DIR:-}" ] && command -v ensure_state_tmp_dir >/dev/null 2>&1 &&
-       ensure_state_tmp_dir; then
+    if [ -n "${STATE_DIR:-}" ] && command -v ensure_state_tmp_dir >/dev/null 2>&1; then
+        # Fail closed: when the authenticated scratch directory is unavailable
+        # this must not silently fall back to a caller-controlled TMPDIR.
+        ensure_state_tmp_dir || return 1
         output="$STATE_DIR/tmp/z2-ports.$$"
     else
         output="${TMPDIR:-/tmp}/z2-ports.$$"

@@ -35,8 +35,9 @@ object ServiceLifecycleController {
     /**
      * Protocol the installed status script last answered with, or null while it is unknown.
      *
-     * Writes happen under [lifecycleMutex]; the field is volatile so other observers see the
-     * negotiated version instead of replaying the whole cascade.
+     * Negotiation writes happen under [lifecycleMutex], but invalidation may arrive from any
+     * caller, so the field is volatile. A lost invalidation is benign: the stale version is
+     * probed first, answers unsupported, and the full cascade runs again.
      */
     @Volatile
     private var negotiatedStatusProtocol: Int? = null

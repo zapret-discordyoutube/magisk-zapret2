@@ -531,24 +531,15 @@ main() {
         start_error_exit LIFECYCLE MODULE_REMOVAL_PENDING START_PREFLIGHT 0 \
             "start blocked because the root manager scheduled the module for removal"
     fi
-    # The boot entry point (service.sh) delegates its recovery authority so
-    # boot needs one lock/audit cycle instead of two. Only under that flag may
-    # an unsafe previous-boot state generation be discarded wholesale.
-    BOOT_STATE_DISCARDED=0
-    if [ "${ZAPRET2_BOOT_RECOVERY:-0}" = 1 ]; then BOOT_STALE_RUNTIME_RECOVERY=1; fi
+    # This audit retires proven cross-boot publications under the lock, which
+    # is why boot no longer needs a separate recovery cycle before it. The
+    # authority to discard an unsafe state generation wholesale stays with the
+    # boot entry point alone: service.sh runs that pass and retries the start.
     if ! audit_recovery_artifacts lifecycle; then
-        if [ "${BOOT_STALE_RUNTIME_RECOVERY:-0}" = 1 ] && [ "$RECOVERY_ARTIFACT_CLASS" = unsafe ] &&
-           discard_incompatible_boot_state; then
-            BOOT_STATE_DISCARDED=1
-            DIAGNOSTICS="${DIAGNOSTICS}incompatible boot-local state was discarded; "
-        else
-            BOOT_STALE_RUNTIME_RECOVERY=0
-            release_lifecycle_lock
-            start_error_exit LIFECYCLE RECOVERY_BLOCKED START_RECOVERY 0 \
-                "${RECOVERY_ARTIFACT_DIAGNOSTIC:-recovery artifacts block start}"
-        fi
+        release_lifecycle_lock
+        start_error_exit LIFECYCLE RECOVERY_BLOCKED START_RECOVERY 0 \
+            "${RECOVERY_ARTIFACT_DIAGNOSTIC:-recovery artifacts block start}"
     fi
-    BOOT_STALE_RUNTIME_RECOVERY=0
     if ! uninstall_tombstone_allows_start; then
         message="start blocked by uninstall serialization: $UNINSTALL_TOMBSTONE_ERROR"
         release_lifecycle_lock
@@ -587,7 +578,6 @@ main() {
         DIAGNOSTICS="${DIAGNOSTICS}lifecycle log unavailable or unsafe; "
         if command -v log >/dev/null 2>&1; then log -p w -t Zapret2 "Lifecycle file logging disabled: unsafe or unavailable path" 2>/dev/null; fi
     fi
-    [ "$BOOT_STATE_DISCARDED" != 1 ] || log_msg "Incompatible boot-local state was discarded"
     restore_status_facts
 
     load_config ||
@@ -668,7 +658,7 @@ main() {
     z2_fw_restore_available iptables ||
         fail_start "iptables-restore is required by the Android firewall backend" \
             FIREWALL FIREWALL_BACKEND_UNAVAILABLE START_FIREWALL_BACKEND 0
-    audit_owned_firewall_for_cleanup "$QNUM" ||
+    audit_owned_firewall_for_cleanup ||
         fail_start "stable firewall namespace cleanup is unsafe: $FIREWALL_CLEANUP_PREFLIGHT_ERROR" \
             FIREWALL FIREWALL_CLEANUP_FAILED START_CLEANUP 0
     preflight_owned_process_cleanup ||

@@ -496,6 +496,23 @@ manager_remove_all_owned_state() {
     }
     . "$PURGE_CONTRACT" || return 1
 
+    # This branch also runs from the Action purge while the device is up, so a
+    # lifecycle transaction may be mid-flight. Removing its state directory —
+    # including the lock it holds — would let that transaction republish a
+    # daemon and rules that nothing owns any more. At boot the lock is free;
+    # a lock left behind by a dead previous-boot owner is not a live holder
+    # and must not fence the root manager's own removal.
+    if acquire_lifecycle_lock; then
+        :
+    else
+        classify_lifecycle_lock
+        if [ "$LIFECYCLE_OBSERVED_STATE" = active ]; then
+            report_error "A live Zapret2 lifecycle transaction owns the module; removal was refused"
+            return 1
+        fi
+        report_warning "Lifecycle lock is stale or unreadable; continuing root-manager removal"
+    fi
+
     # The root-owned empty module remove marker is the durable global fence.
     # zapret-start and every mutation entry refuse work while it exists, so no
     # lifecycle tombstone is needed after the whole private state tree is gone.
@@ -664,6 +681,8 @@ for state_file in \
     "$LOGFILE" \
     "$LOGFILE_PREVIOUS" \
     "$STATUS_SNAPSHOT" \
+    "$COMPILED_ARGV_FILE" \
+    "$COMPILED_VALIDATION_RECEIPT" \
     "$RUNTIME_OWNER_MARKER" \
     "$LEGACY_MIGRATION_MARKER" \
     "$PURGE_REQUEST"; do
