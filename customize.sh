@@ -39,25 +39,37 @@ ui_print "- Extracting a fresh Zapret2 generation for $ROOT_MANAGER"
 unzip -o "$ZIPFILE" -x 'META-INF/*' -d "$MODPATH" >&2 ||
     abort "! Cannot extract module files"
 
-# One filesystem pass: normalize canonical modes for every directory and
-# regular file, and surface anything that is neither (link/special file).
-UNSUPPORTED_ENTRY="$(find "$MODPATH" \( -type d -exec chmod 0755 {} + \) -o \( -type f -exec chmod 0644 {} + \) -o -print)" ||
-    abort "! Cannot apply package permissions"
+# Surface anything that is neither a directory nor a regular file, then
+# normalize canonical modes. Every find stays a single flat expression:
+# Magisk's busybox find silently drops `-exec … +` actions that sit inside
+# grouped `-o` alternations — it exits 0 having chmod'ed nothing.
+UNSUPPORTED_ENTRY="$(find "$MODPATH" ! -type d ! -type f -print)" ||
+    abort "! Cannot inspect the extracted module"
 if [ -n "$UNSUPPORTED_ENTRY" ]; then
-    # -exec … + is always true, so only entries that are neither a directory
-    # nor a regular file reach -print. find uses lstat and the shell's -d/-f
-    # follow symlinks, so ask -L first: a symlink to a directory or file is
-    # still a symlink, and reporting it as a permission problem would send the
-    # packager hunting for something that does not exist.
+    # find uses lstat and the shell's -d/-f follow symlinks, so ask -L first:
+    # a symlink to a directory or file is still a symlink, and reporting it as
+    # a special file would send the packager hunting for something that does
+    # not exist.
     UNSUPPORTED_FIRST="${UNSUPPORTED_ENTRY%%
 *}"
     if [ -L "$UNSUPPORTED_FIRST" ]; then
         abort "! Extracted module contains a link: ${UNSUPPORTED_FIRST#"$MODPATH"/}"
     fi
-    if [ -d "$UNSUPPORTED_FIRST" ] || [ -f "$UNSUPPORTED_FIRST" ]; then
-        abort "! Cannot apply package permissions to ${UNSUPPORTED_FIRST#"$MODPATH"/}"
-    fi
     abort "! Extracted module contains a special file: ${UNSUPPORTED_FIRST#"$MODPATH"/}"
+fi
+find "$MODPATH" -type d -exec chmod 0755 {} + ||
+    abort "! Cannot apply directory permissions"
+find "$MODPATH" -type f -exec chmod 0644 {} + ||
+    abort "! Cannot apply file permissions"
+# The published-file contract (0644 files, 0755 directories) is what the app
+# verifies before it reads catalogs and presets, so prove the modes landed
+# instead of trusting the find implementation's exit status.
+WRONG_MODE_ENTRY="$(find "$MODPATH" -type d ! -perm 0755 -print; find "$MODPATH" -type f ! -perm 0644 -print)" ||
+    abort "! Cannot verify package permissions"
+if [ -n "$WRONG_MODE_ENTRY" ]; then
+    WRONG_MODE_FIRST="${WRONG_MODE_ENTRY%%
+*}"
+    abort "! Cannot apply package permissions to ${WRONG_MODE_FIRST#"$MODPATH"/}"
 fi
 [ "$(grep -c '^id=zapret2$' "$MODPATH/module.prop" 2>/dev/null)" = 1 ] ||
     abort "! Refusing package with unexpected module identity"
