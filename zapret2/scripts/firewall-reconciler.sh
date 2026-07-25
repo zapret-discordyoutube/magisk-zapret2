@@ -7,6 +7,11 @@
 # complete candidate and publishes it at COMMIT. Any interruption is recovered
 # by repeating z2_fw_cleanup_family under the lifecycle lock.
 
+# common.sh defines the fork-free line emitter and sources this file before
+# that definition runs; the fallback only keeps the reconciler sourceable on
+# its own, which the reconciler tests do.
+command -v z2_emit_line >/dev/null 2>&1 || z2_emit_line() { printf '%s\n' "$1"; }
+
 Z2_FW_OUT_CHAIN="${Z2_FW_OUT_CHAIN:-ZAPRET2_OUT}"
 Z2_FW_IN_CHAIN="${Z2_FW_IN_CHAIN:-ZAPRET2_IN}"
 Z2_FW_BACKEND=""
@@ -39,18 +44,18 @@ Z2_FW_VERIFY_DETAIL=""
 Z2_FW_LOCK_WAIT_SECONDS=5
 Z2_FW_DIAGNOSTIC_MAX_BYTES=384
 
-z2_fw_restore_command() {
+z2_fw_restore_command_read() {
+    Z2_FW_RESTORE_COMMAND=""
     case "$1" in
-        iptables) printf '%s\n' iptables-restore ;;
-        ip6tables) printf '%s\n' ip6tables-restore ;;
+        iptables) Z2_FW_RESTORE_COMMAND=iptables-restore ;;
+        ip6tables) Z2_FW_RESTORE_COMMAND=ip6tables-restore ;;
         *) return 1 ;;
     esac
 }
 
 z2_fw_restore_available() {
-    local restore
-    restore="$(z2_fw_restore_command "$1")" || return 1
-    command -v "$restore" >/dev/null 2>&1
+    z2_fw_restore_command_read "$1" || return 1
+    command -v "$Z2_FW_RESTORE_COMMAND" >/dev/null 2>&1
 }
 
 z2_fw_restore_supports_wait() {
@@ -377,24 +382,29 @@ z2_fw_family_absent() {
     [ "$Z2_FW_BASELINE_OUT_CHAIN:$Z2_FW_BASELINE_IN_CHAIN:$Z2_FW_BASELINE_OUT_ANCHORS:$Z2_FW_BASELINE_IN_ANCHORS" = 0:0:0:0 ]
 }
 
-z2_fw_emit_baseline_cleanup() {
-    local n
+# Builder counterpart of the old per-line emitter: cleanup lines land in
+# Z2_FW_BUILT_CLEANUP (empty when the baseline is already clean) so batch
+# authors can fold them into one write.
+z2_fw_build_baseline_cleanup() {
+    local n nl='
+'
+    Z2_FW_BUILT_CLEANUP=""
     [ "$Z2_FW_BASELINE_READY" = 1 ] || return 1
     n=0
     while [ "$n" -lt "$Z2_FW_BASELINE_OUT_ANCHORS" ]; do
-        printf '%s\n' "-D OUTPUT -j $Z2_FW_OUT_CHAIN"
+        Z2_FW_BUILT_CLEANUP="${Z2_FW_BUILT_CLEANUP}${Z2_FW_BUILT_CLEANUP:+$nl}-D OUTPUT -j $Z2_FW_OUT_CHAIN"
         n=$((n + 1))
     done
     n=0
     while [ "$n" -lt "$Z2_FW_BASELINE_IN_ANCHORS" ]; do
-        printf '%s\n' "-D INPUT -j $Z2_FW_IN_CHAIN"
+        Z2_FW_BUILT_CLEANUP="${Z2_FW_BUILT_CLEANUP}${Z2_FW_BUILT_CLEANUP:+$nl}-D INPUT -j $Z2_FW_IN_CHAIN"
         n=$((n + 1))
     done
     if [ "$Z2_FW_BASELINE_IN_CHAIN" = 1 ]; then
-        printf '%s\n' "-F $Z2_FW_IN_CHAIN" "-X $Z2_FW_IN_CHAIN"
+        Z2_FW_BUILT_CLEANUP="${Z2_FW_BUILT_CLEANUP}${Z2_FW_BUILT_CLEANUP:+$nl}-F $Z2_FW_IN_CHAIN$nl-X $Z2_FW_IN_CHAIN"
     fi
     if [ "$Z2_FW_BASELINE_OUT_CHAIN" = 1 ]; then
-        printf '%s\n' "-F $Z2_FW_OUT_CHAIN" "-X $Z2_FW_OUT_CHAIN"
+        Z2_FW_BUILT_CLEANUP="${Z2_FW_BUILT_CLEANUP}${Z2_FW_BUILT_CLEANUP:+$nl}-F $Z2_FW_OUT_CHAIN$nl-X $Z2_FW_OUT_CHAIN"
     fi
 }
 
@@ -403,117 +413,116 @@ z2_fw_emit_baseline_cleanup() {
 # before the batch is written instead of being discovered from a rejection.
 Z2_FW_MULTIPORT_MAX_VALUES=15
 
-z2_fw_port_intervals() {
+# One fork-free walk answers both interval questions a port list gets asked:
+# the multiport value weight (a range spends two values) and the interval
+# count that sizes the per-interval fallback topology.
+z2_fw_measure_port_list() {
     local rest="$1" token
+    Z2_FW_PORT_WEIGHT=0
+    Z2_FW_PORT_INTERVALS=0
     while [ -n "$rest" ]; do
         case "$rest" in
             *,*) token="${rest%%,*}"; rest="${rest#*,}" ;;
             *) token="$rest"; rest="" ;;
         esac
-        [ -z "$token" ] || printf '%s\n' "$token"
-    done
-}
-
-z2_fw_port_list_weight() {
-    local list="$1" weight=0 token
-    for token in $(z2_fw_port_intervals "$list"); do
+        [ -n "$token" ] || continue
         case "$token" in
-            *:*) weight=$((weight + 2)) ;;
-            *) weight=$((weight + 1)) ;;
+            *:*) Z2_FW_PORT_WEIGHT=$((Z2_FW_PORT_WEIGHT + 2)) ;;
+            *) Z2_FW_PORT_WEIGHT=$((Z2_FW_PORT_WEIGHT + 1)) ;;
         esac
+        Z2_FW_PORT_INTERVALS=$((Z2_FW_PORT_INTERVALS + 1))
     done
-    printf '%s\n' "$weight"
-}
-
-z2_fw_port_interval_count() {
-    local count=0 token
-    for token in $(z2_fw_port_intervals "$1"); do
-        count=$((count + 1))
-    done
-    printf '%s\n' "$count"
 }
 
 # Both families are authored from the same port lists, so one list over the
 # limit disqualifies multiport for the whole ruleset rather than for one rule.
 z2_fw_multiport_fits() {
     local tcp udp
-    tcp="$(z2_fw_port_list_weight "$PORTS_TCP")" || return 1
-    udp="$(z2_fw_port_list_weight "$PORTS_UDP")" || return 1
+    z2_fw_measure_port_list "$PORTS_TCP"
+    tcp="$Z2_FW_PORT_WEIGHT"
+    z2_fw_measure_port_list "$PORTS_UDP"
+    udp="$Z2_FW_PORT_WEIGHT"
     [ "$tcp" -le "$Z2_FW_MULTIPORT_MAX_VALUES" ] &&
         [ "$udp" -le "$Z2_FW_MULTIPORT_MAX_VALUES" ]
 }
 
-z2_fw_emit_rule_tail() {
-    local packet_count="$1" cb_dir="$2" connbytes="$3"
-    if [ "$connbytes" = 1 ]; then
-        printf '%s' " -m connbytes --connbytes 1:$packet_count --connbytes-dir $cb_dir --connbytes-mode packets"
-    fi
-    printf '%s\n' " -m mark ! --mark $DESYNC_MARK/$DESYNC_MARK -j NFQUEUE --queue-num $QNUM --queue-bypass"
-}
-
-z2_fw_emit_batch_rule() {
+# The rules a chain/protocol pair publishes, built as data in a global. The
+# batch writer prints them and post-publication verification compares them,
+# so building them here instead of inside a command substitution spares the
+# verifier its per-call subshell forks.
+z2_fw_build_batch_rules() {
     local chain="$1" proto="$2" direction="$3" ports="$4"
     local packet_count="$5" cb_dir="$6" connbytes="$7" multiport="${8:-1}"
-    local token
+    local tail rest token portopt nl='
+'
+    Z2_FW_BUILT_RULES=""
     [ -n "$ports" ] || return 0
+    tail=""
+    if [ "$connbytes" = 1 ]; then
+        tail=" -m connbytes --connbytes 1:$packet_count --connbytes-dir $cb_dir --connbytes-mode packets"
+    fi
+    tail="$tail -m mark ! --mark $DESYNC_MARK/$DESYNC_MARK -j NFQUEUE --queue-num $QNUM --queue-bypass"
     if [ "$multiport" = 1 ]; then
-        printf '%s' "-A $chain -p $proto -m multiport"
-        if [ "$direction" = out ]; then
-            printf '%s' " --dports $ports"
-        else
-            printf '%s' " --sports $ports"
-        fi
-        z2_fw_emit_rule_tail "$packet_count" "$cb_dir" "$connbytes"
+        if [ "$direction" = out ]; then portopt="--dports"; else portopt="--sports"; fi
+        Z2_FW_BUILT_RULES="-A $chain -p $proto -m multiport $portopt $ports$tail"
         return 0
     fi
     # A port list has no single-rule form without xt_multiport, so each
     # interval becomes its own rule. The protocol match provides --dport and
     # --sport natively, and both accept one port or one range, so this form
     # needs no extension beyond the one -p already loaded.
-    for token in $(z2_fw_port_intervals "$ports"); do
-        printf '%s' "-A $chain -p $proto"
-        if [ "$direction" = out ]; then
-            printf '%s' " --dport $token"
-        else
-            printf '%s' " --sport $token"
-        fi
-        z2_fw_emit_rule_tail "$packet_count" "$cb_dir" "$connbytes"
+    if [ "$direction" = out ]; then portopt="--dport"; else portopt="--sport"; fi
+    rest="$ports"
+    while [ -n "$rest" ]; do
+        case "$rest" in
+            *,*) token="${rest%%,*}"; rest="${rest#*,}" ;;
+            *) token="$rest"; rest="" ;;
+        esac
+        [ -n "$token" ] || continue
+        Z2_FW_BUILT_RULES="${Z2_FW_BUILT_RULES}${Z2_FW_BUILT_RULES:+$nl}-A $chain -p $proto $portopt $token$tail"
     done
 }
 
 z2_fw_write_batch() {
-    local path="$1" connbytes="$2" multiport="${3:-1}"
-    {
-        printf '%s\n' '*mangle'
-        z2_fw_emit_baseline_cleanup
-        printf ':%s - [0:0]\n' "$Z2_FW_OUT_CHAIN"
-        [ "$connbytes" != 1 ] || printf ':%s - [0:0]\n' "$Z2_FW_IN_CHAIN"
-        z2_fw_emit_batch_rule "$Z2_FW_OUT_CHAIN" tcp out "$PORTS_TCP" "$TCP_PKT_OUT" original "$connbytes" "$multiport"
-        z2_fw_emit_batch_rule "$Z2_FW_OUT_CHAIN" udp out "$PORTS_UDP" "$UDP_PKT_OUT" original "$connbytes" "$multiport"
-        if [ "$connbytes" = 1 ]; then
-            z2_fw_emit_batch_rule "$Z2_FW_IN_CHAIN" tcp in "$PORTS_TCP" "$TCP_PKT_IN" reply 1 "$multiport"
-            z2_fw_emit_batch_rule "$Z2_FW_IN_CHAIN" udp in "$PORTS_UDP" "$UDP_PKT_IN" reply 1 "$multiport"
-        fi
-        printf '%s\n' "-A OUTPUT -j $Z2_FW_OUT_CHAIN"
-        [ "$connbytes" != 1 ] || printf '%s\n' "-A INPUT -j $Z2_FW_IN_CHAIN"
-        printf '%s\n' COMMIT
-    } > "$path"
+    local path="$1" connbytes="$2" multiport="${3:-1}" batch nl='
+'
+    z2_fw_build_baseline_cleanup || return 1
+    batch="*mangle"
+    [ -z "$Z2_FW_BUILT_CLEANUP" ] || batch="$batch$nl$Z2_FW_BUILT_CLEANUP"
+    batch="$batch$nl:$Z2_FW_OUT_CHAIN - [0:0]"
+    [ "$connbytes" != 1 ] || batch="$batch$nl:$Z2_FW_IN_CHAIN - [0:0]"
+    z2_fw_build_batch_rules "$Z2_FW_OUT_CHAIN" tcp out "$PORTS_TCP" "$TCP_PKT_OUT" original "$connbytes" "$multiport" || return 1
+    [ -z "$Z2_FW_BUILT_RULES" ] || batch="$batch$nl$Z2_FW_BUILT_RULES"
+    z2_fw_build_batch_rules "$Z2_FW_OUT_CHAIN" udp out "$PORTS_UDP" "$UDP_PKT_OUT" original "$connbytes" "$multiport" || return 1
+    [ -z "$Z2_FW_BUILT_RULES" ] || batch="$batch$nl$Z2_FW_BUILT_RULES"
+    if [ "$connbytes" = 1 ]; then
+        z2_fw_build_batch_rules "$Z2_FW_IN_CHAIN" tcp in "$PORTS_TCP" "$TCP_PKT_IN" reply 1 "$multiport" || return 1
+        [ -z "$Z2_FW_BUILT_RULES" ] || batch="$batch$nl$Z2_FW_BUILT_RULES"
+        z2_fw_build_batch_rules "$Z2_FW_IN_CHAIN" udp in "$PORTS_UDP" "$UDP_PKT_IN" reply 1 "$multiport" || return 1
+        [ -z "$Z2_FW_BUILT_RULES" ] || batch="$batch$nl$Z2_FW_BUILT_RULES"
+    fi
+    batch="$batch$nl-A OUTPUT -j $Z2_FW_OUT_CHAIN"
+    [ "$connbytes" != 1 ] || batch="$batch$nl-A INPUT -j $Z2_FW_IN_CHAIN"
+    batch="$batch${nl}COMMIT"
+    z2_emit_line "$batch" > "$path"
 }
 
 z2_fw_write_cleanup_batch() {
-    local path="$1"
-    {
-        printf '%s\n' '*mangle'
-        z2_fw_emit_baseline_cleanup
-        printf '%s\n' COMMIT
-    } > "$path"
+    local path="$1" batch nl='
+'
+    z2_fw_build_baseline_cleanup || return 1
+    batch="*mangle"
+    [ -z "$Z2_FW_BUILT_CLEANUP" ] || batch="$batch$nl$Z2_FW_BUILT_CLEANUP"
+    batch="$batch${nl}COMMIT"
+    z2_emit_line "$batch" > "$path"
 }
 
 z2_fw_apply_restore() {
     local tool="$1" connbytes="$2" multiport="${3:-1}" restore batch
     Z2_FW_FAILURE_CLASS=""
     Z2_FW_ERROR_DETAIL=""
-    restore="$(z2_fw_restore_command "$tool")" || return 2
+    z2_fw_restore_command_read "$tool" || return 2
+    restore="$Z2_FW_RESTORE_COMMAND"
     command -v "$restore" >/dev/null 2>&1 || return 3
     batch="$STATE_DIR/tmp/firewall-batch.${tool}.$$"
     z2_fw_ensure_scratch_dir || {
@@ -578,16 +587,19 @@ z2_fw_apply_restore() {
 
 z2_fw_expected_rule_count() {
     local connbytes="$1" multiport="${2:-1}" per_direction=0 tcp udp
+    Z2_FW_EXPECTED_RULES=0
     if [ "$multiport" = 1 ]; then
         [ -z "$PORTS_TCP" ] || per_direction=$((per_direction + 1))
         [ -z "$PORTS_UDP" ] || per_direction=$((per_direction + 1))
     else
         # One rule per interval, so the published count is the interval count.
-        tcp="$(z2_fw_port_interval_count "$PORTS_TCP")" || return 1
-        udp="$(z2_fw_port_interval_count "$PORTS_UDP")" || return 1
+        z2_fw_measure_port_list "$PORTS_TCP"
+        tcp="$Z2_FW_PORT_INTERVALS"
+        z2_fw_measure_port_list "$PORTS_UDP"
+        udp="$Z2_FW_PORT_INTERVALS"
         per_direction=$((tcp + udp))
     fi
-    printf '%s\n' $((per_direction * (1 + connbytes)))
+    Z2_FW_EXPECTED_RULES=$((per_direction * (1 + connbytes)))
 }
 
 z2_fw_verify_family() {
@@ -598,13 +610,17 @@ z2_fw_verify_family() {
         Z2_FW_VERIFY_DETAIL="$tool mangle snapshot command failed"
         return 1
     }
-    out_tcp="$(z2_fw_emit_batch_rule "$Z2_FW_OUT_CHAIN" tcp out "$PORTS_TCP" "$TCP_PKT_OUT" original "$connbytes" "$multiport")" || return 1
-    out_udp="$(z2_fw_emit_batch_rule "$Z2_FW_OUT_CHAIN" udp out "$PORTS_UDP" "$UDP_PKT_OUT" original "$connbytes" "$multiport")" || return 1
+    z2_fw_build_batch_rules "$Z2_FW_OUT_CHAIN" tcp out "$PORTS_TCP" "$TCP_PKT_OUT" original "$connbytes" "$multiport" || return 1
+    out_tcp="$Z2_FW_BUILT_RULES"
+    z2_fw_build_batch_rules "$Z2_FW_OUT_CHAIN" udp out "$PORTS_UDP" "$UDP_PKT_OUT" original "$connbytes" "$multiport" || return 1
+    out_udp="$Z2_FW_BUILT_RULES"
     in_tcp=""
     in_udp=""
     if [ "$connbytes" = 1 ]; then
-        in_tcp="$(z2_fw_emit_batch_rule "$Z2_FW_IN_CHAIN" tcp in "$PORTS_TCP" "$TCP_PKT_IN" reply 1 "$multiport")" || return 1
-        in_udp="$(z2_fw_emit_batch_rule "$Z2_FW_IN_CHAIN" udp in "$PORTS_UDP" "$UDP_PKT_IN" reply 1 "$multiport")" || return 1
+        z2_fw_build_batch_rules "$Z2_FW_IN_CHAIN" tcp in "$PORTS_TCP" "$TCP_PKT_IN" reply 1 "$multiport" || return 1
+        in_tcp="$Z2_FW_BUILT_RULES"
+        z2_fw_build_batch_rules "$Z2_FW_IN_CHAIN" udp in "$PORTS_UDP" "$UDP_PKT_IN" reply 1 "$multiport" || return 1
+        in_udp="$Z2_FW_BUILT_RULES"
     fi
     # The backend re-renders published rules in its own save format: match
     # option order, --dports vs --dport for a single port, and mark mask
@@ -783,7 +799,8 @@ z2_fw_verify_family() {
         return 1
     }
     Z2_FW_CONNBYTES="$connbytes"
-    Z2_FW_RULES="$(z2_fw_expected_rule_count "$connbytes" "$multiport")" || return 1
+    z2_fw_expected_rule_count "$connbytes" "$multiport" || return 1
+    Z2_FW_RULES="$Z2_FW_EXPECTED_RULES"
     Z2_FW_CHAINS=$((1 + connbytes))
     Z2_FW_ANCHORS=$((1 + connbytes))
     return 0
@@ -795,7 +812,8 @@ z2_fw_apply_cleanup() {
     if [ "$Z2_FW_BASELINE_OUT_CHAIN:$Z2_FW_BASELINE_IN_CHAIN:$Z2_FW_BASELINE_OUT_ANCHORS:$Z2_FW_BASELINE_IN_ANCHORS" = 0:0:0:0 ]; then
         return 0
     fi
-    restore="$(z2_fw_restore_command "$tool")" || return 2
+    z2_fw_restore_command_read "$tool" || return 2
+    restore="$Z2_FW_RESTORE_COMMAND"
     command -v "$restore" >/dev/null 2>&1 || return 3
     batch="$STATE_DIR/tmp/firewall-cleanup.${tool}.$$"
     z2_fw_ensure_scratch_dir || return 1

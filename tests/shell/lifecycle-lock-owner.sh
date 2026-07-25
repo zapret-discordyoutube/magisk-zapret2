@@ -37,10 +37,13 @@ read_current_boot_id() {
     [ "$Z2_LOCK_BOOT_QUERY" = ok ] || return 1
     CURRENT_BOOT_ID="$Z2_LOCK_BOOT"
 }
-proc_starttime() {
+# Override the fork-free reader: every internal consumer and the printf
+# wrapper route through it.
+proc_starttime_read() {
+    PROC_STARTTIME=""
     case "$1" in
-        "$$") printf '1000\n' ;;
-        4242) [ "$Z2_ANDROID_PROCESS" = live ] && printf '424242\n' || return 1 ;;
+        "$$") PROC_STARTTIME=1000 ;;
+        4242) [ "$Z2_ANDROID_PROCESS" = live ] || return 1; PROC_STARTTIME=424242 ;;
         *) return 1 ;;
     esac
 }

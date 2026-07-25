@@ -488,7 +488,7 @@ grep -q -- '-m multiport' "$FW/rules.out" ||
     fail "the extension was not used where it is available"
 z2_fw_cleanup_family iptables || fail "could not tear down after the multiport cases"
 
-z2_fw_restore_command() { printf '%s\n' missing-iptables-restore; }
+z2_fw_restore_command_read() { Z2_FW_RESTORE_COMMAND=missing-iptables-restore; }
 set +e
 z2_fw_reconcile_family iptables
 rc=$?

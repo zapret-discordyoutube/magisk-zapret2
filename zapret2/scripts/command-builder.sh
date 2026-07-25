@@ -583,9 +583,15 @@ read_compiled_validation_receipt() {
     VALIDATED_INSTALL_GENERATION=
     VALIDATED_INSTALL_ARCHIVE_SHA256=
     VALIDATED_ARGV_SHA256=
-    state_file_is_secure "$path" && path_mode_is_0600 "$path" &&
-        path_nlink_is_one "$path" || return 1
-    size="$(wc -c < "$path" 2>/dev/null)" || return 1
+    path_meta_capture "$path"
+    if state_file_is_secure "$path" && path_mode_is_0600 "$path" &&
+        path_nlink_is_one "$path" && path_meta_size_read "$path"; then
+        size="$Z2_PATH_SIZE"
+        path_meta_retire
+    else
+        path_meta_retire
+        return 1
+    fi
     is_decimal "$size" && [ "$size" -gt 0 ] 2>/dev/null &&
         [ "$size" -le 1024 ] 2>/dev/null || return 1
     {
@@ -661,7 +667,7 @@ read_compiled_artifact_metadata() {
     size="$(wc -c < "$artifact" 2>/dev/null)" || return 1
     case "$size" in ''|*[!0-9]*) return 1 ;; esac
     [ "$size" -gt 0 ] && [ "$size" -le "$COMPILED_ARGV_MAX_BYTES" ] || return 1
-    tab="$(printf '\t')"
+    tab='	'
     while IFS= read -r line || [ -n "$line" ]; do
         if [ "$stage" -eq 0 ]; then
             [ "$line" = "Z2_ARGV${tab}2" ] || return 1

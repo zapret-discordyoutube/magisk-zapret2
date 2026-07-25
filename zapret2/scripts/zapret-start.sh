@@ -32,16 +32,21 @@ FAST_REPLACE_IPV4_MULTIPORT=1
 FAST_REPLACE_IPV6_MULTIPORT=1
 
 log_msg() {
-    append_lifecycle_log "[INFO] $(date '+%Y-%m-%d %H:%M:%S') $1"
+    z2_log_stamp_read
+    append_lifecycle_log "[INFO] $Z2_LOG_STAMP $1"
 }
 
 log_error() {
-    append_lifecycle_log "[ERROR] $(date '+%Y-%m-%d %H:%M:%S') $1"
+    z2_log_stamp_read
+    append_lifecycle_log "[ERROR] $Z2_LOG_STAMP $1"
     if command -v log >/dev/null 2>&1; then log -p e -t Zapret2 "$1" 2>/dev/null; fi
 }
 
 log_debug() {
-    [ "${DEBUG:-0}" = 1 ] && append_lifecycle_log "[DEBUG] $(date '+%Y-%m-%d %H:%M:%S') $1"
+    if [ "${DEBUG:-0}" = 1 ]; then
+        z2_log_stamp_read
+        append_lifecycle_log "[DEBUG] $Z2_LOG_STAMP $1"
+    fi
     return 0
 }
 
@@ -195,8 +200,9 @@ prepare_options() {
     rm -f "$CMDLINE_FILE.tmp.$$" 2>/dev/null
     [ ! -e "$CMDLINE_FILE.tmp.$$" ] && [ ! -L "$CMDLINE_FILE.tmp.$$" ] || return 1
     {
-        printf '%s\n' "$NFQWS2"
-        printf '%s\n' '--daemon' "--pidfile=$PIDFILE"
+        z2_emit_line "$NFQWS2
+--daemon
+--pidfile=$PIDFILE"
         awk 'found { print } $0 == "ARGS" { found=1 }' "$COMPILED_ARGV_FILE"
     } > "$CMDLINE_FILE.tmp.$$" || return 1
     chmod 0600 "$CMDLINE_FILE.tmp.$$" 2>/dev/null && mv -f "$CMDLINE_FILE.tmp.$$" "$CMDLINE_FILE" || {
@@ -520,7 +526,11 @@ launch_nfqws2() {
         LAUNCH_ERROR="nfqws2 rejected the compiled launch artifact"
         return 1
     }
-    LAUNCHED_PID_START="$(proc_starttime "$LAUNCHED_PID" 2>/dev/null)" || LAUNCHED_PID_START=""
+    if proc_starttime_read "$LAUNCHED_PID" 2>/dev/null; then
+        LAUNCHED_PID_START="$PROC_STARTTIME"
+    else
+        LAUNCHED_PID_START=""
+    fi
     if [ -n "$LAUNCHED_PID_START" ]; then
         LAUNCHED_ARGV_SHA256="$(proc_cmdline_sha256 "$LAUNCHED_PID" 2>/dev/null)" || LAUNCHED_ARGV_SHA256=""
     fi
@@ -530,7 +540,7 @@ launch_nfqws2() {
         candidate="$LAUNCHED_PID"
         if read_live_pidfile; then candidate="$LIVE_PIDFILE_PID"; else candidate=""; fi
         if [ -n "$candidate" ]; then
-            start="$(proc_starttime "$candidate")" || start=""
+            if proc_starttime_read "$candidate"; then start="$PROC_STARTTIME"; else start=""; fi
             if [ -n "$start" ]; then
                 if ! publish_nfqws_owner "$candidate" "$start" "$QNUM" active; then
                     LAUNCH_ERROR="nfqws2 PID appeared but exact owner publication failed"
@@ -550,14 +560,15 @@ launch_nfqws2() {
 }
 
 stop_failed_fallback_launch() {
-    local pid="$1" start argv_sha256 rc=0
+    local pid="$1" start argv_sha256 live_start rc=0
     [ -n "$pid" ] || return 0
     start="${LAUNCHED_PID_START:-}"
     argv_sha256="${LAUNCHED_ARGV_SHA256:-}"
     if [ -n "$start" ] && verify_nfqws_pid "$pid" "$start" "$argv_sha256" "$QNUM"; then
         stop_verified_nfqws_pid "$pid" "$start" "$argv_sha256" "$QNUM" >/dev/null 2>&1 || rc=1
-    elif kill -0 "$pid" 2>/dev/null && [ "$(proc_starttime "$pid" 2>/dev/null)" = "$start" ]; then
-        rc=1
+    elif kill -0 "$pid" 2>/dev/null; then
+        if proc_starttime_read "$pid" 2>/dev/null; then live_start="$PROC_STARTTIME"; else live_start=""; fi
+        if [ "$live_start" = "$start" ]; then rc=1; fi
     fi
     # A daemon may have forked before publishing a usable PID file.  Exact
     # argv0/executable scanning is the mandatory second rollback identity.

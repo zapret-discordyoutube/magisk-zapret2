@@ -19,6 +19,29 @@ FIREWALL_RECONCILER="$SCRIPT_DIR/firewall-reconciler.sh"
 
 umask 077
 
+# Android mksh ships printf as an external binary, so each printf call is a
+# fork+exec (~100ms on device). mksh's raw print builtin covers the single
+# '%s\n' shape exactly, including embedded newlines; every other shell this
+# module meets (dash, bash) has printf as a builtin, so the fallback costs
+# nothing there. Detect mksh by its version marker rather than probing a
+# print command that other systems may resolve to an unrelated binary.
+case "${KSH_VERSION:-}" in
+    *KSH*) z2_emit_line() { print -r -- "$1"; } ;;
+    *) z2_emit_line() { printf '%s\n' "$1"; } ;;
+esac
+
+Z2_NL='
+'
+
+# One PATH probe at load answers every later "is stat available" question:
+# command -v walks the whole PATH on Android (~30ms) and the metadata
+# predicates used to re-ask it on every call.
+Z2_HAVE_STAT=0
+command -v stat >/dev/null 2>&1 && Z2_HAVE_STAT=1
+Z2_HAVE_SHA256SUM=0
+command -v sha256sum >/dev/null 2>&1 && Z2_HAVE_SHA256SUM=1
+
+
 # Stable adapter-owned error protocol shared by module scripts and the Android
 # app. The app validates only these bounds and displays all identity fields
 # opaquely, so adding a future domain, stage or code does not require an APK.
@@ -30,8 +53,27 @@ z2_error_token_is_valid() {
     case "$1" in *[!A-Z0-9_]*) return 1 ;; esac
 }
 
+# Detail values on the mutation path are already clean single-line text, so
+# the common case must not pay the three-exec pipeline: pass a control-free,
+# in-bounds value through untouched and reserve tr|cut for the rest.
+z2_error_detail_normalize_read() {
+    local LC_ALL=C
+    Z2_ERROR_DETAIL_NORMALIZED=""
+    case "$1" in
+        *[[:cntrl:]]*) ;;
+        *)
+            if [ "${#1}" -le "$Z2_ERROR_DETAIL_MAX_BYTES" ] 2>/dev/null; then
+                Z2_ERROR_DETAIL_NORMALIZED="$1"
+                return 0
+            fi
+            ;;
+    esac
+    Z2_ERROR_DETAIL_NORMALIZED="$(printf '%s' "$1" | tr '\r\n\t' '   ' | cut -b "1-$Z2_ERROR_DETAIL_MAX_BYTES")"
+}
+
 z2_error_detail_normalize() {
-    printf '%s' "$1" | tr '\r\n\t' '   ' | cut -b "1-$Z2_ERROR_DETAIL_MAX_BYTES"
+    z2_error_detail_normalize_read "$1" || return 1
+    printf '%s' "$Z2_ERROR_DETAIL_NORMALIZED"
 }
 
 z2_error_detail_is_valid() {
@@ -192,9 +234,54 @@ is_canonical_nfqws_id() {
     [ "$digits" -eq 10 ] 2>/dev/null && [ "$value" -le 2147483647 ] 2>/dev/null
 }
 
+# A proof that asks several metadata questions about one file pays one stat
+# exec instead of one per question. path_meta_capture arms a snapshot for
+# exactly one path; the predicates below consume it only while it names their
+# argument, and the proof that armed it retires it on every exit. Arming is
+# best-effort: without stat the predicates keep their own fallbacks, and an
+# overridden predicate simply never consults the snapshot.
+Z2_PATH_META_PATH=""
+Z2_PATH_META_UID=""
+Z2_PATH_META_MODE=""
+Z2_PATH_META_NLINK=""
+Z2_PATH_META_SIZE=""
+
+path_meta_retire() {
+    Z2_PATH_META_PATH=""
+}
+
+path_meta_capture() {
+    local path="$1" meta
+    Z2_PATH_META_PATH=""
+    [ "$Z2_HAVE_STAT" = 1 ] || return 1
+    meta="$(stat -c '%u %a %h %s' "$path" 2>/dev/null)" || return 1
+    set -- $meta
+    [ "$#" -eq 4 ] || return 1
+    Z2_PATH_META_UID="$1"
+    Z2_PATH_META_MODE="$2"
+    Z2_PATH_META_NLINK="$3"
+    Z2_PATH_META_SIZE="$4"
+    Z2_PATH_META_PATH="$path"
+}
+
+# The size question a proof asks right after its metadata questions comes
+# from the same armed snapshot; without one it falls back to the wc read the
+# call sites used to pay per file.
+path_meta_size_read() {
+    if [ -n "$Z2_PATH_META_PATH" ] && [ "$Z2_PATH_META_PATH" = "$1" ]; then
+        Z2_PATH_SIZE="$Z2_PATH_META_SIZE"
+        return 0
+    fi
+    Z2_PATH_SIZE="$(wc -c < "$1" 2>/dev/null)" || return 1
+}
+
 path_uid_is_root() {
     local path="$1" uid listing
-    if command -v stat >/dev/null 2>&1; then
+    if [ -n "$Z2_PATH_META_PATH" ] && [ "$Z2_PATH_META_PATH" = "$path" ]; then
+        [ "$Z2_PATH_META_UID" = 0 ]
+        return
+    fi
+    if [ "$Z2_HAVE_STAT" = 1 ]; then
         uid="$(stat -c '%u' "$path" 2>/dev/null)" || return 1
         [ "$uid" = 0 ]
         return
@@ -204,10 +291,21 @@ path_uid_is_root() {
     [ "$#" -ge 4 ] && [ "$3" = 0 ]
 }
 
-state_dir_is_secure() {
+# STATE_DIR metadata has exactly one cooperating mutator: this module, under
+# the lifecycle lock — the same single-writer fact the owner read cache rests
+# on (see Z2_OWNER_READ_CACHE). While this process holds the lock, a proven
+# secure directory therefore stays a fact until this process mutates it;
+# ensure_state_dir (the one mutator) and the lock release retire the proof.
+Z2_STATE_DIR_PROOF=""
+
+retire_state_dir_proof() {
+    Z2_STATE_DIR_PROOF=""
+}
+
+state_dir_is_secure_fresh() {
     local metadata listing
     [ -d "$STATE_DIR" ] && [ ! -L "$STATE_DIR" ] || return 1
-    if command -v stat >/dev/null 2>&1; then
+    if [ "$Z2_HAVE_STAT" = 1 ]; then
         metadata="$(stat -c '%u:%a' "$STATE_DIR" 2>/dev/null)" || return 1
         [ "$metadata" = 0:700 ]
         return
@@ -218,8 +316,26 @@ state_dir_is_secure() {
     case "${1:-}" in drwx------*) return 0 ;; *) return 1 ;; esac
 }
 
+state_dir_is_secure() {
+    if [ "${LOCK_HELD:-0}" != 0 ] && [ "$Z2_STATE_DIR_PROOF" = valid ]; then
+        return 0
+    fi
+    state_dir_is_secure_fresh || return 1
+    [ "${LOCK_HELD:-0}" = 0 ] || Z2_STATE_DIR_PROOF=valid
+    return 0
+}
+
 ensure_state_dir() {
     umask 077
+    # A proven-secure directory is exactly this function's postcondition, and
+    # while the lock is held only this process mutates STATE_DIR, so the armed
+    # proof makes the create/chmod/verify round a no-op. Otherwise this is the
+    # one cooperating mutator: the cached proof dies here, and the fresh
+    # postcondition below re-establishes it.
+    if [ "${LOCK_HELD:-0}" != 0 ] && [ "$Z2_STATE_DIR_PROOF" = valid ]; then
+        return 0
+    fi
+    retire_state_dir_proof
     if [ -e "$STATE_DIR" ] || [ -L "$STATE_DIR" ]; then
         [ -d "$STATE_DIR" ] && [ ! -L "$STATE_DIR" ] || return 1
         path_uid_is_root "$STATE_DIR" || return 1
@@ -305,7 +421,11 @@ is_lower_sha256() {
 
 path_mode_is_0600() {
     local path="$1" mode listing
-    if command -v stat >/dev/null 2>&1; then
+    if [ -n "$Z2_PATH_META_PATH" ] && [ "$Z2_PATH_META_PATH" = "$path" ]; then
+        [ "$Z2_PATH_META_MODE" = 600 ]
+        return
+    fi
+    if [ "$Z2_HAVE_STAT" = 1 ]; then
         mode="$(stat -c '%a' "$path" 2>/dev/null)" || return 1
         [ "$mode" = 600 ]
         return
@@ -317,7 +437,11 @@ path_mode_is_0600() {
 
 path_nlink_is_one() {
     local path="$1" links listing
-    if command -v stat >/dev/null 2>&1; then
+    if [ -n "$Z2_PATH_META_PATH" ] && [ "$Z2_PATH_META_PATH" = "$path" ]; then
+        [ "$Z2_PATH_META_NLINK" = 1 ]
+        return
+    fi
+    if [ "$Z2_HAVE_STAT" = 1 ]; then
         links="$(stat -c '%h' "$path" 2>/dev/null)" || return 1
         [ "$links" = 1 ]
         return
@@ -337,14 +461,26 @@ read_install_generation_meta() {
     # repeated on every call: callers use this as a postcondition, and a
     # postcondition that skips verification is not one.
     if [ -n "$INSTALL_META_CACHED_PATH" ] && [ "$INSTALL_META_CACHED_PATH" = "$path" ]; then
-        [ -f "$path" ] && [ ! -L "$path" ] && path_uid_is_root "$path" &&
-            path_mode_is_0600 "$path" && path_nlink_is_one "$path" || return 1
-        return 0
+        path_meta_capture "$path"
+        if [ -f "$path" ] && [ ! -L "$path" ] && path_uid_is_root "$path" &&
+            path_mode_is_0600 "$path" && path_nlink_is_one "$path"; then
+            path_meta_retire
+            return 0
+        fi
+        path_meta_retire
+        return 1
     fi
     INSTALL_META_GENERATION=""; INSTALL_META_ARCHIVE_SHA256=""; INSTALL_META_CACHED_PATH=""
-    [ -f "$path" ] && [ ! -L "$path" ] && path_uid_is_root "$path" &&
-        path_mode_is_0600 "$path" && path_nlink_is_one "$path" || return 1
-    size="$(wc -c < "$path" 2>/dev/null)" || return 1
+    path_meta_capture "$path"
+    if [ -f "$path" ] && [ ! -L "$path" ] && path_uid_is_root "$path" &&
+        path_mode_is_0600 "$path" && path_nlink_is_one "$path" &&
+        path_meta_size_read "$path"; then
+        size="$Z2_PATH_SIZE"
+        path_meta_retire
+    else
+        path_meta_retire
+        return 1
+    fi
     is_decimal "$size" && [ "$size" -gt 0 ] 2>/dev/null && [ "$size" -le 1024 ] 2>/dev/null || return 1
     while :; do
         key=""; value=""
@@ -752,8 +888,28 @@ recover_boot_stale_runtime_state() {
 }
 
 canonical_mark() {
-    local value
+    local value rest
     MARK_CANONICAL=""
+    # printf is an external on the target shell, and a value already in
+    # printf's canonical 0x%x form is its own answer.
+    case "$1" in
+        0x0)
+            MARK_CANONICAL="$1"
+            return 0
+            ;;
+        0x[1-9a-f]*)
+            rest="${1#0x}"
+            case "$rest" in
+                *[!0-9a-f]*) ;;
+                *)
+                    if [ "${#rest}" -le 8 ] 2>/dev/null; then
+                        MARK_CANONICAL="$1"
+                        return 0
+                    fi
+                    ;;
+            esac
+            ;;
+    esac
     value="$(printf '0x%x' "$1" 2>/dev/null)" || return 1
     # Netfilter marks are unsigned 32-bit values. printf also accepts wider and
     # negative shell integers, so reject every canonical result above 8 hex
@@ -785,7 +941,7 @@ write_private_runtime_line() {
     size="${#value}"
     [ "$size" -le "$RUNTIME_METADATA_MAX_BYTES" ] 2>/dev/null || return 1
     umask 077
-    printf '%s\n' "$value" > "$tmp" || { rm -f "$tmp"; return 1; }
+    z2_emit_line "$value" > "$tmp" || { rm -f "$tmp"; return 1; }
     chmod 0600 "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
     mv -f "$tmp" "$path" || { rm -f "$tmp"; return 1; }
 }
@@ -819,15 +975,19 @@ read_runtime_owner_marker() {
     [ "$version" = 1 ] && [ "$module" = "$MODDIR" ] && [ "$nfqws" = "$NFQWS2" ]
 }
 
-new_lifecycle_token() {
-    local token=""
+new_lifecycle_token_read() {
+    Z2_NEW_TOKEN=""
     if [ -r /proc/sys/kernel/random/uuid ]; then
-        IFS= read -r token < /proc/sys/kernel/random/uuid 2>/dev/null || token=""
+        IFS= read -r Z2_NEW_TOKEN < /proc/sys/kernel/random/uuid 2>/dev/null || Z2_NEW_TOKEN=""
     fi
-    if ! is_safe_token "$token"; then
-        token="z2-$(date +%s 2>/dev/null)-$$-$(proc_starttime "$$" 2>/dev/null || echo 0)"
+    if ! is_safe_token "$Z2_NEW_TOKEN"; then
+        Z2_NEW_TOKEN="z2-$(date +%s 2>/dev/null)-$$-$(proc_starttime "$$" 2>/dev/null || echo 0)"
     fi
-    printf '%s\n' "$token"
+}
+
+new_lifecycle_token() {
+    new_lifecycle_token_read || return 1
+    z2_emit_line "$Z2_NEW_TOKEN"
 }
 
 normalize_qnum() {
@@ -848,17 +1008,27 @@ normalize_qnum() {
 
 runtime_config_exists() {
     local size
-    [ -f "$RUNTIME_CONFIG" ] && [ ! -L "$RUNTIME_CONFIG" ] && [ -r "$RUNTIME_CONFIG" ] &&
+    path_meta_capture "$RUNTIME_CONFIG"
+    if [ -f "$RUNTIME_CONFIG" ] && [ ! -L "$RUNTIME_CONFIG" ] && [ -r "$RUNTIME_CONFIG" ] &&
         path_uid_is_root "$RUNTIME_CONFIG" && path_nlink_is_one "$RUNTIME_CONFIG" &&
-        runtime_config_mode_is_safe "$RUNTIME_CONFIG" || return 1
-    size="$(wc -c < "$RUNTIME_CONFIG" 2>/dev/null)" || return 1
+        runtime_config_mode_is_safe "$RUNTIME_CONFIG" &&
+        path_meta_size_read "$RUNTIME_CONFIG"; then
+        size="$Z2_PATH_SIZE"
+        path_meta_retire
+    else
+        path_meta_retire
+        return 1
+    fi
     is_decimal "$size" && [ "$size" -gt 0 ] 2>/dev/null &&
         [ "$size" -le "$RUNTIME_METADATA_MAX_BYTES" ] 2>/dev/null
 }
 
 runtime_config_mode_is_safe() {
     local path="$1" mode listing
-    if command -v stat >/dev/null 2>&1; then
+    if [ -n "$Z2_PATH_META_PATH" ] && [ "$Z2_PATH_META_PATH" = "$path" ]; then
+        case "$Z2_PATH_META_MODE" in 600|644) return 0;; *) return 1;; esac
+    fi
+    if [ "$Z2_HAVE_STAT" = 1 ]; then
         mode="$(stat -c '%a' "$path" 2>/dev/null)" || return 1
         case "$mode" in 600|644) return 0;; *) return 1;; esac
     fi
@@ -1211,8 +1381,14 @@ load_effective_core_config_readonly() {
     return 1
 }
 
-proc_starttime() {
+# Field 22 of /proc/PID/stat, parsed with builtins after the last ')'.
+# proc_starttime_read is the fork-free form: hot call sites consume the
+# global instead of paying a command-substitution fork per proof. The
+# printf wrapper below stays for scripts and captures that want a value.
+PROC_STARTTIME=""
+proc_starttime_read() {
     local pid="$1" stat tail
+    PROC_STARTTIME=""
     is_decimal "$pid" || return 1
     [ "$pid" -gt 0 ] 2>/dev/null || return 1
     [ -r "/proc/$pid/stat" ] || return 1
@@ -1221,7 +1397,12 @@ proc_starttime() {
     set -- $tail
     [ "$#" -ge 20 ] || return 1
     shift 19
-    printf '%s\n' "$1"
+    PROC_STARTTIME="$1"
+}
+
+proc_starttime() {
+    proc_starttime_read "$1" || return 1
+    printf '%s\n' "$PROC_STARTTIME"
 }
 
 LOCK_HELD=0
@@ -1237,8 +1418,14 @@ read_lock_owner() {
     state_dir_is_secure || return 1
     [ -d "$LIFECYCLE_LOCK" ] && [ ! -L "$LIFECYCLE_LOCK" ] || return 1
     [ -f "$LIFECYCLE_LOCK_OWNER" ] && [ ! -L "$LIFECYCLE_LOCK_OWNER" ] || return 1
-    path_uid_is_root "$LIFECYCLE_LOCK_OWNER" && path_mode_is_0600 "$LIFECYCLE_LOCK_OWNER" &&
-        path_nlink_is_one "$LIFECYCLE_LOCK_OWNER" || return 1
+    path_meta_capture "$LIFECYCLE_LOCK_OWNER"
+    if path_uid_is_root "$LIFECYCLE_LOCK_OWNER" && path_mode_is_0600 "$LIFECYCLE_LOCK_OWNER" &&
+        path_nlink_is_one "$LIFECYCLE_LOCK_OWNER"; then
+        path_meta_retire
+    else
+        path_meta_retire
+        return 1
+    fi
     local key value sequence="" version="" kind="" boot="" module=""
     while IFS='=' read -r key value; do
         sequence="${sequence}${sequence:+|}$key"
@@ -1274,7 +1461,6 @@ read_lock_owner() {
 }
 
 lock_owner_alive() {
-    local actual
     read_lock_owner || return 1
     if [ "$LOCK_FILE_KIND" = android-mutation ]; then
         # Boot identity is part of the Android lease.  A proven mismatch is
@@ -1283,8 +1469,8 @@ lock_owner_alive() {
         read_current_boot_id || return 0
         [ "$LOCK_FILE_BOOT" = "$CURRENT_BOOT_ID" ] || return 1
     fi
-    actual="$(proc_starttime "$LOCK_FILE_PID")" || return 1
-    [ "$actual" = "$LOCK_FILE_START" ]
+    proc_starttime_read "$LOCK_FILE_PID" || return 1
+    [ "$PROC_STARTTIME" = "$LOCK_FILE_START" ]
 }
 
 # Read-only, constant-cost lifecycle classification. Unlike lock_owner_alive,
@@ -1320,11 +1506,11 @@ classify_lifecycle_lock() {
             return 0
         fi
     fi
-    actual="$(proc_starttime "$LOCK_FILE_PID" 2>/dev/null)" || {
+    proc_starttime_read "$LOCK_FILE_PID" 2>/dev/null || {
         LIFECYCLE_OBSERVED_STATE=stale
         return 0
     }
-    if [ "$actual" = "$LOCK_FILE_START" ]; then
+    if [ "$PROC_STARTTIME" = "$LOCK_FILE_START" ]; then
         LIFECYCLE_OBSERVED_STATE=active
     else
         LIFECYCLE_OBSERVED_STATE=stale
@@ -1358,10 +1544,9 @@ read_lifecycle_gate() {
 }
 
 lifecycle_gate_alive() {
-    local actual
     read_lifecycle_gate || return 1
-    actual="$(proc_starttime "$GATE_FILE_PID")" || return 1
-    [ "$actual" = "$GATE_FILE_START" ]
+    proc_starttime_read "$GATE_FILE_PID" || return 1
+    [ "$PROC_STARTTIME" = "$GATE_FILE_START" ]
 }
 
 release_lifecycle_gate() {
@@ -1386,10 +1571,9 @@ read_lifecycle_recovery_gate() {
 }
 
 lifecycle_recovery_gate_alive() {
-    local actual
     read_lifecycle_recovery_gate || return 1
-    actual="$(proc_starttime "$RECOVERY_FILE_PID")" || return 1
-    [ "$actual" = "$RECOVERY_FILE_START" ]
+    proc_starttime_read "$RECOVERY_FILE_PID" || return 1
+    [ "$PROC_STARTTIME" = "$RECOVERY_FILE_START" ]
 }
 
 release_lifecycle_recovery_gate() {
@@ -1403,7 +1587,9 @@ claim_lifecycle_recovery_gate() {
     local self_start="$1" token="$2" tmp="$LIFECYCLE_LOCK_REAPER_RECOVERY.tmp.$$.$token"
     local stale_pid stale_start stale_token quarantine
     umask 077
-    printf 'pid=%s\nstarttime=%s\ntoken=%s\n' "$$" "$self_start" "$token" > "$tmp" || return 1
+    z2_emit_line "pid=$$
+starttime=$self_start
+token=$token" > "$tmp" || return 1
     chmod 0600 "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
     if ln "$tmp" "$LIFECYCLE_LOCK_REAPER_RECOVERY" 2>/dev/null; then
         rm -f "$tmp"
@@ -1432,7 +1618,9 @@ claim_lifecycle_gate() {
     while :; do
         if [ ! -e "$LIFECYCLE_LOCK_REAPER_RECOVERY" ]; then
             umask 077
-            printf 'pid=%s\nstarttime=%s\ntoken=%s\n' "$$" "$self_start" "$token" > "$tmp" || return 1
+            z2_emit_line "pid=$$
+starttime=$self_start
+token=$token" > "$tmp" || return 1
             chmod 0600 "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
             if ln "$tmp" "$LIFECYCLE_LOCK_REAPER" 2>/dev/null; then
                 rm -f "$tmp"
@@ -1475,7 +1663,8 @@ acquire_lifecycle_lock() {
     local attempts=0 self_start token owner_pid owner_start quarantine candidate
     local stale_kind stale_pid stale_start stale_token stale_boot stale_module
     ensure_state_dir || return 1
-    self_start="$(proc_starttime "$$")" || return 1
+    proc_starttime_read "$$" || return 1
+    self_start="$PROC_STARTTIME"
     token="${ZAPRET2_LIFECYCLE_TOKEN:-}"
     owner_pid="${ZAPRET2_LIFECYCLE_OWNER_PID:-}"
     owner_start="${ZAPRET2_LIFECYCLE_OWNER_START:-}"
@@ -1498,7 +1687,8 @@ acquire_lifecycle_lock() {
         return 0
     fi
 
-    token="$(new_lifecycle_token)" || return 1
+    new_lifecycle_token_read || return 1
+    token="$Z2_NEW_TOKEN"
     is_safe_token "$token" || return 1
     candidate="$LIFECYCLE_LOCK.candidate.$$.$token"
     LIFECYCLE_ACQUIRE_TOKEN="$token"
@@ -1506,7 +1696,9 @@ acquire_lifecycle_lock() {
     [ ! -e "$candidate" ] || return 1
     mkdir "$candidate" 2>/dev/null || return 1
     umask 077
-    if ! printf 'pid=%s\nstarttime=%s\ntoken=%s\n' "$$" "$self_start" "$token" > "$candidate/owner" ||
+    if ! z2_emit_line "pid=$$
+starttime=$self_start
+token=$token" > "$candidate/owner" ||
        ! chmod 0600 "$candidate/owner" 2>/dev/null; then
         rm -rf "$candidate" 2>/dev/null
         LIFECYCLE_ACQUIRE_CANDIDATE=""; LIFECYCLE_ACQUIRE_TOKEN=""
@@ -1598,8 +1790,11 @@ release_lifecycle_lock() {
     local self_start token quarantine
     # Past this point other writers may mutate publications again.
     retire_owner_read_cache
+    retire_state_dir_proof
+    retire_proven_process_fact
     [ "$LOCK_HELD" = 1 ] || { LOCK_HELD=0; return 0; }
-    self_start="$(proc_starttime "$$")" || return 1
+    proc_starttime_read "$$" || return 1
+    self_start="$PROC_STARTTIME"
     token="$LOCK_OWNER_TOKEN"
     claim_lifecycle_gate "$self_start" "$token" || return 1
     if read_lock_owner &&
@@ -1665,9 +1860,8 @@ read_uninstall_tombstone() {
 }
 
 uninstall_tombstone_owner_alive() {
-    local actual
-    actual="$(proc_starttime "$UNINSTALL_FILE_PID")" || return 1
-    [ "$actual" = "$UNINSTALL_FILE_START" ]
+    proc_starttime_read "$UNINSTALL_FILE_PID" || return 1
+    [ "$PROC_STARTTIME" = "$UNINSTALL_FILE_START" ]
 }
 
 uninstall_environment_authorized() {
@@ -1712,12 +1906,6 @@ uninstall_tombstone_allows_stop() {
     return 0
 }
 
-pid_cmdline_has_arg() {
-    local pid="$1" wanted="$2"
-    [ -r "/proc/$pid/cmdline" ] || return 1
-    tr '\000' '\n' < "/proc/$pid/cmdline" 2>/dev/null | grep -Fqx -- "$wanted"
-}
-
 proc_cmdline_sha256() {
     local pid="$1" value
     is_decimal "$pid" || return 1
@@ -1728,13 +1916,31 @@ proc_cmdline_sha256() {
     printf '%s\n' "$value"
 }
 
-proc_argv0() {
-    local pid="$1" value
+# Exact argv0 needs the NUL separators tr restores; the first line of that
+# expansion is argv0. Cutting it with a parameter expansion instead of sed
+# spares one fork+exec, and proc_argv0_read spares hot call sites the
+# command-substitution fork on top (same shape as proc_starttime_read).
+# PROC_CMDLINE_LINES keeps the whole expansion so the same snapshot can
+# answer the exact-argument question tr|grep used to re-read for.
+PROC_ARGV0=""
+PROC_CMDLINE_LINES=""
+proc_argv0_read() {
+    local pid="$1" value nl='
+'
+    PROC_ARGV0=""
+    PROC_CMDLINE_LINES=""
     is_decimal "$pid" || return 1
     [ -r "/proc/$pid/cmdline" ] || return 1
-    value="$(tr '\000' '\n' < "/proc/$pid/cmdline" 2>/dev/null | sed -n '1p')" || return 1
+    value="$(tr '\000' '\n' < "/proc/$pid/cmdline" 2>/dev/null)" || return 1
+    PROC_CMDLINE_LINES="$value"
+    value="${value%%"$nl"*}"
     [ -n "$value" ] || return 1
-    printf '%s\n' "$value"
+    PROC_ARGV0="$value"
+}
+
+proc_argv0() {
+    proc_argv0_read "$1" || return 1
+    printf '%s\n' "$PROC_ARGV0"
 }
 
 # Fast, fork-free prefilter for the recovery scan. Shell variables cannot retain
@@ -1799,10 +2005,11 @@ normalize_owner_optional_port_list() {
 }
 
 owner_port_rule_count() {
-    local old_ifs count
-    [ -n "$1" ] || { printf '0\n'; return 0; }
-    old_ifs="$IFS"; IFS=,; set -- $1; IFS="$old_ifs"; count=$#
-    [ "$count" -gt 0 ] || return 1; printf '%s\n' "$count"
+    local old_ifs
+    OWNER_PORT_RULE_COUNT=0
+    [ -n "$1" ] || return 0
+    old_ifs="$IFS"; IFS=,; set -- $1; IFS="$old_ifs"; OWNER_PORT_RULE_COUNT=$#
+    [ "$OWNER_PORT_RULE_COUNT" -gt 0 ] || return 1
 }
 
 is_safe_firewall_identity() {
@@ -1822,7 +2029,8 @@ prepare_new_firewall_identity() {
     if [ -n "$token" ]; then
         is_safe_token "$token" || return 1
     else
-        token="$(new_lifecycle_token)" || return 1
+        new_lifecycle_token_read || return 1
+    token="$Z2_NEW_TOKEN"
     fi
     FIREWALL_TAG=stable0001
     ZAPRET2_OUT=ZAPRET2_OUT
@@ -1831,20 +2039,29 @@ prepare_new_firewall_identity() {
     is_safe_firewall_identity "$FIREWALL_TAG" "$ZAPRET2_OUT" "$ZAPRET2_IN"
 }
 
-owner_build_family_spec() {
-    printf 'family:%s;active:%s;tag:%s;outchain:%s;inchain:%s;qnum:%s;tcp:%s;udp:%s;stun:%s;tcp_out:%s;tcp_in:%s;udp_out:%s;udp_in:%s;mark:%s;connbytes:%s;multiport:%s;markcap:%s;rules:%s\n' \
-        "$1" "$2" "$OWNER_WRITE_FIREWALL_TAG" "$OWNER_WRITE_OUT_CHAIN" "$OWNER_WRITE_IN_CHAIN" \
-        "$OWNER_WRITE_QNUM" "$OWNER_WRITE_PORTS_TCP" "$OWNER_WRITE_PORTS_UDP" "$OWNER_WRITE_STUN_PORTS" \
-        "$OWNER_WRITE_TCP_PKT_OUT" "$OWNER_WRITE_TCP_PKT_IN" \
-        "$OWNER_WRITE_UDP_PKT_OUT" "$OWNER_WRITE_UDP_PKT_IN" \
-        "$OWNER_WRITE_DESYNC_MARK" "$3" "$4" "$5" "$6"
+# Global-return: the spec is compared and embedded, never streamed, and the
+# printf it used to ride on is an external on the target shell.
+owner_build_family_spec_read() {
+    OWNER_FAMILY_SPEC="family:$1;active:$2;tag:$OWNER_WRITE_FIREWALL_TAG;outchain:$OWNER_WRITE_OUT_CHAIN;inchain:$OWNER_WRITE_IN_CHAIN;qnum:$OWNER_WRITE_QNUM;tcp:$OWNER_WRITE_PORTS_TCP;udp:$OWNER_WRITE_PORTS_UDP;stun:$OWNER_WRITE_STUN_PORTS;tcp_out:$OWNER_WRITE_TCP_PKT_OUT;tcp_in:$OWNER_WRITE_TCP_PKT_IN;udp_out:$OWNER_WRITE_UDP_PKT_OUT;udp_in:$OWNER_WRITE_UDP_PKT_IN;mark:$OWNER_WRITE_DESYNC_MARK;connbytes:$3;multiport:$4;markcap:$5;rules:$6"
 }
 
-owner_spec_fingerprint() {
+owner_spec_fingerprint_read() {
     local value
-    command -v sha256sum >/dev/null 2>&1 || return 1
-    value="$(printf '%s\n%s\n' "$1" "$2" | sha256sum 2>/dev/null | awk '{print $1}')" || return 1
-    is_lower_sha256 "$value" || return 1; printf '%s\n' "$value"
+    OWNER_SPEC_FINGERPRINT=""
+    # A late shell-function shim (tests provide one on stripped hosts) must
+    # still count as availability, so only the positive probe is cached.
+    [ "$Z2_HAVE_SHA256SUM" = 1 ] || command -v sha256sum >/dev/null 2>&1 || return 1
+    # The here-document feeds sha256sum the exact bytes the old printf
+    # pipeline produced (each spec line newline-terminated) without the
+    # extra printf and awk processes.
+    value="$(sha256sum 2>/dev/null <<Z2_SPEC_EOF
+$1
+$2
+Z2_SPEC_EOF
+)" || return 1
+    value="${value%% *}"
+    is_lower_sha256 "$value" || return 1
+    OWNER_SPEC_FINGERPRINT="$value"
 }
 
 prepare_owner_generation_spec() {
@@ -1868,8 +2085,10 @@ prepare_owner_generation_spec() {
     OWNER_WRITE_IPV4_CONNBYTES="${IPV4_CONNBYTES:-1}"; OWNER_WRITE_IPV4_MULTIPORT="${IPV4_MULTIPORT:-1}"; OWNER_WRITE_IPV4_MARK="${IPV4_MARK:-1}"
     OWNER_WRITE_IPV6_CONNBYTES="${IPV6_CONNBYTES:-1}"; OWNER_WRITE_IPV6_MULTIPORT="${IPV6_MULTIPORT:-1}"; OWNER_WRITE_IPV6_MARK="${IPV6_MARK:-1}"
     case "$OWNER_WRITE_IPV4_CONNBYTES:$OWNER_WRITE_IPV4_MULTIPORT:$OWNER_WRITE_IPV4_MARK:$OWNER_WRITE_IPV6_CONNBYTES:$OWNER_WRITE_IPV6_MULTIPORT:$OWNER_WRITE_IPV6_MARK" in *[!01:]*) return 1;; esac
-    tcp_count="$(owner_port_rule_count "$OWNER_WRITE_PORTS_TCP")" || return 1
-    udp_count="$(owner_port_rule_count "$OWNER_WRITE_PORTS_UDP")" || return 1
+    owner_port_rule_count "$OWNER_WRITE_PORTS_TCP" || return 1
+    tcp_count="$OWNER_PORT_RULE_COUNT"
+    owner_port_rule_count "$OWNER_WRITE_PORTS_UDP" || return 1
+    udp_count="$OWNER_PORT_RULE_COUNT"
     if [ "$OWNER_WRITE_IPV4_MULTIPORT" = 1 ]; then
         per_direction=0; [ -z "$OWNER_WRITE_PORTS_TCP" ] || per_direction=$((per_direction + 1)); [ -z "$OWNER_WRITE_PORTS_UDP" ] || per_direction=$((per_direction + 1))
     else per_direction=$((tcp_count + udp_count)); fi
@@ -1878,9 +2097,12 @@ prepare_owner_generation_spec() {
         per_direction=0; [ -z "$OWNER_WRITE_PORTS_TCP" ] || per_direction=$((per_direction + 1)); [ -z "$OWNER_WRITE_PORTS_UDP" ] || per_direction=$((per_direction + 1))
     else per_direction=$((tcp_count + udp_count)); fi
     OWNER_WRITE_IPV6_RULES=$((per_direction * (1 + OWNER_WRITE_IPV6_CONNBYTES) * ipv6_active))
-    OWNER_WRITE_IPV4_SPEC="$(owner_build_family_spec ipv4 "$ipv4_active" "$OWNER_WRITE_IPV4_CONNBYTES" "$OWNER_WRITE_IPV4_MULTIPORT" "$OWNER_WRITE_IPV4_MARK" "$OWNER_WRITE_IPV4_RULES")"
-    OWNER_WRITE_IPV6_SPEC="$(owner_build_family_spec ipv6 "$ipv6_active" "$OWNER_WRITE_IPV6_CONNBYTES" "$OWNER_WRITE_IPV6_MULTIPORT" "$OWNER_WRITE_IPV6_MARK" "$OWNER_WRITE_IPV6_RULES")"
-    OWNER_WRITE_FIREWALL_FINGERPRINT="$(owner_spec_fingerprint "$OWNER_WRITE_IPV4_SPEC" "$OWNER_WRITE_IPV6_SPEC")" || return 1
+    owner_build_family_spec_read ipv4 "$ipv4_active" "$OWNER_WRITE_IPV4_CONNBYTES" "$OWNER_WRITE_IPV4_MULTIPORT" "$OWNER_WRITE_IPV4_MARK" "$OWNER_WRITE_IPV4_RULES"
+    OWNER_WRITE_IPV4_SPEC="$OWNER_FAMILY_SPEC"
+    owner_build_family_spec_read ipv6 "$ipv6_active" "$OWNER_WRITE_IPV6_CONNBYTES" "$OWNER_WRITE_IPV6_MULTIPORT" "$OWNER_WRITE_IPV6_MARK" "$OWNER_WRITE_IPV6_RULES"
+    OWNER_WRITE_IPV6_SPEC="$OWNER_FAMILY_SPEC"
+    owner_spec_fingerprint_read "$OWNER_WRITE_IPV4_SPEC" "$OWNER_WRITE_IPV6_SPEC" || return 1
+    OWNER_WRITE_FIREWALL_FINGERPRINT="$OWNER_SPEC_FINGERPRINT"
     OWNER_WRITE_INSTALL_GENERATION="$INSTALL_META_GENERATION"; OWNER_WRITE_INSTALL_ARCHIVE_SHA256="$INSTALL_META_ARCHIVE_SHA256"; OWNER_WRITE_SOURCE_GENERATION=""; OWNER_WRITE_READY=1
 }
 
@@ -1950,9 +2172,16 @@ read_owner_state_fresh() {
     OWNER_STATE_IPV6_CONNBYTES=""; OWNER_STATE_IPV6_MULTIPORT=""; OWNER_STATE_IPV6_MARK=""; OWNER_STATE_IPV4_RULES=""; OWNER_STATE_IPV6_RULES=""
     OWNER_STATE_IPV4_SPEC=""; OWNER_STATE_IPV6_SPEC=""; OWNER_STATE_FIREWALL_FINGERPRINT=""
     OWNER_STATE_FIREWALL_TAG=""; OWNER_STATE_OUT_CHAIN=""; OWNER_STATE_IN_CHAIN=""
-    state_file_is_secure "$OWNER_STATE" && [ -r "$OWNER_STATE" ] || return 1
     local key value version="" tcp_count udp_count stun_count expected seen_keys="|" field_sequence="" size old_ifs
-    size="$(wc -c < "$OWNER_STATE" 2>/dev/null)" || return 1
+    path_meta_capture "$OWNER_STATE"
+    if state_file_is_secure "$OWNER_STATE" && [ -r "$OWNER_STATE" ] &&
+        path_meta_size_read "$OWNER_STATE"; then
+        size="$Z2_PATH_SIZE"
+        path_meta_retire
+    else
+        path_meta_retire
+        return 1
+    fi
     is_decimal "$size" && [ "$size" -gt 0 ] 2>/dev/null &&
         [ "$size" -le "$OWNER_STATE_MAX_BYTES" ] 2>/dev/null || return 1
     while IFS='=' read -r key value; do
@@ -2047,9 +2276,12 @@ read_owner_state_fresh() {
     else expected=$((tcp_count + udp_count)); fi
     expected=$((expected * (1 + OWNER_STATE_IPV6_CONNBYTES)))
     [ "$OWNER_STATE_IPV6_RULES" = $((expected * OWNER_STATE_IPV6_ACTIVE)) ] || return 1
-    [ "$(owner_build_family_spec ipv4 "$OWNER_STATE_IPV4_ACTIVE" "$OWNER_STATE_IPV4_CONNBYTES" "$OWNER_STATE_IPV4_MULTIPORT" "$OWNER_STATE_IPV4_MARK" "$OWNER_STATE_IPV4_RULES")" = "$OWNER_STATE_IPV4_SPEC" ] || return 1
-    [ "$(owner_build_family_spec ipv6 "$OWNER_STATE_IPV6_ACTIVE" "$OWNER_STATE_IPV6_CONNBYTES" "$OWNER_STATE_IPV6_MULTIPORT" "$OWNER_STATE_IPV6_MARK" "$OWNER_STATE_IPV6_RULES")" = "$OWNER_STATE_IPV6_SPEC" ] || return 1
-    [ "$(owner_spec_fingerprint "$OWNER_STATE_IPV4_SPEC" "$OWNER_STATE_IPV6_SPEC")" = "$OWNER_STATE_FIREWALL_FINGERPRINT" ] || return 1
+    owner_build_family_spec_read ipv4 "$OWNER_STATE_IPV4_ACTIVE" "$OWNER_STATE_IPV4_CONNBYTES" "$OWNER_STATE_IPV4_MULTIPORT" "$OWNER_STATE_IPV4_MARK" "$OWNER_STATE_IPV4_RULES"
+    [ "$OWNER_FAMILY_SPEC" = "$OWNER_STATE_IPV4_SPEC" ] || return 1
+    owner_build_family_spec_read ipv6 "$OWNER_STATE_IPV6_ACTIVE" "$OWNER_STATE_IPV6_CONNBYTES" "$OWNER_STATE_IPV6_MULTIPORT" "$OWNER_STATE_IPV6_MARK" "$OWNER_STATE_IPV6_RULES"
+    [ "$OWNER_FAMILY_SPEC" = "$OWNER_STATE_IPV6_SPEC" ] || return 1
+    owner_spec_fingerprint_read "$OWNER_STATE_IPV4_SPEC" "$OWNER_STATE_IPV6_SPEC" || return 1
+    [ "$OWNER_SPEC_FINGERPRINT" = "$OWNER_STATE_FIREWALL_FINGERPRINT" ] || return 1
     return 0
 }
 
@@ -2082,20 +2314,43 @@ write_owner_state() {
     state_path_is_managed_file "$tmp" || return 1
     [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || return 1
     umask 077
-    {
-        printf 'version=%s\n' "$OWNER_STATE_VERSION"
-        printf 'pid=%s\nstarttime=%s\nargv_sha256=%s\n' "$pid" "$start" "$argv_sha256"
-        printf 'qnum=%s\nexe=%s\ngeneration=%s\nboot_id=%s\nphase=%s\n' "$qnum" "$NFQWS2" "$generation" "$boot_id" "$phase"
-        printf 'install_generation=%s\ninstall_archive_sha256=%s\n' "$OWNER_WRITE_INSTALL_GENERATION" "$OWNER_WRITE_INSTALL_ARCHIVE_SHA256"
-        printf 'firewall_tag=%s\nout_chain=%s\nin_chain=%s\n' "$OWNER_WRITE_FIREWALL_TAG" "$OWNER_WRITE_OUT_CHAIN" "$OWNER_WRITE_IN_CHAIN"
-        printf 'ports_tcp=%s\nports_udp=%s\nstun_ports=%s\n' "$OWNER_WRITE_PORTS_TCP" "$OWNER_WRITE_PORTS_UDP" "$OWNER_WRITE_STUN_PORTS"
-        printf 'tcp_pkt_out=%s\ntcp_pkt_in=%s\nudp_pkt_out=%s\nudp_pkt_in=%s\ndesync_mark=%s\n' \
-            "$OWNER_WRITE_TCP_PKT_OUT" "$OWNER_WRITE_TCP_PKT_IN" \
-            "$OWNER_WRITE_UDP_PKT_OUT" "$OWNER_WRITE_UDP_PKT_IN" "$OWNER_WRITE_DESYNC_MARK"
-        printf 'ipv4_active=%s\nipv6_active=%s\nipv4_connbytes=%s\nipv4_multiport=%s\nipv4_mark=%s\n' "$OWNER_WRITE_IPV4_ACTIVE" "$OWNER_WRITE_IPV6_ACTIVE" "$OWNER_WRITE_IPV4_CONNBYTES" "$OWNER_WRITE_IPV4_MULTIPORT" "$OWNER_WRITE_IPV4_MARK"
-        printf 'ipv6_connbytes=%s\nipv6_multiport=%s\nipv6_mark=%s\nipv4_rules=%s\nipv6_rules=%s\n' "$OWNER_WRITE_IPV6_CONNBYTES" "$OWNER_WRITE_IPV6_MULTIPORT" "$OWNER_WRITE_IPV6_MARK" "$OWNER_WRITE_IPV4_RULES" "$OWNER_WRITE_IPV6_RULES"
-        printf 'ipv4_spec=%s\nipv6_spec=%s\nfirewall_fingerprint=%s\n' "$OWNER_WRITE_IPV4_SPEC" "$OWNER_WRITE_IPV6_SPEC" "$OWNER_WRITE_FIREWALL_FINGERPRINT"
-    } > "$tmp" || { rm -f "$tmp"; return 1; }
+    # One builtin write: printf is an external on the target shell, and this
+    # record is written on every phase transition of the replace path.
+    z2_emit_line "version=$OWNER_STATE_VERSION
+pid=$pid
+starttime=$start
+argv_sha256=$argv_sha256
+qnum=$qnum
+exe=$NFQWS2
+generation=$generation
+boot_id=$boot_id
+phase=$phase
+install_generation=$OWNER_WRITE_INSTALL_GENERATION
+install_archive_sha256=$OWNER_WRITE_INSTALL_ARCHIVE_SHA256
+firewall_tag=$OWNER_WRITE_FIREWALL_TAG
+out_chain=$OWNER_WRITE_OUT_CHAIN
+in_chain=$OWNER_WRITE_IN_CHAIN
+ports_tcp=$OWNER_WRITE_PORTS_TCP
+ports_udp=$OWNER_WRITE_PORTS_UDP
+stun_ports=$OWNER_WRITE_STUN_PORTS
+tcp_pkt_out=$OWNER_WRITE_TCP_PKT_OUT
+tcp_pkt_in=$OWNER_WRITE_TCP_PKT_IN
+udp_pkt_out=$OWNER_WRITE_UDP_PKT_OUT
+udp_pkt_in=$OWNER_WRITE_UDP_PKT_IN
+desync_mark=$OWNER_WRITE_DESYNC_MARK
+ipv4_active=$OWNER_WRITE_IPV4_ACTIVE
+ipv6_active=$OWNER_WRITE_IPV6_ACTIVE
+ipv4_connbytes=$OWNER_WRITE_IPV4_CONNBYTES
+ipv4_multiport=$OWNER_WRITE_IPV4_MULTIPORT
+ipv4_mark=$OWNER_WRITE_IPV4_MARK
+ipv6_connbytes=$OWNER_WRITE_IPV6_CONNBYTES
+ipv6_multiport=$OWNER_WRITE_IPV6_MULTIPORT
+ipv6_mark=$OWNER_WRITE_IPV6_MARK
+ipv4_rules=$OWNER_WRITE_IPV4_RULES
+ipv6_rules=$OWNER_WRITE_IPV6_RULES
+ipv4_spec=$OWNER_WRITE_IPV4_SPEC
+ipv6_spec=$OWNER_WRITE_IPV6_SPEC
+firewall_fingerprint=$OWNER_WRITE_FIREWALL_FINGERPRINT" > "$tmp" || { rm -f "$tmp"; return 1; }
     size="$(wc -c < "$tmp" 2>/dev/null)" || { rm -f "$tmp"; return 1; }
     is_decimal "$size" && [ "$size" -gt 0 ] 2>/dev/null &&
         [ "$size" -le "$OWNER_STATE_MAX_BYTES" ] 2>/dev/null || { rm -f "$tmp"; return 1; }
@@ -2114,7 +2369,10 @@ publish_nfqws_owner() {
     start="$VERIFIED_STARTTIME"
     argv_sha256="$VERIFIED_ARGV_SHA256"
     generation="${PENDING_OWNER_GENERATION:-}"
-    [ -n "$generation" ] || generation="$(new_lifecycle_token)" || return 1
+    if [ -z "$generation" ]; then
+        new_lifecycle_token_read || return 1
+        generation="$Z2_NEW_TOKEN"
+    fi
     # The authenticated, boot-bound owner is the publication commit marker.
     # Publish it first so a same-boot process interruption can leave at worst
     # an owner-only state, which process preflight can verify exactly. A bare
@@ -2139,7 +2397,7 @@ set_owner_phase() {
     local phase="$1"
     read_owner_state && owner_state_is_current_boot || return 1
     [ "$OWNER_STATE_PHASE" = "$phase" ] && return 0
-    verify_nfqws_pid "$OWNER_STATE_PID" "$OWNER_STATE_START" "$OWNER_STATE_ARGV_SHA256" "$OWNER_STATE_QNUM" || return 1
+    reverify_published_nfqws_pid "$OWNER_STATE_PID" "$OWNER_STATE_START" "$OWNER_STATE_ARGV_SHA256" "$OWNER_STATE_QNUM" || return 1
     write_owner_state "$OWNER_STATE_PID" "$OWNER_STATE_START" "$OWNER_STATE_ARGV_SHA256" "$OWNER_STATE_QNUM" "$OWNER_STATE_GENERATION" "$phase"
 }
 
@@ -2156,6 +2414,51 @@ retire_owner_metadata() {
 
 VERIFIED_STARTTIME=""
 VERIFIED_ARGV_SHA256=""
+Z2_NFQWS2_REALPATH_FOR=""
+Z2_NFQWS2_REALPATH=""
+
+# A full verification that pinned (pid, starttime) and hashed the argv is a
+# fact for as long as that exact process object exists: the same
+# single-writer argument the owner read cache makes for publications (see
+# Z2_OWNER_READ_CACHE) extends to the identity content of the process the
+# locked transaction itself proved. Re-proofs against the same expectations
+# re-establish liveness with builtins (starttime unchanged, cmdline still
+# non-empty and prefix-matched, which also rules out a zombie) and reuse the
+# proven argv digest instead of re-paying tr, sha256sum and readlink execs.
+# Armed only under the lifecycle lock, never under a test's binary override;
+# retired by every stop attempt and by the lock release.
+Z2_PROVEN_PROCESS_FACT=""
+
+retire_proven_process_fact() {
+    Z2_PROVEN_PROCESS_FACT=""
+}
+
+reverify_published_nfqws_pid() {
+    local pid="$1" expected_start="$2" expected_argv_sha256="$3" expected_qnum="$4"
+    local cmdline runtime_nfqws2
+    if owner_read_cache_active && [ -n "$Z2_PROVEN_PROCESS_FACT" ] &&
+        normalize_qnum "$expected_qnum" 2>/dev/null &&
+        [ "$Z2_PROVEN_PROCESS_FACT" = "$pid|$expected_start|$expected_argv_sha256|$QNUM_NORMALIZED" ]; then
+        runtime_nfqws2="${AUDIT_NFQWS2_OVERRIDE:-$NFQWS2}"
+        if proc_starttime_read "$pid" 2>/dev/null &&
+            [ "$PROC_STARTTIME" = "$expected_start" ] &&
+            kill -0 "$pid" 2>/dev/null &&
+            [ -r "/proc/$pid/cmdline" ]; then
+            cmdline=""
+            IFS= read -r cmdline < "/proc/$pid/cmdline" 2>/dev/null || [ -n "$cmdline" ] || cmdline=""
+            case "$cmdline" in
+                "$runtime_nfqws2"*)
+                    VERIFIED_STARTTIME="$expected_start"
+                    VERIFIED_ARGV_SHA256="$expected_argv_sha256"
+                    return 0
+                    ;;
+            esac
+        fi
+        retire_proven_process_fact
+    fi
+    verify_nfqws_pid "$pid" "$expected_start" "$expected_argv_sha256" "$expected_qnum"
+}
+
 verify_nfqws_pid() {
     local pid="$1" expected_start="${2:-}" expected_argv_sha256="${3:-}" expected_qnum="${4:-}"
     local capture_argv="${5:-}" before after cmd_exe binary_exe actual_argv_sha256="" argv0 runtime_nfqws2
@@ -2164,14 +2467,22 @@ verify_nfqws_pid() {
     VERIFIED_ARGV_SHA256=""
     is_decimal "$pid" || return 1
     [ "$pid" -gt 0 ] 2>/dev/null || return 1
-    before="$(proc_starttime "$pid")" || return 1
+    proc_starttime_read "$pid" || return 1
+    before="$PROC_STARTTIME"
     [ -z "$expected_start" ] || [ "$before" = "$expected_start" ] || return 1
     kill -0 "$pid" 2>/dev/null || return 1
-    argv0="$(proc_argv0 "$pid")" || return 1
+    proc_argv0_read "$pid" || return 1
+    argv0="$PROC_ARGV0"
     [ "$argv0" = "$runtime_nfqws2" ] || return 1
     if [ -n "$expected_qnum" ]; then
         normalize_qnum "$expected_qnum" || return 1
-        pid_cmdline_has_arg "$pid" "--qnum=$QNUM_NORMALIZED" || return 1
+        # Same exact-line match tr|grep -Fqx performed, answered from the
+        # cmdline snapshot proc_argv0_read already paid for. An argument
+        # containing a newline splits into lines for both forms alike.
+        case "$Z2_NL$PROC_CMDLINE_LINES$Z2_NL" in
+            *"$Z2_NL--qnum=$QNUM_NORMALIZED$Z2_NL"*) ;;
+            *) return 1 ;;
+        esac
     fi
     if [ -n "$expected_argv_sha256" ] || [ "$capture_argv" = capture-argv ]; then
         actual_argv_sha256="$(proc_cmdline_sha256 "$pid")" || return 1
@@ -2182,18 +2493,49 @@ verify_nfqws_pid() {
     fi
 
     cmd_exe="$(readlink -f "/proc/$pid/exe" 2>/dev/null)"
-    binary_exe="$(readlink -f "$runtime_nfqws2" 2>/dev/null)"
+    # The expected side of the exe comparison resolves a root-owned module
+    # path that no cooperating writer re-points while this process runs, so
+    # one readlink per binary path serves every verification; the live side
+    # above stays a fresh per-process readlink.
+    if [ "$Z2_NFQWS2_REALPATH_FOR" = "$runtime_nfqws2" ]; then
+        binary_exe="$Z2_NFQWS2_REALPATH"
+    else
+        binary_exe="$(readlink -f "$runtime_nfqws2" 2>/dev/null)"
+        Z2_NFQWS2_REALPATH_FOR="$runtime_nfqws2"
+        Z2_NFQWS2_REALPATH="$binary_exe"
+    fi
     # Exact argv0 is mandatory on every platform.  /proc/PID/exe strengthens
     # that identity when readlink is available, but its absence on some
     # Android kernels must not weaken or disable the exact argv0 check above.
     if [ -n "$cmd_exe" ] && [ -n "$binary_exe" ]; then
         [ "$cmd_exe" = "$binary_exe" ] || return 1
     fi
-    after="$(proc_starttime "$pid")" || return 1
+    proc_starttime_read "$pid" || return 1
+    after="$PROC_STARTTIME"
     [ "$before" = "$after" ] || return 1
     VERIFIED_STARTTIME="$after"
     VERIFIED_ARGV_SHA256="$actual_argv_sha256"
+    # Only a proof that pinned every identity dimension becomes the reusable
+    # fact reverify_published_nfqws_pid consumes.
+    if owner_read_cache_active && [ -n "$actual_argv_sha256" ] && [ -n "$expected_qnum" ]; then
+        Z2_PROVEN_PROCESS_FACT="$pid|$after|$actual_argv_sha256|$QNUM_NORMALIZED"
+    fi
     return 0
+}
+
+# Builtin replacement for candidate="$(cat file)". Command substitution
+# stripped trailing newlines, so the exact acceptance to preserve is one
+# payload line followed only by blank lines.
+read_single_payload_line() {
+    local line
+    Z2_PAYLOAD_LINE=""
+    [ -r "$1" ] || return 1
+    {
+        IFS= read -r Z2_PAYLOAD_LINE || [ -n "$Z2_PAYLOAD_LINE" ] || return 1
+        while IFS= read -r line || [ -n "$line" ]; do
+            [ -z "$line" ] || return 1
+        done
+    } < "$1" 2>/dev/null
 }
 
 read_verified_pidfile() {
@@ -2203,12 +2545,13 @@ read_verified_pidfile() {
     VERIFIED_PID_QNUM=""
     state_file_is_secure "$PIDFILE" && [ -r "$PIDFILE" ] || return 1
     local candidate
-    candidate="$(cat "$PIDFILE" 2>/dev/null)"
+    read_single_payload_line "$PIDFILE" || return 1
+    candidate="$Z2_PAYLOAD_LINE"
     is_decimal "$candidate" || return 1
     if [ -e "$OWNER_STATE" ]; then
         read_owner_state && owner_state_is_current_boot || return 1
         [ "$OWNER_STATE_PID" = "$candidate" ] || return 1
-        verify_nfqws_pid "$candidate" "$OWNER_STATE_START" "$OWNER_STATE_ARGV_SHA256" "$OWNER_STATE_QNUM" || return 1
+        reverify_published_nfqws_pid "$candidate" "$OWNER_STATE_START" "$OWNER_STATE_ARGV_SHA256" "$OWNER_STATE_QNUM" || return 1
         VERIFIED_PID_ARGV_SHA256="$OWNER_STATE_ARGV_SHA256"
         VERIFIED_PID_QNUM="$OWNER_STATE_QNUM"
     else
@@ -2232,13 +2575,15 @@ verify_status_snapshot_pid() {
     [ "$candidate" = "$STATUS_FILE_OWN_PID" ] || return 1
     is_canonical_nonnegative_i64 "$STATUS_FILE_OWN_PID_STARTTIME" || return 1
     is_lower_sha256 "$STATUS_FILE_OWN_ARGV_SHA256" || return 1
-    before="$(proc_starttime "$candidate")" || return 1
+    proc_starttime_read "$candidate" || return 1
+    before="$PROC_STARTTIME"
     [ "$before" = "$STATUS_FILE_OWN_PID_STARTTIME" ] || return 1
     kill -0 "$candidate" 2>/dev/null || return 1
     proc_cmdline_may_match_nfqws "$candidate" || return 1
     actual_argv_sha256="$(proc_cmdline_sha256 "$candidate")" || return 1
     [ "$actual_argv_sha256" = "$STATUS_FILE_OWN_ARGV_SHA256" ] || return 1
-    after="$(proc_starttime "$candidate")" || return 1
+    proc_starttime_read "$candidate" || return 1
+    after="$PROC_STARTTIME"
     [ "$before" = "$after" ] || return 1
     VERIFIED_PID="$candidate"
     VERIFIED_PID_START="$after"
@@ -2251,17 +2596,21 @@ read_live_pidfile() {
     LIVE_PIDFILE_PID=""
     state_file_is_secure "$PIDFILE" && [ -r "$PIDFILE" ] || return 1
     local candidate
-    candidate="$(cat "$PIDFILE" 2>/dev/null)"
+    read_single_payload_line "$PIDFILE" || return 1
+    candidate="$Z2_PAYLOAD_LINE"
     is_decimal "$candidate" || return 1
     [ "$candidate" -gt 0 ] 2>/dev/null || return 1
     kill -0 "$candidate" 2>/dev/null || return 1
-    proc_starttime "$candidate" >/dev/null 2>&1 || return 1
+    proc_starttime_read "$candidate" 2>/dev/null || return 1
     LIVE_PIDFILE_PID="$candidate"
     return 0
 }
 
 stop_verified_nfqws_pid() {
     local pid="$1" start="$2" expected_argv_sha256="${3:-}" expected_qnum="${4:-}" n=0
+    # A stop attempt ends the fact's lifetime: the wait loops below must see
+    # every death, including a zombie transition, with fresh full proofs.
+    retire_proven_process_fact
     verify_nfqws_pid "$pid" "$start" "$expected_argv_sha256" "$expected_qnum" || return 2
     kill -TERM "$pid" 2>/dev/null || return 1
     while [ "$n" -lt 50 ]; do
@@ -2312,7 +2661,8 @@ process_snapshot_pidfile_matches() {
         return
     }
     state_file_is_secure "$PIDFILE" && [ -r "$PIDFILE" ] || return 1
-    candidate="$(cat "$PIDFILE" 2>/dev/null)" || return 1
+    read_single_payload_line "$PIDFILE" || return 1
+    candidate="$Z2_PAYLOAD_LINE"
     [ "$candidate" = "$PROCESS_PREFLIGHT_PID" ]
 }
 
@@ -2342,24 +2692,30 @@ stop_pidfile_process() {
 }
 
 scan_exact_owned_nfqws() {
-    local procdir pid start restore_noglob=0
+    local procdir pid start restore_noglob=0 cmdline runtime_nfqws2
     OWNED_SCAN_PIDS=""
+    runtime_nfqws2="${AUDIT_NFQWS2_OVERRIDE:-$NFQWS2}"
     case "$-" in *f*) restore_noglob=1; set +f ;; esac
     for procdir in /proc/[0-9]*; do
-        [ -d "$procdir" ] || continue
+        # The prefilter runs for every Android process, so it is inlined down
+        # to its three builtins: readability probe, one read, prefix match
+        # (proc_cmdline_may_match_nfqws documents why a prefix is the most a
+        # NUL-stripped read can prove). The strict identity proof is reserved
+        # for plausible candidates.
+        [ -r "$procdir/cmdline" ] || continue
+        cmdline=""
+        IFS= read -r cmdline < "$procdir/cmdline" 2>/dev/null || [ -n "$cmdline" ] || continue
+        case "$cmdline" in "$runtime_nfqws2"*) ;; *) continue ;; esac
         pid="${procdir#/proc/}"
-        # The previous implementation performed multiple /proc reads plus
-        # tr/sed forks for every Android process. Filter with one shell-builtin
-        # read and reserve the strict identity proof for plausible candidates.
-        proc_cmdline_may_match_nfqws "$pid" || continue
-        start="$(proc_starttime "$pid")" || continue
+        proc_starttime_read "$pid" || continue
+        start="$PROC_STARTTIME"
         if verify_nfqws_pid "$pid" "$start" "" ""; then
             if [ -n "$OWNED_SCAN_PIDS" ]; then OWNED_SCAN_PIDS="$OWNED_SCAN_PIDS $pid"
             else OWNED_SCAN_PIDS="$pid"; fi
         fi
     done
     [ "$restore_noglob" = 1 ] && set -f
-    printf '%s\n' "$OWNED_SCAN_PIDS"
+    z2_emit_line "$OWNED_SCAN_PIDS"
 }
 
 scan_exact_owned_nfqws_for_path() {
@@ -2372,7 +2728,8 @@ stop_all_exact_owned_nfqws() {
     local pid start rc=0
     scan_exact_owned_nfqws >/dev/null 2>&1 || return 1
     for pid in $OWNED_SCAN_PIDS; do
-        start="$(proc_starttime "$pid")" || continue
+        proc_starttime_read "$pid" || continue
+        start="$PROC_STARTTIME"
         stop_verified_nfqws_pid "$pid" "$start" "" "" || rc=1
     done
     scan_exact_owned_nfqws >/dev/null 2>&1 || return 1
@@ -2433,7 +2790,8 @@ preflight_owned_process_cleanup() {
         }
         PROCESS_PREFLIGHT_LIVE=1
         pid="$OWNED_SCAN_PIDS"
-        start="$(proc_starttime "$pid")" || return 1
+        proc_starttime_read "$pid" || return 1
+        start="$PROC_STARTTIME"
         argv_sha256="$(proc_cmdline_sha256 "$pid")" || return 1
         if [ "$pidfile_present" = 1 ]; then
             read_verified_pidfile || {
@@ -2772,7 +3130,20 @@ owned_family_absent() {
     z2_fw_family_absent "$1"
 }
 
-status_safe_value() { printf '%s' "$1" | tr '\r\n' '  '; }
+# Same shape as z2_error_detail_normalize_read: snapshot values carry no
+# control characters on the replace path, so the pipeline runs only when one
+# actually appears.
+status_safe_value_read() {
+    case "$1" in
+        *[[:cntrl:]]*) STATUS_SAFE_VALUE="$(printf '%s' "$1" | tr '\r\n' '  ')" ;;
+        *) STATUS_SAFE_VALUE="$1" ;;
+    esac
+}
+
+status_safe_value() {
+    status_safe_value_read "$1" || return 1
+    printf '%s' "$STATUS_SAFE_VALUE"
+}
 
 LOG_READY="${LOG_READY:-0}"
 
@@ -2802,7 +3173,21 @@ prepare_lifecycle_log() {
 
 append_lifecycle_log() {
     [ "$LOG_READY" = 1 ] || return 0
-    printf '%s\n' "$1" >> "$LOGFILE" 2>/dev/null
+    z2_emit_line "$1" >> "$LOGFILE" 2>/dev/null
+}
+
+# Wall-clock stamp for log lines and snapshots. date is an external; when the
+# shell exposes EPOCHREALTIME, lines landing within the same second reuse one
+# formatted stamp instead of paying one exec each. Shells without it keep the
+# one-date-per-line behavior.
+z2_log_stamp_read() {
+    local epoch="${EPOCHREALTIME:-}"
+    epoch="${epoch%%.*}"
+    if [ -n "$epoch" ] && [ "$epoch" = "${Z2_LOG_STAMP_EPOCH:-}" ] && [ -n "${Z2_LOG_STAMP:-}" ]; then
+        return 0
+    fi
+    Z2_LOG_STAMP="$(date '+%Y-%m-%d %H:%M:%S')"
+    Z2_LOG_STAMP_EPOCH="$epoch"
 }
 
 STATUS_FILE_STATUS=""
@@ -2970,9 +3355,12 @@ write_iptables_status() {
     local error_status="${STATUS_ERROR_STATUS:-OK}"
     local error_domain="${STATUS_ERROR_DOMAIN:-NONE}" error_code="${STATUS_ERROR_CODE:-NONE}"
     local error_stage="${STATUS_ERROR_STAGE:-NONE}" error_detail
-    errors="$(status_safe_value "${STATUS_ERRORS:-}")"
-    diagnostics="$(status_safe_value "${STATUS_DIAGNOSTICS:-}")"
-    error_detail="$(z2_error_detail_normalize "${STATUS_ERROR_DETAIL:-}")"
+    status_safe_value_read "${STATUS_ERRORS:-}"
+    errors="$STATUS_SAFE_VALUE"
+    status_safe_value_read "${STATUS_DIAGNOSTICS:-}"
+    diagnostics="$STATUS_SAFE_VALUE"
+    z2_error_detail_normalize_read "${STATUS_ERROR_DETAIL:-}"
+    error_detail="$Z2_ERROR_DETAIL_NORMALIZED"
     z2_error_fields_are_valid "$error_status" "$error_domain" "$error_stage" "$error_code" \
         "$error_detail" ||
         return 1
@@ -2984,7 +3372,8 @@ write_iptables_status() {
     {
         echo "status=$state"
         echo "boot_id=$CURRENT_BOOT_ID"
-        echo "timestamp=$(date '+%Y-%m-%d %H:%M:%S')"
+        z2_log_stamp_read
+        echo "timestamp=$Z2_LOG_STAMP"
         echo "rules_ok=${STATUS_RULES_OK:-0}"
         echo "rules_fail=${STATUS_RULES_FAIL:-0}"
         echo "rules_total=${STATUS_RULES_TOTAL:-0}"
@@ -3013,12 +3402,12 @@ write_iptables_status() {
         echo "multiport_supported=${STATUS_MULTIPORT_SUPPORTED:-0}"
         echo "mark_supported=${STATUS_MARK_SUPPORTED:-0}"
         echo "fallback_mode=${STATUS_FALLBACK_MODE:-0}"
-        printf 'error_schema=%s\n' "$Z2_ERROR_SCHEMA_VERSION"
-        printf 'error_status=%s\n' "$error_status"
-        printf 'error_domain=%s\n' "$error_domain"
-        printf 'error_code=%s\n' "$error_code"
-        printf 'error_stage=%s\n' "$error_stage"
-        printf 'error_detail=%s\n' "$error_detail"
+        z2_emit_line "error_schema=$Z2_ERROR_SCHEMA_VERSION
+error_status=$error_status
+error_domain=$error_domain
+error_code=$error_code
+error_stage=$error_stage
+error_detail=$error_detail"
         echo "diagnostics=$diagnostics"
     } > "$tmp" || { rm -f "$tmp"; return 1; }
     chmod 0600 "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
