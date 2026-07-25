@@ -85,6 +85,27 @@ Z2_QUERY_MODE=present; export Z2_QUERY_MODE
 owned_family_present iptables || fail "owned chain/anchor was not detected"
 if owned_family_absent iptables; then fail "owned state was accepted as absent"; fi
 
+# An IPv6 frontend that exists but cannot answer is not a proof of absence.
+# Teardown may skip that family only when this generation is known never to
+# have published there; otherwise cleanup must fail rather than claim success.
+cat > "$MOCK/ip6tables" <<'EOF'
+#!/bin/sh
+exit 42
+EOF
+chmod 0755 "$MOCK/ip6tables"
+(
+    Z2_QUERY_MODE=clean; export Z2_QUERY_MODE
+    z2_fw_cleanup_family() { return 0; }
+    CLEANUP_IPV6_OWNERSHIP_EXPECTED=1
+    if cleanup_owned_firewall audited; then
+        fail "an unqueryable IPv6 family was treated as cleanly removed"
+    fi
+    CLEANUP_IPV6_OWNERSHIP_EXPECTED=0
+    cleanup_owned_firewall audited ||
+        fail "a family this generation never published still blocked cleanup"
+)
+rm -f "$MOCK/ip6tables"
+
 Z2_QUERY_MODE=foreign; export Z2_QUERY_MODE
 if z2_fw_cleanup_is_unambiguous iptables; then
     fail "foreign reference to the stable namespace passed cleanup preflight"
