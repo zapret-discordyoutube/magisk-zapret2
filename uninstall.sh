@@ -475,13 +475,15 @@ manager_remove_all_owned_state() {
         :
     else
         classify_lifecycle_lock
-        case "$LIFECYCLE_OBSERVED_STATE" in
-            idle|stale) ;;
-            *)
-                report_error "A live or unauthenticated Zapret2 lifecycle owner holds the module; removal was refused"
-                return 1
-                ;;
-        esac
+        if [ "$LIFECYCLE_OBSERVED_STATE" = active ]; then
+            report_error "A live Zapret2 lifecycle transaction owns the module; removal was refused"
+            return 1
+        fi
+        # "ambiguous" means the owner record could not be parsed, not that
+        # someone holds it — and such a record is a permanent hard-fail for
+        # every other entry point, so refusing here would leave the private
+        # state tree with nothing able to remove it. The steps below stop
+        # every exact owned process and purge the namespace regardless.
         report_warning "No live lifecycle owner holds the module ($LIFECYCLE_OBSERVED_STATE); continuing root-manager removal"
     fi
     manager_remove_locked_state

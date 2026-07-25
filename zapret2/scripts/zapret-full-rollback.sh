@@ -8,6 +8,7 @@ RB_STATUS=error
 RB_PROCESS_CLEAN=0
 RB_FIREWALL_CLEAN=0
 RB_IPV6_UNVERIFIED=0
+RB_STATUS_RECEIPT_FAILED=0
 RB_ROLLBACK_ARMED=0
 RB_HOSTS_PRESERVED=0
 RB_USER_DATA_PRESERVED=1
@@ -510,7 +511,11 @@ else
 fi
 durability_sync || failed "hosts preservation phase could not be synchronized; recovery journal retained"
 cleanup_diagnostics
-write_rollback_status || failed "cleanup is verified but the rollback status receipt could not be committed"
+# The receipt is diagnostic. Everything the rollback owns is already done and
+# durable at this point, so a failed status write must not abort the commit —
+# that would leave the journal in place and fence start, stop, uninstall and
+# purge over a bookkeeping error.
+write_rollback_status || RB_STATUS_RECEIPT_FAILED=1
 write_meta || failed "cleanup is verified but rollback metadata commit failed"
 durability_sync || failed "rollback metadata could not be synchronized; recovery journal retained"
 RB_COMMIT_TOKEN="$RB_TOKEN"
@@ -531,4 +536,6 @@ if [ "${RB_IPV6_UNVERIFIED:-0}" = 1 ]; then
 fi
 RB_STATUS=complete
 RB_DIAGNOSTIC="full rollback complete; reboot required; user strategies and lists preserved"
+[ "${RB_STATUS_RECEIPT_FAILED:-0}" != 1 ] ||
+    RB_DIAGNOSTIC="$RB_DIAGNOSTIC; the status receipt could not be written"
 finish_result 0

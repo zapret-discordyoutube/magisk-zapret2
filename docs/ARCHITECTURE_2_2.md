@@ -130,9 +130,7 @@ P5. **Root-manager canon.** `customize.sh` stages and validates; `service.sh`
   short manager-remove branch (so the tombstone long path with its repeated
   audits no longer runs during a purge); the duplicate status-snapshot
   deletion is removed and `pm clear` failure after a successful purge is a
-  warning, not a failure exit. The `read_install_generation_meta` shadow in
-  `uninstall.sh` was kept deliberately: it authenticates against `MODPATH`,
-  not `MODDIR`. Fixes defect 2.
+  warning, not a failure exit. Fixes defect 2.
 - **Full rollback**: the duplicated firewall audit collapsed and the retired
   legacy phase became a pure journal advance kept for resume compatibility.
   The `sync` barriers were *kept*: they implement the write-ahead ordering of
