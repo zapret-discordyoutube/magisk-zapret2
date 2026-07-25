@@ -136,6 +136,37 @@ chmod 0755 "$MOCK/ip6tables"
     [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" = 0 ] ||
         fail "a proven-absent family produced a reservation"
 )
+
+# The probe budget belongs to the preflight, which is also the only step that
+# can capture a family's baseline. A teardown that waited again on its own
+# would walk a recovered frontend into an audited cleanup with no baseline —
+# and fail the teardown precisely on the devices the budget was added for.
+(
+    Z2_QUERY_MODE=clean; export Z2_QUERY_MODE
+    Z2_IP6_PROBE_COUNT="$CASE/ip6probe.preflight"; export Z2_IP6_PROBE_COUNT
+    Z2_IP6_PROBE_SUCCEED_AT=0; export Z2_IP6_PROBE_SUCCEED_AT
+    rm -f "$Z2_IP6_PROBE_COUNT"
+    FIREWALL_PROBE_ATTEMPTS=1
+    audit_owned_firewall_for_cleanup ||
+        fail "an unqueryable IPv6 family blocked the cleanup preflight"
+    [ "${FIREWALL_IPV6_UNQUERYABLE:-0}" = 1 ] ||
+        fail "the preflight did not record that it could not read the family"
+
+    # The frontend comes back before teardown. Cleanup must not reach into an
+    # audited teardown for a family whose baseline was never captured.
+    Z2_IP6_PROBE_SUCCEED_AT=1; export Z2_IP6_PROBE_SUCCEED_AT
+    rm -f "$Z2_IP6_PROBE_COUNT"
+    z2_fw_cleanup_family() {
+        [ "$1" != ip6tables ] ||
+            fail "audited teardown ran for a family whose baseline was never captured"
+        return 0
+    }
+    CLEANUP_IPV6_OWNERSHIP_EXPECTED=1
+    cleanup_owned_firewall audited ||
+        fail "teardown failed on a family whose baseline the preflight never captured"
+    [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" = 1 ] ||
+        fail "the skipped family was not reported"
+)
 rm -f "$MOCK/ip6tables"
 
 Z2_QUERY_MODE=foreign; export Z2_QUERY_MODE

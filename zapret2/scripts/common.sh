@@ -2456,11 +2456,21 @@ audit_owned_firewall_for_cleanup() {
         FIREWALL_CLEANUP_PREFLIGHT_ERROR="IPv4 stable namespace audit could not be retained"
         return 1
     }
-    if z2_fw_tool_available ip6tables &&
-       { ! z2_fw_cleanup_is_unambiguous ip6tables ||
-         ! z2_fw_save_audit ip6tables; }; then
-            FIREWALL_CLEANUP_PREFLIGHT_ERROR="IPv6 stable namespace has a foreign reference"
-            return 1
+    # The probe budget is spent here, once. Teardown then follows this
+    # decision instead of waiting again: a family whose baseline was never
+    # captured cannot be torn down from an audit, so a second wait would only
+    # walk into a guaranteed failure.
+    FIREWALL_IPV6_UNQUERYABLE=0
+    if command -v ip6tables >/dev/null 2>&1; then
+        if z2_fw_tool_available ip6tables ||
+           ! firewall_family_persistently_unavailable ip6tables; then
+            if ! z2_fw_cleanup_is_unambiguous ip6tables || ! z2_fw_save_audit ip6tables; then
+                FIREWALL_CLEANUP_PREFLIGHT_ERROR="IPv6 stable namespace has a foreign reference"
+                return 1
+            fi
+        else
+            FIREWALL_IPV6_UNQUERYABLE=1
+        fi
     fi
     # Stable chain names are the ownership boundary. Cleanup is idempotent and
     # never touches another chain or a non-exact built-in anchor.
@@ -2529,6 +2539,7 @@ firewall_family_persistently_unavailable() {
 }
 
 FIREWALL_IPV6_SKIPPED_UNPROVEN=0
+FIREWALL_IPV6_UNQUERYABLE=0
 cleanup_owned_firewall() {
     local baseline_mode="${1:-owned}" rc=0 result
     case "$baseline_mode" in owned|audited) ;; *) return 1;; esac
@@ -2538,11 +2549,13 @@ cleanup_owned_firewall() {
     result=$?
     [ "$result" = 0 ] || rc=1
     if command -v ip6tables >/dev/null 2>&1; then
-        # One budget, one decision: if the frontend answers at any point — now
-        # or during the persistence probe — tear the family down. A busy
-        # xtables lock is exactly what that budget is for.
-        if z2_fw_tool_available ip6tables || ! firewall_family_persistently_unavailable ip6tables; then
-            z2_fw_cleanup_family ip6tables "$baseline_mode" || rc=1
+        # Follow the preflight's decision. It already spent the probe budget,
+        # and in audited mode it is also the only thing that could have
+        # captured this family's baseline.
+        if [ "${FIREWALL_IPV6_UNQUERYABLE:-0}" != 1 ] &&
+           { z2_fw_tool_available ip6tables || ! firewall_family_persistently_unavailable ip6tables; }; then
+            z2_fw_cleanup_family ip6tables "$baseline_mode" ||
+                { FIREWALL_CLEANUP_PREFLIGHT_ERROR="IPv6 owned ruleset could not be removed"; rc=1; }
         else
             # This family cannot be proven now, and on this device it cannot be
             # proven later either. Refusing would fence every teardown until a
@@ -2951,11 +2964,11 @@ emit_committed_status_v6() {
             owned=0; process=0; active=0
             pid=""; pid_verified=0; pid_start=""; generation=""; owner_verified=0
             ipv4=0; ipv6=0; rules=0; expected=0; ipv4_rules=0; ipv6_rules=0
-            # The receipt must not certify more than the snapshot it accompanies:
-            # a teardown that skipped an unqueryable family withheld this claim
-            # there, and asserting it here would hide that from the one channel
-            # the app actually reads after a lifecycle command.
-            ruleset="${STATUS_RULESET_VERIFIED:-1}"; nfqueue=0; queue_bypass=0
+            # A stopped receipt asserts a fully verified teardown; that is the
+            # contract the app validates against. A teardown that could not
+            # verify every family withholds the receipt entirely rather than
+            # emitting one that contradicts it.
+            ruleset=1; nfqueue=0; queue_bypass=0
             ;;
         *) return 1 ;;
     esac
