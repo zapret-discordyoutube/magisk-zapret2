@@ -25,7 +25,7 @@ import com.zapret2.app.data.RuntimeConfigMutationResult
 import com.zapret2.app.data.RuntimeConfigStore
 import com.zapret2.app.data.diagnosticText
 import com.zapret2.app.data.diagnosticTextOrNull
-import com.zapret2.app.data.projectReleaseVersionCode
+import com.zapret2.app.data.projectModuleVersionCode
 import com.zapret2.app.data.RuntimeLogRepository
 import com.zapret2.app.data.ServiceEventBus
 import com.zapret2.app.data.ServiceEventSource
@@ -540,7 +540,7 @@ private const val REMOVAL_FENCE_FIRST_MODULE_VERSION_CODE = 2_020_000L
  * about a scheduled removal it cannot vouch for rather than promising one that will not happen.
  */
 internal fun modulePublishesRemovalFenceBeforeCleanup(moduleVersion: String): Boolean {
-    val versionCode = projectReleaseVersionCode(moduleVersion) ?: return false
+    val versionCode = projectModuleVersionCode(moduleVersion) ?: return false
     return versionCode >= REMOVAL_FENCE_FIRST_MODULE_VERSION_CODE
 }
 

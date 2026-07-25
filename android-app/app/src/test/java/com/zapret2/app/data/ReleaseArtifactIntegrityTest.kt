@@ -286,6 +286,25 @@ class ReleaseArtifactIntegrityTest {
     }
 
     @Test
+    fun moduleVersionGrammar_admitsDevIdentitiesWithoutWideningTheReleaseChannel() {
+        val dev = "v2.1.5-dev.20260725110254.2a7ce2d1"
+        assertEquals(2_010_005L, requireNotNull(projectModuleVersionCode(dev)))
+        assertEquals(2_010_005L, requireNotNull(projectModuleVersionCode("v2.1.5")))
+        assertNull(projectModuleVersionCode("v2.1.5-dev.20260725110254"))
+        assertNull(projectModuleVersionCode("v2.1.5-beta.1"))
+        assertNull(projectModuleVersionCode("v2.1.5-dev.20260725110254.2a7ce2d1.extra"))
+
+        // A dev build is never a release tag, and a published release supersedes
+        // a dev prerelease of the same base version without the repair flag.
+        assertNull(projectReleaseVersionCode(dev))
+        assertFalse(isProjectReleaseTag(dev))
+        assertTrue(isNewerReleaseVersion("2.1.5", dev))
+        assertFalse(isNewerReleaseVersion("2.1.4", dev))
+        assertTrue(moduleVersionAllowsInstall(dev, "2.1.5", allowSameVersionRepair = false))
+        assertFalse(moduleVersionAllowsInstall(dev, "2.1.4", allowSameVersionRepair = false))
+    }
+
+    @Test
     fun standardModuleInstall_requiresExactPublishedVersionAndArchiveGeneration() {
         val digest = "ab".repeat(32)
         val generation = InstallGenerationMetadata.Record("generation-1", digest)

@@ -505,16 +505,29 @@ internal object ModulePackageContract {
         return null
     }
 
-    /** Returns the version only when installed metadata satisfies the full package identity. */
-    internal fun validatedInstalledVersion(content: String): String? {
-        val bytes = content.toByteArray(Charsets.UTF_8)
-        if (bytes.size > MAX_MODULE_PROP_BYTES) return null
-        if (validateModuleProp(bytes, expectedReleaseVersion = null) != null) return null
+    private const val MAX_OBSERVED_VERSION_LENGTH = 64
+
+    /**
+     * Bounded observation of an installed generation's version property.
+     *
+     * Package grammar is qualified where packages are made: package-contract.sh gates every
+     * published generation and [validateModuleProp] gates downloaded release artifacts. A
+     * published generation is represented by its authenticated receipt, so runtime observation
+     * must not re-qualify module.prop — this read only stays bounded and safe to render and
+     * compare. Anything stricter here re-encodes the module's identity grammar in the app and
+     * breaks every identity the module contract learns before the app does.
+     */
+    internal fun observedInstalledVersion(content: String): String? {
+        if (content.toByteArray(Charsets.UTF_8).size > MAX_MODULE_PROP_BYTES) return null
         return content.lineSequence()
             .map(String::trim)
-            .first { it.substringBefore('=').trim() == "version" }
-            .substringAfter('=')
-            .trim()
+            .firstOrNull { it.substringBefore('=').trim() == "version" }
+            ?.substringAfter('=')
+            ?.trim()
+            ?.takeIf { version ->
+                version.length in 1..MAX_OBSERVED_VERSION_LENGTH &&
+                    version.all { it.code in 0x21..0x7E }
+            }
     }
 
     internal fun validateShellExecutable(bytes: ByteArray): String? = when {

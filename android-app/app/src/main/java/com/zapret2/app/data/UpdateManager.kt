@@ -125,6 +125,22 @@ internal fun projectReleaseVersionCode(version: String): Long? {
         .takeIf { it in 1L..2_100_000_000L }
 }
 
+// The dev identity grammar is owned by package-contract.sh, which admits exactly
+// v<release>-dev.<14-digit timestamp>.<8-hex commit> into a published package.
+// Version-gated decisions about an installed generation — capability gates like
+// the removal fence — must read the same closed set, or every dev generation
+// answers as an older release than it is. Release tags and downloaded release
+// artifacts keep the strict release grammar: a dev build is never a release.
+private val PROJECT_DEV_PRERELEASE_PATTERN = Regex("^dev\\.[0-9]{14}\\.[0-9a-f]{8}$")
+
+/** Version code of an installed module identity: a release or a dev prerelease of one. */
+internal fun projectModuleVersionCode(version: String): Long? {
+    val separator = version.indexOf('-')
+    if (separator < 0) return projectReleaseVersionCode(version)
+    if (!PROJECT_DEV_PRERELEASE_PATTERN.matches(version.substring(separator + 1))) return null
+    return projectReleaseVersionCode(version.substring(0, separator))
+}
+
 internal fun isProjectReleaseTag(tag: String): Boolean =
     tag.startsWith("v") && projectReleaseVersionCode(tag) != null
 
@@ -813,7 +829,7 @@ class UpdateManager(private val context: Context) {
             val installedVersion = RootFileIo.readSecureRegularText(
                 "${RootModuleContract.ACTIVE_MODULE_DIR}/module.prop",
                 ModulePackageContract.MAX_MODULE_PROP_BYTES,
-            )?.let(ModulePackageContract::validatedInstalledVersion)
+            )?.let(ModulePackageContract::observedInstalledVersion)
             if (!moduleVersionAllowsInstall(
                     installedVersion,
                     expectedReleaseVersion,
@@ -908,7 +924,7 @@ class UpdateManager(private val context: Context) {
         val installedVersion = RootFileIo.readSecureRegularText(
             "$installedRoot/module.prop",
             ModulePackageContract.MAX_MODULE_PROP_BYTES,
-        )?.let(ModulePackageContract::validatedInstalledVersion)
+        )?.let(ModulePackageContract::observedInstalledVersion)
         val installGeneration = RootFileIo.readSecureRegularText(
             "$installedRoot/${InstallGenerationMetadata.RELATIVE_PATH}",
             InstallGenerationMetadata.MAX_BYTES,

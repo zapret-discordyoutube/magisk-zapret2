@@ -78,7 +78,7 @@ class Zapret2ModuleRepositoryTest {
     }
 
     @Test
-    fun modulePropParser_requiresTheFullReleaseIdentityAndVersionBinding() {
+    fun modulePropParser_observesBoundedVersionsWithoutRequalifyingThePackage() {
         val valid = """
             id=zapret2
             name=Zapret2 DPI Bypass
@@ -90,11 +90,23 @@ class Zapret2ModuleRepositoryTest {
         """.trimIndent() + "\n"
 
         assertEquals("v2.0.0", repository.parseModulePropVersion(valid))
-        assertNull(repository.parseModulePropVersion(valid.replace("id=zapret2", "id=other")))
-        assertNull(repository.parseModulePropVersion(valid.replace("versionCode=2000000", "versionCode=1999999")))
-        assertNull(repository.parseModulePropVersion(valid.replace("version=v2.0.0", "version=v2.0.00")))
-        assertNull(repository.parseModulePropVersion(valid + "webRoot=webroot\n"))
-        assertNull(repository.parseModulePropVersion(valid + "id=zapret2\n"))
+        // Package grammar is qualified by package-contract.sh before the generation
+        // receipt is published; observation reads every receipted identity, including
+        // the dev prerelease form the contract admits.
+        assertEquals(
+            "v2.1.5-dev.20260725110254.2a7ce2d1",
+            repository.parseModulePropVersion(
+                valid.replace("version=v2.0.0", "version=v2.1.5-dev.20260725110254.2a7ce2d1"),
+            ),
+        )
+        assertEquals(
+            "v2.0.0",
+            repository.parseModulePropVersion(valid.replace("id=zapret2", "id=other")),
+        )
+        // The read stays bounded and safe to render and compare.
+        assertNull(repository.parseModulePropVersion(valid.replace("version=v2.0.0", "version=bad value")))
+        assertNull(repository.parseModulePropVersion(valid.replace("version=v2.0.0", "version=v${"9".repeat(64)}")))
+        assertNull(repository.parseModulePropVersion(valid.replace("version=v2.0.0", "noversion=x")))
         assertNull(repository.parseModulePropVersion(valid.replace("version=v2.0.0", "version=bad\u0000value")))
         assertNull(repository.parseModulePropVersion(valid + "#${"x".repeat(64 * 1024)}\n"))
     }

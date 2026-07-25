@@ -265,7 +265,7 @@ class Zapret2ModuleRepository @Inject constructor() {
     }
 
     internal fun parseModulePropVersion(content: String): String? =
-        ModulePackageContract.validatedInstalledVersion(content)
+        ModulePackageContract.observedInstalledVersion(content)
 
     internal suspend fun readProcessMetrics(pid: String): RuntimeProcessMetrics {
         if (!pid.matches(Regex("[1-9][0-9]*")) || pid.toIntOrNull() == null) {

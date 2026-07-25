@@ -289,6 +289,23 @@ class ModulePackageContractTest {
     }
 
     @Test
+    fun releaseArtifactQualification_neverAcceptsADevIdentity() {
+        val stage = temporaryFolder.newFolder("dev-identity")
+        writeValidPackage(stage)
+        File(stage, "module.prop").writeText(
+            validModuleProp().replace(
+                "version=v1.0.100",
+                "version=v1.0.100-dev.20260725110254.2a7ce2d1",
+            ),
+        )
+
+        // Dev identities are published by build.sh and qualified by package-contract.sh;
+        // the release artifact channel stays closed to them.
+        assertNotNull(ModulePackageContract.validateStaging(stage, "arm64-v8a"))
+        assertNotNull(ModulePackageContract.validateStaging(stage, "arm64-v8a", "1.0.100"))
+    }
+
+    @Test
     fun contractRejectsMissingNonRegularAndEmptyRequiredArtifacts() {
         val missing = temporaryFolder.newFolder("missing")
         writeValidPackage(missing)
