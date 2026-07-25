@@ -226,7 +226,10 @@ main() {
         if ! remove_transient_diagnostics; then
             log_msg "WARNING: one or more transient diagnostics could not be removed safely"
         fi
-        if write_stop_status stopped ""; then
+        stop_note=""
+        [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" != 1 ] ||
+            stop_note="IPv6 mangle table unavailable; rules from an earlier generation, if any, were left for the next reboot"
+        if write_stop_status stopped "$stop_note"; then
             STOP_STATUS_COMMITTED=1
         else
             # Process and firewall cleanup is already verified.  A diagnostic
