@@ -523,7 +523,7 @@ manager_remove_all_owned_state() {
 }
 
 manager_remove_locked_state() {
-    local tool pending_nfqws="$PENDING_MODPATH/zapret2/nfqws2"
+    local tool probe pending_nfqws="$PENDING_MODPATH/zapret2/nfqws2"
     [ -f "$PURGE_CONTRACT" ] && [ ! -L "$PURGE_CONTRACT" ] || {
         report_error "Root-manager removal cleanup contract is unavailable"
         return 1
@@ -550,13 +550,23 @@ manager_remove_locked_state() {
             return 1
         fi
         purge_zapret2_namespace "$tool" && continue
-        # Removal is committed and a reboot follows it, which destroys every
-        # netfilter object anyway. Refusing here would strand the private
-        # state tree forever on a device whose IPv6 mangle table cannot be
-        # queried, so report the residue instead of blocking removal on it.
-        if [ "$tool" = ip6tables ] && ! z2_fw_tool_available ip6tables; then
-            report_warning "IPv6 mangle backend is unavailable; any IPv6 rules are left to the pending reboot"
-            continue
+        # A device whose IPv6 mangle table does not exist at all would
+        # otherwise strand the private state tree forever, and removal is
+        # already committed with a reboot to follow. But a busy xtables lock
+        # looks identical to a missing table in a single probe, so require the
+        # condition to persist before accepting it — otherwise a moment of
+        # contention with netd would silently leave real rules behind.
+        if [ "$tool" = ip6tables ]; then
+            probe=0
+            while [ "$probe" -lt 5 ]; do
+                z2_fw_tool_available ip6tables && break
+                probe=$((probe + 1))
+                [ "$probe" -ge 5 ] || sleep 1
+            done
+            if [ "$probe" -ge 5 ]; then
+                report_warning "IPv6 mangle backend stayed unavailable; any IPv6 rules are left to the pending reboot"
+                continue
+            fi
         fi
         report_error "Unable to remove the strict Zapret2 namespace from $tool"
         return 1
@@ -724,6 +734,18 @@ if [ -z "$STATE_CLEANUP_ERROR" ] && { [ -e "$Z2_STATE_TMP" ] || [ -L "$Z2_STATE_
     else
         rm -f "$Z2_STATE_TMP" 2>/dev/null || STATE_CLEANUP_ERROR="unsafe scratch entry could not be removed"
     fi
+fi
+
+# Staging files are never authoritative: each one is a partial write whose
+# atomic rename never happened. Creator-liveness sweeping can miss them when a
+# dead creator's PID gets reused, and an uninstall that leaves them behind
+# fails as "unknown state entries were preserved" on every retry, forever.
+if [ -z "$STATE_CLEANUP_ERROR" ]; then
+    for staging_file in "$STATE_DIR"/*.tmp.*; do
+        { [ -e "$staging_file" ] || [ -L "$staging_file" ]; } || continue
+        rm -rf "$staging_file" 2>/dev/null ||
+            STATE_CLEANUP_ERROR="staging residue could not be removed: $staging_file"
+    done
 fi
 
 if [ -n "$STATE_CLEANUP_ERROR" ]; then

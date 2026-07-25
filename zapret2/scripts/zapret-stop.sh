@@ -103,16 +103,29 @@ main() {
         STOP_RUNTIME_OWNED=1
     fi
     STOP_QNUM="${STATUS_FILE_QNUM:-}"
-    # Only an authenticated owner record, or a snapshot whose ruleset was
-    # verified when it was committed, may claim this generation published no
-    # IPv6 rules. An error snapshot records what could not be proven, not a
-    # proof of absence, so it must not license skipping IPv6 teardown.
+    # Two different questions, two different defaults.
+    #
+    # CLEANUP_IPV6_OWNERSHIP_EXPECTED answers "may an unqueryable IPv6 family
+    # be skipped?" — only an authenticated owner record, or a snapshot whose
+    # ruleset was verified when committed, proves there is nothing to remove;
+    # anything else stays conservative, because an error snapshot records what
+    # could not be proven rather than a proof of absence.
+    #
+    # IPV6_PUBLICATION_RECORDED answers "did we ever publish IPv6 rules?" and
+    # needs positive evidence: with no ip6tables frontend at all the module
+    # could not have published any, so the absence of a record is not a reason
+    # to refuse the stop.
     CLEANUP_IPV6_OWNERSHIP_EXPECTED=1
+    IPV6_PUBLICATION_RECORDED=0
     if [ "$OWNER_STATE_AVAILABLE" = 1 ]; then
         STOP_QNUM="$OWNER_STATE_QNUM"
         CLEANUP_IPV6_OWNERSHIP_EXPECTED="${OWNER_STATE_IPV6_ACTIVE:-1}"
+        IPV6_PUBLICATION_RECORDED="${OWNER_STATE_IPV6_ACTIVE:-0}"
     elif [ -n "${STATUS_FILE_STATUS:-}" ] && [ "${STATUS_FILE_RULESET_VERIFIED:-0}" = 1 ]; then
         CLEANUP_IPV6_OWNERSHIP_EXPECTED="${STATUS_FILE_IPV6_ACTIVE:-1}"
+        IPV6_PUBLICATION_RECORDED="${STATUS_FILE_IPV6_ACTIVE:-0}"
+    elif [ -n "${STATUS_FILE_STATUS:-}" ]; then
+        IPV6_PUBLICATION_RECORDED="${STATUS_FILE_IPV6_ACTIVE:-0}"
     fi
     if [ -z "$STOP_QNUM" ]; then
         # Neither the committed snapshot nor an owner record carries the queue
@@ -156,7 +169,7 @@ main() {
         STOP_ERROR_DOMAIN=FIREWALL; STOP_ERROR_CODE=FIREWALL_CLEANUP_FAILED; STOP_ERROR_STAGE=STOP_FIREWALL
         if [ -n "$errors" ]; then errors="$errors; owned firewall cleanup failed"
         else errors="owned firewall cleanup failed: ${FIREWALL_CLEANUP_PREFLIGHT_ERROR:-ambiguous ownership}; daemon teardown was not attempted"; fi
-    elif ! command -v ip6tables >/dev/null 2>&1 && [ "$CLEANUP_IPV6_OWNERSHIP_EXPECTED" = 1 ]; then
+    elif ! command -v ip6tables >/dev/null 2>&1 && [ "$IPV6_PUBLICATION_RECORDED" = 1 ]; then
         # cleanup_owned_firewall proves per-family absence as the postcondition
         # of each family it touches, and fails when a present frontend cannot
         # be queried while IPv6 ownership is expected. The one fact left is a

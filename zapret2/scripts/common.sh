@@ -497,8 +497,10 @@ retire_obsolete_state_artifacts() {
     if [ "${BOOT_STALE_RUNTIME_RECOVERY:-0}" = 1 ] &&
        { [ -e "$Z2_STATE_TMP" ] || [ -L "$Z2_STATE_TMP" ]; }; then
         rm -rf "$Z2_STATE_TMP" 2>/dev/null || return 1
-        return 0
     fi
+    # Staging residue in the state root is swept by creator liveness on every
+    # pass, including boot: the wholesale scratch removal above covers only
+    # the scratch directory.
     retire_dead_scratch_files
 }
 

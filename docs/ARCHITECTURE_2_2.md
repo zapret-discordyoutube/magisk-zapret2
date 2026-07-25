@@ -59,8 +59,12 @@ P3. **Reboot is the migration barrier.** Magisk/KernelSU/APatch activate
     from an older module version, and no runtime migration machinery is needed.
 
 P4. **Ephemeral state is disposable by construction.** Scratch files live in
-    `$STATE_DIR/tmp/`, which every entry point may sweep wholesale. Recovery
-    logic never has to reason about their names.
+    `$STATE_DIR/tmp/`; staging files (`<target>.tmp.<pid>`) live beside their
+    target. Neither is ever authoritative, so recovery never has to reason
+    about their contents: boot recovery and uninstall drop the scratch
+    directory wholesale, and every lifecycle audit retires entries whose
+    creating process is gone — by liveness rather than wholesale, because a
+    preset preview from the app runs without the lifecycle lock.
 
 P5. **Root-manager canon.** `customize.sh` stages and validates; `service.sh`
     waits for boot and delegates; `action.sh` performs the user action;
@@ -79,34 +83,50 @@ P5. **Root-manager canon.** `customize.sh` stages and validates; `service.sh`
 - **Removed the dead cluster**: `republish_owner_ipv6_inactive`,
   `owner_load_generation_fields`, `owner_loaded_generation_for_write`,
   `trim_config_value`, `retire_installer_ephemeral_track_journals`.
-- **Ephemeral workspace** (`$STATE_DIR/tmp/`, 0700 root): all PID-suffixed
+- **Ephemeral workspace** (`$STATE_DIR/tmp/`, 0700 root): the PID-suffixed
   scratch files (`firewall-batch.*`, `firewall-cleanup.*`,
-  `firewall-restore.*.error`, `z2-ports.*`, `preset-preflight.*`,
-  `preset-preview.*`) moved there. Boot recovery and uninstall remove the
-  directory wholesale; the unknown-child guard ignores it. Fixes defect 1.
+  `firewall-restore.*.error`, `preset-preflight.*`, `preset-preview.*`, the
+  dry-run capture) moved there; the port union no longer uses a file at all.
+  Uninstall removes the directory and any staging residue outright, so a
+  crashed operation can no longer fence it as an unknown child. Fixes defect 1.
 - **Single boot pass**: when autostart is enabled, `service.sh` no longer runs
   its own lock+audit recovery cycle — `zapret-start.sh` performs the identical
-  audit under its own lock moments later. The standalone recovery pass remains
-  for the autostart-disabled path. Boot wait uses `resetprop -w` when available
-  instead of a 1 Hz `getprop` fork loop.
-- **Transaction-scoped caches** in `common.sh` for `read_owner_state`,
-  `read_install_generation_meta` and status facts, invalidated by the
-  corresponding writers in the same process. Callers that re-read for no
-  reason were collapsed (P1).
+  audit under its own lock moments later. The standalone pass runs when the
+  module is disabled, when autostart is off, and as the retry path when a
+  start is refused *by* recovery state (the only case where discarding an
+  unsafe state generation wholesale is still allowed, and it happens before
+  the start has mutated anything). Boot wait blocks on `resetprop -w` when
+  available instead of a 1 Hz `getprop` fork loop.
+- **Read once per transaction**: `read_install_generation_meta` parses the
+  installer record once per process while still re-checking the path identity
+  on every call, the compiler publishes the artifact metadata it just wrote so
+  the warm start parses it once instead of five times, and the duplicated
+  status/owner reads on the stop path were collapsed (P1).
+- **Boot-bound status snapshot**: the committed snapshot records the boot it
+  describes, and a reader rejects any other — leaving no facts behind. A
+  snapshot describes processes and netfilter objects that a reboot destroys,
+  so one from an earlier boot is not stale data to reconcile.
+- **Unprovable is not clean**: a firewall family whose frontend exists but
+  cannot be queried is never treated as absent. Teardown skips it only when an
+  authenticated owner record — or a snapshot committed with a verified ruleset
+  — proves this generation published nothing there.
 - **Warm-start dedup**: one compiled-artifact binding check at entry plus one
   TOCTOU re-check immediately before daemon launch (was 3); metadata parsed
   once (was 5–6); receipt writer reuses the hashes the checker just computed;
   `prepare_private_runtime_file` runs once per file; pidfile wait polls at
   100 ms. (`nfqws2.cmdline` is still produced: the shell layer never reads it
   back, but the Android app renders it on the logs screen.)
-- **Stop dedup**: status facts restored once, owner state read once via the
-  cache, `/proc` scanned once, the firewall-absence postcondition of
-  `z2_fw_apply_cleanup` is trusted instead of re-proven, the unused
-  `runtime.ini` parse and the dead `audit_owned_firewall_for_cleanup` argument
-  are gone.
+- **Stop dedup**: status facts restored once instead of three times, the owner
+  record read once for both the queue number and the ownership decision,
+  `/proc` scanned once, the per-family firewall-absence postcondition of
+  `z2_fw_apply_cleanup` trusted instead of re-proven, and the unused
+  `runtime.ini` parse plus the dead `audit_owned_firewall_for_cleanup`
+  argument gone.
 - **Purge/uninstall**: `zapret-purge.sh` publishes the `remove` marker *before*
   invoking `uninstall.sh` — the fence commits the twice-confirmed purge, blocks
-  concurrent starts throughout the destruction, and routes uninstall onto the
+  new starts throughout the destruction (a start already holding the lifecycle
+  lock is serialized against by the lock the removal branch now takes), and
+  routes uninstall onto the
   short manager-remove branch (so the tombstone long path with its repeated
   audits no longer runs during a purge); the duplicate status-snapshot
   deletion is removed and `pm clear` failure after a successful purge is a
