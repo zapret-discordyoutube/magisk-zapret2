@@ -440,8 +440,7 @@ if ! phase_at_least firewall-clean; then
     # IPv4 family is the one this rollback can always prove; if that is gone
     # and only an unqueryable IPv6 frontend remains, finish and say so.
     if ! cleanup_owned_firewall audited || ! firewall_clean; then
-        if command -v ip6tables >/dev/null 2>&1 && ! z2_fw_tool_available ip6tables &&
-           owned_family_absent iptables; then
+        if firewall_family_persistently_unavailable ip6tables && owned_family_absent iptables; then
             RB_IPV6_UNVERIFIED=1
         else
             partial "verified owned firewall cleanup is incomplete; listener retained"
@@ -451,16 +450,16 @@ if ! phase_at_least firewall-clean; then
     fi
     write_transaction firewall-clean || failed "cannot advance rollback journal after firewall cleanup"
 else
-    # A resumed run cannot see the earlier pass's skip, so re-derive it: the
-    # journal records the phase, not why the phase was allowed to pass. An
-    # unqueryable IPv6 frontend must not strand the journal here either — the
-    # reboot this rollback already requires clears any rules it leaves.
-    if command -v ip6tables >/dev/null 2>&1 && ! z2_fw_tool_available ip6tables; then
+    # The journal records which phase completed, not why it was allowed to. A
+    # family the earlier pass had to skip is still there, so retry the teardown
+    # rather than only re-verifying it: whatever made the frontend unqueryable
+    # then may well be gone now. Teardown is idempotent.
+    if audit_owned_firewall_for_cleanup && cleanup_owned_firewall audited && firewall_clean; then
+        [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" != 1 ] || RB_IPV6_UNVERIFIED=1
+    elif firewall_family_persistently_unavailable ip6tables && owned_family_absent iptables; then
         RB_IPV6_UNVERIFIED=1
-        owned_family_absent iptables ||
-            partial "rollback journal says firewall-clean but the owned IPv4 ruleset is still present"
     else
-        firewall_clean || partial "rollback journal says firewall-clean but a clean full snapshot cannot be proved"
+        partial "rollback journal says firewall-clean but a clean full snapshot cannot be proved"
     fi
 fi
 if [ "${RB_IPV6_UNVERIFIED:-0}" = 1 ]; then RB_FIREWALL_CLEAN=0; else RB_FIREWALL_CLEAN=1; fi

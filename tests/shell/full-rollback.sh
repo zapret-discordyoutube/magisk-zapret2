@@ -304,7 +304,7 @@ rc=$?
 set -e
 assert_line "$OUT.ipv6" 'Z2_RB_STATUS=partial'
 assert_line "$OUT.ipv6" 'Z2_RB_FIREWALL_CLEAN=0'
-assert_line "$OUT.ipv6" 'Z2_RB_COMPLETE=1'
+assert_line "$OUT.ipv6" 'Z2_RB_HOSTS_PRESERVED=1'
 [ ! -e "$STATE/full-rollback.transaction" ] ||
     fail "an unverifiable IPv6 family stranded the rollback journal"
 [ -f "$STATE/full-rollback.meta" ] || fail "rollback did not commit its completion record"

@@ -253,8 +253,16 @@ firewall_is_clean() {
     esac
     if command -v ip6tables >/dev/null 2>&1; then
         if ! ip6tables -t mangle -S OUTPUT >/dev/null 2>&1; then
-            AUDIT_ERROR="unable to verify IPv6 firewall state"
-            return 1
+            # A single failed probe is usually a busy xtables lock. Only a
+            # condition that persists may be accepted, and then the pending
+            # reboot — which uninstall requires anyway — clears the family.
+            if ! firewall_family_persistently_unavailable ip6tables; then
+                AUDIT_ERROR="unable to verify IPv6 firewall state"
+                return 1
+            fi
+            UNINSTALL_IPV6_UNVERIFIED=1
+            report_warning "IPv6 mangle backend stayed unavailable; IPv6 ownership could not be re-verified"
+            return 0
         fi
         owned_family_present ip6tables; family_state=$?
         case "$family_state" in
@@ -490,7 +498,7 @@ manager_remove_all_owned_state() {
 }
 
 manager_remove_locked_state() {
-    local tool probe pending_nfqws="$PENDING_MODPATH/zapret2/nfqws2"
+    local tool pending_nfqws="$PENDING_MODPATH/zapret2/nfqws2"
     [ -f "$PURGE_CONTRACT" ] && [ ! -L "$PURGE_CONTRACT" ] || {
         report_error "Root-manager removal cleanup contract is unavailable"
         return 1
@@ -523,20 +531,12 @@ manager_remove_locked_state() {
         # looks identical to a missing table in a single probe, so require the
         # condition to persist before accepting it — otherwise a moment of
         # contention with netd would silently leave real rules behind.
-        if [ "$tool" = ip6tables ]; then
-            probe=0
-            while [ "$probe" -lt 5 ]; do
-                z2_fw_tool_available ip6tables && break
-                probe=$((probe + 1))
-                [ "$probe" -ge 5 ] || sleep 1
-            done
-            if [ "$probe" -ge 5 ]; then
-                # Marker consumed by zapret-purge.sh: the caller must not
-                # report a verified-clean firewall after this.
-                MANAGER_REMOVE_IPV6_UNVERIFIED=1
-                report_warning "Z2_FIREWALL_IPV6_UNVERIFIED: IPv6 mangle backend stayed unavailable; any IPv6 rules are left to the pending reboot"
-                continue
-            fi
+        if [ "$tool" = ip6tables ] && firewall_family_persistently_unavailable ip6tables; then
+            # Marker consumed by zapret-purge.sh: the caller must not
+            # report a verified-clean firewall after this.
+            MANAGER_REMOVE_IPV6_UNVERIFIED=1
+            report_warning "Z2_FIREWALL_IPV6_UNVERIFIED: IPv6 mangle backend stayed unavailable; any IPv6 rules are left to the pending reboot"
+            continue
         fi
         report_error "Unable to remove the strict Zapret2 namespace from $tool"
         return 1

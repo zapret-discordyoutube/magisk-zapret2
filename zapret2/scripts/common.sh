@@ -2505,6 +2505,22 @@ resolve_ipv6_ownership_expectation() {
     return 0
 }
 
+# A busy xtables lock looks exactly like a missing table in a single probe, and
+# netd, tethering and VPN apps take that lock constantly. Treating one failed
+# probe as permanent would leave real rules behind, so require the condition to
+# persist. A frontend that is not installed at all can never become queryable.
+FIREWALL_PROBE_ATTEMPTS="${FIREWALL_PROBE_ATTEMPTS:-5}"
+firewall_family_persistently_unavailable() {
+    local tool="$1" attempt=0
+    command -v "$tool" >/dev/null 2>&1 || return 0
+    while [ "$attempt" -lt "$FIREWALL_PROBE_ATTEMPTS" ]; do
+        z2_fw_tool_available "$tool" && return 1
+        attempt=$((attempt + 1))
+        [ "$attempt" -ge "$FIREWALL_PROBE_ATTEMPTS" ] || sleep 1
+    done
+    return 0
+}
+
 FIREWALL_IPV6_SKIPPED_UNPROVEN=0
 cleanup_owned_firewall() {
     local baseline_mode="${1:-owned}" rc=0 result

@@ -95,6 +95,8 @@ chmod 0600 "$STATE/status.snapshot"
 run_status
 grep -Fxq 'Z2_STATUS=ok' "$OUTPUT" && fail "a snapshot from another boot was accepted"
 grep -Fxq 'Z2_QNUM=777' "$OUTPUT" && fail "queue number leaked from the rejected snapshot"
+# and the projection still carries the configured queue number instead of none
+grep -Fxq 'Z2_QNUM=200' "$OUTPUT" || fail "rejected snapshot left the queue number unresolved"
 grep -Fxq 'Z2_EXPECTED_RULES=0' "$OUTPUT" ||
     fail "expected rule count leaked from the rejected snapshot"
 grep -Fxq 'Z2_NFQUEUE=0' "$OUTPUT" ||
