@@ -1288,6 +1288,214 @@ class ServiceLifecycleControllerTest {
         assertFalse(crashed.rolledBack)
     }
 
+    /**
+     * The reported defect.
+     *
+     * A rollback that hangs re-reading an unqueryable IPv6 family outlives the lifecycle budget,
+     * so the bounded transport's `timeout 420` wrapper sends SIGTERM. `zapret-full-rollback.sh`
+     * catches it: the `interrupted` trap finishes the durable fence, sets `RB_STATUS=partial` and
+     * prints the full ten-field receipt with every completion flag set and the firewall assertion
+     * withheld — the same payload, field for field, as the ordinary IPv6-unverified partial — then
+     * exits 1 exactly like `partial()` does, while `timeout` reports 124.
+     *
+     * Nothing in the receipt or its exit status separates the two. What separates them is that the
+     * interrupted run stopped mid-teardown: the recovery journal it names as retained is still on
+     * disk, and it blocks every later start, stop, uninstall and purge. Reporting "rollback
+     * complete" over that is the one verdict the user cannot recover from on their own.
+     */
+    @Test
+    fun partialReceiptFromACommandThatWasCutShortIsNeverRolledBack() {
+        val interruptedOverrides = mapOf(
+            "Z2_RB_FIREWALL_CLEAN" to "0",
+            "Z2_RB_DIAGNOSTIC" to
+                "rollback interrupted; durable disable fence and recovery journal retained",
+        )
+        val interrupted = fullRollbackResult(
+            outcome = ServiceLifecycleController.FullRollbackOutcome.PARTIAL,
+            status = "partial",
+            overrides = interruptedOverrides,
+            serviceStatus = ipv6UnverifiedRollbackStatus(),
+            command = commandKilledByTheTimeoutWrapper(),
+        )
+        // The honest receipt this one is indistinguishable from, differing only in the command.
+        val ipv6Unverified = fullRollbackResult(
+            outcome = ServiceLifecycleController.FullRollbackOutcome.PARTIAL,
+            status = "partial",
+            overrides = interruptedOverrides,
+            serviceStatus = ipv6UnverifiedRollbackStatus(),
+            command = rollbackCommandThatFinishedPartial(),
+        )
+
+        // Identical receipts, identical outcome, both from an unsuccessful command: the only
+        // difference the app has to go on is that one command never reached its own exit.
+        assertEquals(interrupted.report, ipv6Unverified.report)
+        assertFalse(checkNotNull(interrupted.command).success)
+        assertFalse(checkNotNull(ipv6Unverified.command).success)
+        assertTrue(checkNotNull(interrupted.command).indeterminate)
+        assertFalse(checkNotNull(ipv6Unverified.command).indeterminate)
+        assertTrue(checkNotNull(interrupted.report).satisfiesRolledBackContract)
+        assertFalse(checkNotNull(interrupted.report).firewallClean)
+        assertFalse(interrupted.rolledBack)
+        assertTrue(ipv6Unverified.rolledBack)
+    }
+
+    /**
+     * The command axis is not the exit status. Every terminal the script has for a non-complete
+     * receipt exits non-zero — `partial()` and `failed()` exit 1, `blocked()` exits 2 — so the
+     * honoured partial always arrives from a command the transport calls unsuccessful. Grading it
+     * by [ServiceLifecycleController.CommandResult.success], the way the purge commit is graded,
+     * would reject the exact receipt this verdict exists for.
+     */
+    @Test
+    fun rolledBackPartialSurvivesTheModulesOwnNonZeroExit() {
+        val honoured = fullRollbackResult(
+            outcome = ServiceLifecycleController.FullRollbackOutcome.PARTIAL,
+            status = "partial",
+            overrides = mapOf("Z2_RB_FIREWALL_CLEAN" to "0"),
+            serviceStatus = ipv6UnverifiedRollbackStatus(),
+            command = rollbackCommandThatFinishedPartial(),
+        )
+
+        assertFalse(checkNotNull(honoured.command).success)
+        assertFalse(checkNotNull(honoured.command).indeterminate)
+        assertTrue(honoured.rolledBack)
+    }
+
+    /** The classifier has to ask the command before it honours anything the receipt claims. */
+    @Test
+    fun receiptGradingRejectsAnIndeterminateCommandUnderEveryReportedStatus() {
+        val cutShort = commandKilledByTheTimeoutWrapper()
+        val shellDied = ServiceLifecycleController.CommandResult(
+            success = false,
+            exitCode = null,
+            error = "Root shell disconnected",
+            indeterminate = true,
+        )
+
+        listOf("complete", "partial", "blocked", "error").forEach { wireStatus ->
+            val report = fullRollbackReport(wireStatus, mapOf("Z2_RB_FIREWALL_CLEAN" to "0"))
+            listOf("timeout" to cutShort, "shellDied" to shellDied).forEach { (label, command) ->
+                assertEquals(
+                    "$wireStatus/$label",
+                    ServiceLifecycleController.FullRollbackOutcome.COMMAND_FAILED,
+                    ServiceLifecycleController.gradeFullRollbackReceipt(report, command),
+                )
+            }
+        }
+    }
+
+    /** A command that ended on its own terms leaves the grading to the receipt it printed. */
+    @Test
+    fun receiptGradingKeepsTheReportedStatusWhenTheCommandEndedOnItsOwnTerms() {
+        val succeeded = ServiceLifecycleController.CommandResult(success = true, exitCode = 0)
+
+        assertNull(
+            ServiceLifecycleController.gradeFullRollbackReceipt(
+                fullRollbackReport("complete"),
+                succeeded,
+            ),
+        )
+        assertEquals(
+            ServiceLifecycleController.FullRollbackOutcome.COMMAND_FAILED,
+            ServiceLifecycleController.gradeFullRollbackReceipt(
+                fullRollbackReport("complete"),
+                rollbackCommandThatFinishedPartial(),
+            ),
+        )
+        mapOf(
+            "partial" to ServiceLifecycleController.FullRollbackOutcome.PARTIAL,
+            "blocked" to ServiceLifecycleController.FullRollbackOutcome.BLOCKED,
+            "error" to ServiceLifecycleController.FullRollbackOutcome.ERROR,
+        ).forEach { (wireStatus, expected) ->
+            assertEquals(
+                wireStatus,
+                expected,
+                ServiceLifecycleController.gradeFullRollbackReceipt(
+                    fullRollbackReport(wireStatus),
+                    rollbackCommandThatFinishedPartial(),
+                ),
+            )
+        }
+    }
+
+    /**
+     * The command axis the receipt matrix never varied: outcome x receipt status x firewall proof
+     * x how the command ended. No receipt, under any outcome, may claim a rollback out of a
+     * command the transport could not see through to its own exit.
+     */
+    @Test
+    fun rolledBackRequiresACommandThatRanToItsOwnEnd() {
+        val commands = linkedMapOf(
+            "absent" to null,
+            "exit0" to ServiceLifecycleController.CommandResult(success = true, exitCode = 0),
+            "exit1" to rollbackCommandThatFinishedPartial(),
+            "sigterm" to commandKilledByTheTimeoutWrapper(),
+            "shellDied" to ServiceLifecycleController.CommandResult(
+                success = false,
+                exitCode = null,
+                error = "Root shell disconnected",
+                indeterminate = true,
+            ),
+        )
+
+        ServiceLifecycleController.FullRollbackOutcome.entries.forEach { outcome ->
+            listOf("complete", "partial", "blocked", "error").forEach { wireStatus ->
+                listOf(true, false).forEach { firewallClean ->
+                    commands.forEach { (label, command) ->
+                        val result = fullRollbackResult(
+                            outcome = outcome,
+                            status = wireStatus,
+                            overrides = mapOf(
+                                "Z2_RB_FIREWALL_CLEAN" to if (firewallClean) "1" else "0",
+                            ),
+                            serviceStatus = ipv6UnverifiedRollbackStatus(),
+                            command = command,
+                        )
+                        val ranToItsOwnEnd = command?.indeterminate != true
+                        val expected = ranToItsOwnEnd && when (outcome) {
+                            ServiceLifecycleController.FullRollbackOutcome.COMPLETE -> true
+                            ServiceLifecycleController.FullRollbackOutcome.PARTIAL ->
+                                wireStatus == "partial" && !firewallClean
+                            else -> false
+                        }
+
+                        assertEquals(
+                            "$outcome/$wireStatus/firewall=$firewallClean/$label",
+                            expected,
+                            result.rolledBack,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /** `timeout 420` reports 124 after SIGTERM, whatever exit status the trapped script chose. */
+    private fun commandKilledByTheTimeoutWrapper() = ServiceLifecycleController.CommandResult(
+        success = false,
+        exitCode = 124,
+        error = "Root command timed out",
+        rootAccessState = ServiceLifecycleController.RootAccessState.TIMEOUT,
+        indeterminate = true,
+    )
+
+    /** What `partial()` really leaves behind: a determinate, unsuccessful exit 1. */
+    private fun rollbackCommandThatFinishedPartial() = ServiceLifecycleController.CommandResult(
+        success = false,
+        exitCode = 1,
+        error = "Root command exited unsuccessfully",
+    )
+
+    private fun fullRollbackReport(
+        status: String,
+        overrides: Map<String, String> = emptyMap(),
+    ): ServiceLifecycleController.FullRollbackReport {
+        val parsed = ServiceLifecycleController.parseFullRollbackOutput(
+            fullRollbackLines(status = status, overrides = overrides),
+        ) as ServiceLifecycleController.FullRollbackParseResult.Valid
+        return parsed.report
+    }
+
     private fun fullRollbackResult(
         outcome: ServiceLifecycleController.FullRollbackOutcome,
         status: String = "complete",
@@ -1300,14 +1508,13 @@ class ServiceLifecycleControllerTest {
                     exitCode = 1,
                 ),
             ),
+        command: ServiceLifecycleController.CommandResult? = null,
     ): ServiceLifecycleController.FullRollbackResult {
-        val parsed = ServiceLifecycleController.parseFullRollbackOutput(
-            fullRollbackLines(status = status, overrides = overrides),
-        ) as ServiceLifecycleController.FullRollbackParseResult.Valid
         return ServiceLifecycleController.FullRollbackResult(
             outcome = outcome,
             serviceStatus = serviceStatus,
-            report = parsed.report,
+            report = fullRollbackReport(status, overrides),
+            command = command,
         )
     }
 

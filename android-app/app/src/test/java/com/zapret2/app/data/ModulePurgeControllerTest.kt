@@ -226,6 +226,46 @@ class ModulePurgeControllerTest {
         }
     }
 
+    /**
+     * The reported defect, on the controller's side of it.
+     *
+     * Clearing APK-private state is the last step of a purge and the only one that runs after the
+     * module verdict is already in. When it fails, the module is nonetheless gone — its directory,
+     * its state tree and the purge script that would retry went with it — so the failure has to
+     * land on the erase verdict without taking the module verdict back with it. Rewriting the
+     * outcome does exactly that: it puts the outcome at odds with the receipt it grades, and
+     * `moduleFullyRemoved`, which requires the two to agree, silently turns false.
+     */
+    @Test
+    fun retainedApkPrivateStateFailsTheEraseWithoutUndoingTheModuleVerdict() {
+        listOf(
+            ModulePurgeController.Outcome.COMPLETE to "complete",
+            ModulePurgeController.Outcome.PARTIAL to "partial",
+        ).forEach { (outcome, status) ->
+            val honoured = purgeResult(
+                outcome = outcome,
+                status = status,
+                overrides = mapOf(
+                    "Z2_PURGE_FIREWALL_CLEAN" to if (status == "complete") "1" else "0",
+                ),
+                command = commandResult(success = true),
+            )
+            assertTrue(status, honoured.erased)
+
+            val appDataSurvived = honoured.withAppDataRetained()
+
+            assertEquals(status, honoured.outcome, appDataSurvived.outcome)
+            assertEquals(status, honoured.report, appDataSurvived.report)
+            assertTrue(status, appDataSurvived.moduleFullyRemoved)
+            assertFalse(status, appDataSurvived.appDataCleared)
+            assertFalse(status, appDataSurvived.erased)
+            assertTrue(
+                status,
+                appDataSurvived.diagnosticText().contains("APK-private state could not be cleared"),
+            )
+        }
+    }
+
     private fun commandResult(success: Boolean) = ServiceLifecycleController.CommandResult(
         success = success,
         exitCode = if (success) 0 else 1,

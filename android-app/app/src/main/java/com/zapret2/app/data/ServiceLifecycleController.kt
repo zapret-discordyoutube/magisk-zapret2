@@ -326,16 +326,33 @@ object ServiceLifecycleController {
          * The observation is still consulted for what it can disprove: a status that
          * [proves live runtime state][ServiceStatus.provesLiveRuntime] contradicts the same
          * receipt's process and teardown claims, and a contradicted receipt proves nothing.
+         *
+         * The command that printed the receipt is consulted for the one thing only it knows:
+         * whether it ran to a determinate end. Its exit status cannot serve that purpose here —
+         * the module's own `partial()` exits 1, so every receipt this branch exists for arrives
+         * from a command the transport already calls unsuccessful. (The purge commit is the
+         * opposite: it returns 0 for the receipt it wants honoured, which is why the erase verdict
+         * can and does demand [CommandResult.success] there.) What separates the two partials is
+         * [CommandResult.indeterminate]: when the bounded transport's `timeout` wrapper kills a
+         * rollback that hung, the script's signal trap prints a ten-field `partial` receipt that
+         * is byte-identical to the ordinary IPv6-unverified one — same completion fields, same
+         * withheld firewall assertion — and exits 1 as well, while the wrapper reports 124. That
+         * receipt is a snapshot taken mid-teardown, not a finished rollback: the recovery journal
+         * it names as retained is exactly what blocks every later start, stop, uninstall and
+         * purge. A command the transport could not see through to its own exit therefore proves
+         * nothing about the receipt it left behind, whatever that receipt says.
          */
         val rolledBack: Boolean
-            get() = success || (
-                outcome == FullRollbackOutcome.PARTIAL &&
-                    serviceStatus?.provesLiveRuntime != true &&
-                    report?.let {
-                        it.status == FullRollbackStatus.PARTIAL &&
-                            it.satisfiesRolledBackContract &&
-                            !it.firewallClean
-                    } == true
+            get() = command?.indeterminate != true && (
+                success || (
+                    outcome == FullRollbackOutcome.PARTIAL &&
+                        serviceStatus?.provesLiveRuntime != true &&
+                        report?.let {
+                            it.status == FullRollbackStatus.PARTIAL &&
+                                it.satisfiesRolledBackContract &&
+                                !it.firewallClean
+                        } == true
+                    )
                 )
 
         fun diagnosticText(): String = listOfNotNull(
@@ -561,27 +578,18 @@ object ServiceLifecycleController {
         }
 
         val report = (parsed as FullRollbackParseResult.Valid).report
-        val reportedOutcome = when (report.status) {
-            FullRollbackStatus.COMPLETE -> null
-            FullRollbackStatus.PARTIAL -> FullRollbackOutcome.PARTIAL
-            FullRollbackStatus.BLOCKED -> FullRollbackOutcome.BLOCKED
-            FullRollbackStatus.ERROR -> FullRollbackOutcome.ERROR
-        }
-        if (reportedOutcome != null) {
+        val gradedOutcome = gradeFullRollbackReceipt(report, command)
+        if (gradedOutcome != null) {
             return FullRollbackResult(
-                outcome = reportedOutcome,
+                outcome = gradedOutcome,
                 serviceStatus = after,
                 report = report,
                 command = command,
-            )
-        }
-        if (!command.success) {
-            return FullRollbackResult(
-                outcome = FullRollbackOutcome.COMMAND_FAILED,
-                serviceStatus = after,
-                report = report,
-                command = command,
-                error = "Full rollback command exited unsuccessfully",
+                error = when {
+                    gradedOutcome != FullRollbackOutcome.COMMAND_FAILED -> null
+                    command.indeterminate -> "Full rollback command did not run to a determinate end"
+                    else -> "Full rollback command exited unsuccessfully"
+                },
             )
         }
         if (!report.satisfiesCompleteContract) {
@@ -1157,6 +1165,37 @@ object ServiceLifecycleController {
                 !flag("Z2_NFQUEUE") && !flag("Z2_QUEUE_BYPASS") &&
                 !flag("Z2_UPDATE_BLOCKED") && !flag("Z2_UNINSTALL_TOMBSTONE")
             else -> owned && !active
+        }
+    }
+
+    /**
+     * Grades a parsed receipt against the command that printed it.
+     *
+     * Returns the terminal outcome, or `null` for the single case the caller must still verify on
+     * its own: a `complete` receipt from a command that ended determinately and successfully, which
+     * still owes its full contract and a post-rollback status observation.
+     *
+     * The command is asked first, and it is asked about determinacy rather than about its exit
+     * status. A rollback the bounded transport had to kill leaves a signal-trap receipt that is
+     * indistinguishable by content or exit code from an ordinary IPv6-unverified `partial` — both
+     * print ten fields with every completion flag set, both withhold `Z2_RB_FIREWALL_CLEAN`, both
+     * exit 1 — so grading it by [CommandResult.success] would either reject every honest partial or
+     * accept every truncated one. [CommandResult.indeterminate] is the only signal that separates
+     * them, and it disqualifies a receipt under any status: a run that was cut short describes a
+     * teardown in progress, not one that finished. [CommandResult.success] still gates `complete`,
+     * which the module only prints on the path that exits 0.
+     */
+    internal fun gradeFullRollbackReceipt(
+        report: FullRollbackReport,
+        command: CommandResult,
+    ): FullRollbackOutcome? {
+        if (command.indeterminate) return FullRollbackOutcome.COMMAND_FAILED
+        return when (report.status) {
+            FullRollbackStatus.COMPLETE ->
+                if (command.success) null else FullRollbackOutcome.COMMAND_FAILED
+            FullRollbackStatus.PARTIAL -> FullRollbackOutcome.PARTIAL
+            FullRollbackStatus.BLOCKED -> FullRollbackOutcome.BLOCKED
+            FullRollbackStatus.ERROR -> FullRollbackOutcome.ERROR
         }
     }
 

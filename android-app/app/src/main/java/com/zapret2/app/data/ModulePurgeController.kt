@@ -99,6 +99,13 @@ object ModulePurgeController {
          * in that case too, so clearing it must not wait for a full receipt — but a `partial` that
          * claims a verified-clean firewall contradicts its own status and proves nothing, exactly
          * like one that admits touching the APK. Every other outcome proves nothing either.
+         *
+         * This is also the fact the screen resets on, and it is deliberately not [erased]: once
+         * the module directory is gone the app cannot reach it again — the purge script went with
+         * it — so a screen that kept describing an installed module would offer controls that
+         * resolve to nothing, and only a process restart would rediscover that. Whether
+         * APK-private state survived is a separate question with a separate answer,
+         * [appDataCleared], and it never brings the module back.
          */
         val moduleFullyRemoved: Boolean
             get() = command?.success != false && when (outcome) {
@@ -119,6 +126,21 @@ object ModulePurgeController {
          * result always names the fact the module actually left unproven.
          */
         val erased: Boolean get() = moduleFullyRemoved && appDataCleared
+
+        /**
+         * Records the one failure that happens after the module verdict is already in: the app's
+         * own `pm clear` could not wipe APK-private state.
+         *
+         * [outcome] grades the module receipt, and this is not about the module — its directory,
+         * its state tree and its purge script are gone, which is the only reason this step ran at
+         * all. Rewriting the outcome here would put it at odds with the receipt it grades and, by
+         * way of [moduleFullyRemoved], silently take back the fact the screen must obey. The
+         * failure belongs to [appDataCleared] alone, and [erased] already demands both.
+         */
+        fun withAppDataRetained(): Result = copy(
+            error = "Module data was removed, but APK-private state could not be cleared",
+            appDataCleared = false,
+        )
 
         fun diagnosticText(): String = listOfNotNull(
             error?.takeIf(String::isNotBlank),
@@ -149,16 +171,7 @@ object ModulePurgeController {
                     withContext(NonCancellable) {
                         val moduleResult = purgeInsideExclusiveTask()
                         if (moduleResult.moduleFullyRemoved && !appDataCleaner.clear()) {
-                            // Read before the downgrade on purpose: this app-side outcome no
-                            // longer agrees with the receipt, so it retires [moduleFullyRemoved]
-                            // with it. Nothing past this point asks about the module alone — the
-                            // only verdict acted on is [Result.erased], which this very failure
-                            // denies through [Result.appDataCleared].
-                            moduleResult.copy(
-                                outcome = Outcome.PARTIAL,
-                                error = "Module data was removed, but APK-private state could not be cleared",
-                                appDataCleared = false,
-                            )
+                            moduleResult.withAppDataRetained()
                         } else {
                             moduleResult
                         }

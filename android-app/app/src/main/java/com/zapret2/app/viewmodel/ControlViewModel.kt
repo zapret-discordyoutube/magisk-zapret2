@@ -322,6 +322,19 @@ sealed interface FullRollbackUiState {
         val unverifiedCleanup: Boolean
             get() = rolledBack &&
                 outcome != ServiceLifecycleController.FullRollbackOutcome.COMPLETE
+
+        /**
+         * Whether the dialog shows what the module and the transport actually said.
+         *
+         * A rolled-back result is not a silent one. The receipt behind it can report that it
+         * could not write its status receipt — which means the screen keeps reading an older
+         * generation until the required reboot — and the transport can report a command it had to
+         * cut short. [unverifiedCleanup] names one reservation, the withheld IPv6 assertion, and
+         * one only; it is a heading for this text, never a substitute for it. Only a result that
+         * both succeeded and returned nothing has nothing to say, because the failing path still
+         * owes the user the "no diagnostic was returned" statement.
+         */
+        val showsDiagnostic: Boolean get() = diagnostic.isNotBlank() || !rolledBack
     }
 }
 
@@ -345,8 +358,46 @@ sealed interface ModulePurgeUiState {
          */
         val unverifiedCleanup: Boolean
             get() = erased && outcome != ModulePurgeController.Outcome.COMPLETE
+
+        /**
+         * Whether the dialog shows what the module and the transport actually said, on the erased
+         * path as much as the failing one. See [FullRollbackUiState.Result.showsDiagnostic]: the
+         * static reservation above it names the single unproven firewall family and nothing else.
+         */
+        val showsDiagnostic: Boolean get() = diagnostic.isNotBlank() || !erased
     }
 }
+
+/**
+ * Retires everything the screen says about an installed module once the purge removed it.
+ *
+ * The gate is the module verdict, [ModulePurgeController.Result.moduleFullyRemoved], not the erase
+ * verdict [ModulePurgeController.Result.erased]. The two part company on exactly one path: the
+ * module receipt was honoured, the directory and its state tree are gone, and the app's own
+ * `pm clear` then failed to wipe APK-private state. That failure is real and the dialog reports it
+ * as one, but it does not put the module back. Leaving the screen on its pre-purge state there
+ * would show a READY module with a version and live start/stop/update/purge controls that reach
+ * nothing, and nothing would correct it for the lifetime of the ViewModel: the environment is
+ * reconciled once, from `loadInitialState()`.
+ */
+internal fun ControlUiState.afterModulePurge(result: ModulePurgeController.Result): ControlUiState =
+    if (!result.moduleFullyRemoved) {
+        this
+    } else {
+        copy(
+            autostart = false,
+            isRunning = false,
+            canStopService = false,
+            status = ControlStatus.STOPPED,
+            moduleInstallState = ModuleInstallState.MISSING,
+            pendingModuleState = PendingModuleState.NONE,
+            moduleMutationState = ModuleMutationState.IDLE,
+            moduleVersion = "",
+            hasAuthoritativeRuntimeSettings = false,
+            iptablesActive = false,
+            nfqueueRulesCount = 0,
+        )
+    }
 
 internal object FullRollbackAvailabilityPolicy {
     fun isAvailable(
@@ -1114,26 +1165,7 @@ class ControlViewModel @Inject constructor(
             viewModelScope.launch {
                 try {
                     val result = ModulePurgeController.purge(modulePurgeAppDataCleaner)
-                    // The module directory is gone in every erased outcome, including the partial
-                    // receipt that only left one reboot-cleared fact unproven, so the screen must
-                    // stop describing an installed module the user can no longer act on.
-                    if (result.erased) {
-                        _uiState.update {
-                            it.copy(
-                                autostart = false,
-                                isRunning = false,
-                                canStopService = false,
-                                status = ControlStatus.STOPPED,
-                                moduleInstallState = ModuleInstallState.MISSING,
-                                pendingModuleState = PendingModuleState.NONE,
-                                moduleMutationState = ModuleMutationState.IDLE,
-                                moduleVersion = "",
-                                hasAuthoritativeRuntimeSettings = false,
-                                iptablesActive = false,
-                                nfqueueRulesCount = 0,
-                            )
-                        }
-                    }
+                    _uiState.update { it.afterModulePurge(result) }
                     showModulePurgeResult(result)
                 } catch (cancelled: CancellationException) {
                     throw cancelled

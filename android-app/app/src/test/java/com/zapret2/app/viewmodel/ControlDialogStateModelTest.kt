@@ -325,6 +325,163 @@ class ControlDialogStateModelTest {
         }
     }
 
+    /**
+     * The reported defect: both result dialogs rendered the module's own text only when the
+     * result had failed, and PARTIAL is now a succeeding path. That text is where the rollback
+     * says its status receipt could not be written — meaning the screen keeps reading the previous
+     * generation until the required reboot — and where the transport reports a command it had to
+     * cut short. The static IPv6 sentence heads that reservation; it names one fact and cannot
+     * stand in for the rest.
+     */
+    @Test
+    fun succeedingResultDialogsStillShowWhatTheModuleActuallySaid() {
+        val rolledBack = FullRollbackUiState.Result(
+            outcome = ServiceLifecycleController.FullRollbackOutcome.PARTIAL,
+            rolledBack = true,
+            rebootRequired = true,
+            diagnostic = "full rollback finished and the module is disabled, but the IPv6 mangle " +
+                "table is unavailable; the status receipt could not be written",
+        )
+        val erased = ModulePurgeUiState.Result(
+            outcome = ModulePurgeController.Outcome.PARTIAL,
+            erased = true,
+            rebootRequired = true,
+            diagnostic = "Zapret2 module data was permanently removed, but the IPv6 ruleset " +
+                "could not be verified; the pending reboot clears it",
+        )
+
+        assertTrue(rolledBack.unverifiedCleanup)
+        assertTrue(rolledBack.showsDiagnostic)
+        assertTrue(erased.unverifiedCleanup)
+        assertTrue(erased.showsDiagnostic)
+        // A COMPLETE receipt carries the same receipt note, and it is not silenced either.
+        assertTrue(
+            rolledBack.copy(
+                outcome = ServiceLifecycleController.FullRollbackOutcome.COMPLETE,
+            ).showsDiagnostic,
+        )
+        assertTrue(
+            erased.copy(outcome = ModulePurgeController.Outcome.COMPLETE).showsDiagnostic,
+        )
+    }
+
+    /** Only a result that both succeeded and said nothing has nothing to show. */
+    @Test
+    fun resultDialogsShowTheirDiagnosticBlockUnlessASuccessReturnedNoText() {
+        listOf(true, false).forEach { succeeded ->
+            listOf("", "   ", "receipt text").forEach { diagnostic ->
+                val expected = diagnostic.isNotBlank() || !succeeded
+                val label = "succeeded=$succeeded/diagnostic='$diagnostic'"
+
+                assertEquals(
+                    label,
+                    expected,
+                    FullRollbackUiState.Result(
+                        outcome = ServiceLifecycleController.FullRollbackOutcome.PARTIAL,
+                        rolledBack = succeeded,
+                        rebootRequired = true,
+                        diagnostic = diagnostic,
+                    ).showsDiagnostic,
+                )
+                assertEquals(
+                    label,
+                    expected,
+                    ModulePurgeUiState.Result(
+                        outcome = ModulePurgeController.Outcome.PARTIAL,
+                        erased = succeeded,
+                        rebootRequired = true,
+                        diagnostic = diagnostic,
+                    ).showsDiagnostic,
+                )
+            }
+        }
+    }
+
+    /**
+     * The reported defect. `purge()` reads the module verdict, then clears APK-private state; when
+     * that last step fails the module is still gone — its directory, its state tree and the purge
+     * script that would retry went with it. Gating the screen reset on the full erase verdict left
+     * a READY module with a version and live controls that reach nothing, and nothing corrects it:
+     * the environment is reconciled once, from `loadInitialState()`.
+     */
+    @Test
+    fun screenFollowsTheModuleEvenWhenApkPrivateStateSurvivedThePurge() {
+        val appDataSurvived = purgeControllerResult(
+            outcome = ModulePurgeController.Outcome.COMPLETE,
+            status = "complete",
+            firewallClean = true,
+        ).withAppDataRetained()
+
+        assertTrue(appDataSurvived.moduleFullyRemoved)
+        assertFalse(appDataSurvived.appDataCleared)
+        // The verdict shown to the user still demands both, so this stays a reported failure.
+        assertFalse(appDataSurvived.erased)
+
+        val reset = installedControlState().afterModulePurge(appDataSurvived)
+
+        assertEquals(com.zapret2.app.data.ModuleInstallState.MISSING, reset.moduleInstallState)
+        assertEquals(ControlStatus.STOPPED, reset.status)
+        assertEquals("", reset.moduleVersion)
+        assertEquals(0, reset.nfqueueRulesCount)
+        assertFalse(reset.isRunning)
+        assertFalse(reset.canStopService)
+        assertFalse(reset.autostart)
+        assertFalse(reset.hasAuthoritativeRuntimeSettings)
+        assertFalse(reset.iptablesActive)
+        assertFalse(reset.canPurgeModule)
+        assertFalse(reset.canFullRollback)
+    }
+
+    /**
+     * The reset follows the module verdict exactly — over every outcome, receipt status, firewall
+     * proof and APK-clear result — while the erase verdict keeps demanding both halves.
+     */
+    @Test
+    fun screenResetFollowsTheModuleVerdictWhileTheErasedVerdictStillDemandsBoth() {
+        val installed = installedControlState()
+        val statuses = ModulePurgeController.Status.entries.map(
+            ModulePurgeController.Status::wireValue,
+        )
+        ModulePurgeController.Outcome.entries.forEach { outcome ->
+            statuses.forEach { status ->
+                listOf(true, false).forEach { firewallClean ->
+                    listOf(true, false).forEach { appDataCleared ->
+                        val honoured = purgeControllerResult(outcome, status, firewallClean)
+                        val result = if (appDataCleared) honoured else honoured.withAppDataRetained()
+                        val reset = installed.afterModulePurge(result)
+                        val label = "$outcome/$status/firewall=$firewallClean/apk=$appDataCleared"
+
+                        assertEquals(
+                            label,
+                            result.moduleFullyRemoved,
+                            reset.moduleInstallState ==
+                                com.zapret2.app.data.ModuleInstallState.MISSING,
+                        )
+                        assertEquals(
+                            label,
+                            result.moduleFullyRemoved && appDataCleared,
+                            result.erased,
+                        )
+                        if (!result.moduleFullyRemoved) assertEquals(label, installed, reset)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun installedControlState() = ControlUiState(
+        isRunning = true,
+        status = ControlStatus.RUNNING,
+        autostart = true,
+        moduleVersion = "2.1.5",
+        canStopService = true,
+        iptablesActive = true,
+        nfqueueRulesCount = 2,
+        hasRootAccess = true,
+        hasAuthoritativeRuntimeSettings = true,
+        moduleInstallState = com.zapret2.app.data.ModuleInstallState.READY,
+    )
+
     private fun rollbackReport(
         status: ServiceLifecycleController.FullRollbackStatus,
         firewallClean: Boolean,

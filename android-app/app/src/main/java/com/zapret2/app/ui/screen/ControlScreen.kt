@@ -768,7 +768,13 @@ private fun FullRollbackResultDialog(
                         color = MaterialTheme.colorScheme.error,
                     )
                 }
-                if (!success) {
+                // The module's own words belong on every path, not only the failing one. A
+                // rolled-back receipt is still a receipt with reservations on it: besides the
+                // IPv6 family the line above names, it is where the module says it could not
+                // write its status receipt — so the screen keeps showing an older generation —
+                // and where the transport reports a command it had to cut short. The static
+                // sentence above heads that reservation; it cannot stand in for it.
+                if (result.showsDiagnostic) {
                     Text(
                         text = result.diagnostic.ifBlank {
                             stringResource(R.string.control_full_rollback_failure_unknown)
@@ -900,7 +906,10 @@ private fun ModulePurgeResultDialog(
                         color = MaterialTheme.colorScheme.error,
                     )
                 }
-                if (!success) {
+                // Same rule as the rollback dialog: an erased receipt still carries whatever the
+                // module could not prove or could not write, and the static sentence above heads
+                // that reservation rather than replacing the text the module actually returned.
+                if (result.showsDiagnostic) {
                     Text(
                         text = result.diagnostic.ifBlank {
                             stringResource(R.string.control_purge_failure_unknown)
