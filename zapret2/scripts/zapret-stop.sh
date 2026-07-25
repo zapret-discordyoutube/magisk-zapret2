@@ -5,7 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/common.sh"
 
 log_msg() {
-    append_lifecycle_log "$(date '+%Y-%m-%d %H:%M:%S') [STOP] $1"
+    z2_log_stamp_read
+    append_lifecycle_log "$Z2_LOG_STAMP [STOP] $1"
     if command -v log >/dev/null 2>&1; then log -t Zapret2 "$1" 2>/dev/null; fi
 }
 

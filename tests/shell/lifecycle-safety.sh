@@ -312,7 +312,7 @@ if sed -n '/if \[ "\$STOP_STATUS_COMMITTED" = 1 \]/p' "$ROOT/zapret2/scripts/zap
     fail "the stop receipt is withheld again when a family had to be skipped"
 fi
 
-grep -Fq 'boot_id=%s' "$ROOT/zapret2/scripts/common.sh" || fail "owner publication is not boot-bound"
+grep -Fq 'boot_id=$boot_id' "$ROOT/zapret2/scripts/common.sh" || fail "owner publication is not boot-bound"
 grep -Fq 'return 2' "$ROOT/zapret2/scripts/common.sh" || fail "tri-state query error is absent"
 grep -Fq 'phase_at_least process-clean' "$ROOT/zapret2/scripts/zapret-full-rollback.sh" || fail "rollback resume gates are absent"
 
