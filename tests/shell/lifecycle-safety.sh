@@ -86,23 +86,55 @@ owned_family_present iptables || fail "owned chain/anchor was not detected"
 if owned_family_absent iptables; then fail "owned state was accepted as absent"; fi
 
 # An IPv6 frontend that exists but cannot answer is not a proof of absence.
-# Teardown may skip that family only when this generation is known never to
-# have published there; otherwise cleanup must fail rather than claim success.
+# A family that cannot be queried now but might answer in a moment is a busy
+# lock: teardown must retry rather than accept it. A family that stays
+# unqueryable can never be proven on this device, so refusing forever would
+# fence every teardown until a reboot that would refuse the same way — it is
+# skipped instead, and the skip is reported unless our own record already
+# proves this generation published nothing there.
 cat > "$MOCK/ip6tables" <<'EOF'
 #!/bin/sh
+count_file="${Z2_IP6_PROBE_COUNT:-}"
+if [ -n "$count_file" ]; then
+    n=0
+    [ ! -f "$count_file" ] || IFS= read -r n < "$count_file"
+    n=$((n + 1))
+    printf '%s\n' "$n" > "$count_file"
+    succeed_at="${Z2_IP6_PROBE_SUCCEED_AT:-0}"
+    if [ "$succeed_at" -gt 0 ] && [ "$n" -ge "$succeed_at" ]; then exit 0; fi
+fi
 exit 42
 EOF
 chmod 0755 "$MOCK/ip6tables"
 (
     Z2_QUERY_MODE=clean; export Z2_QUERY_MODE
     z2_fw_cleanup_family() { return 0; }
+
+    FIREWALL_PROBE_ATTEMPTS=3
+    Z2_IP6_PROBE_COUNT="$CASE/ip6probe"; export Z2_IP6_PROBE_COUNT
+    Z2_IP6_PROBE_SUCCEED_AT=2; export Z2_IP6_PROBE_SUCCEED_AT
+    rm -f "$Z2_IP6_PROBE_COUNT"
     CLEANUP_IPV6_OWNERSHIP_EXPECTED=1
-    if cleanup_owned_firewall audited; then
-        fail "an unqueryable IPv6 family was treated as cleanly removed"
-    fi
+    cleanup_owned_firewall audited ||
+        fail "a frontend that answered on retry was treated as permanently unavailable"
+    [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" = 0 ] ||
+        fail "a family that was actually torn down was reported as skipped"
+
+    Z2_IP6_PROBE_SUCCEED_AT=0; export Z2_IP6_PROBE_SUCCEED_AT
+    rm -f "$Z2_IP6_PROBE_COUNT"
+    FIREWALL_PROBE_ATTEMPTS=1
+    CLEANUP_IPV6_OWNERSHIP_EXPECTED=1
+    cleanup_owned_firewall audited ||
+        fail "a permanently unqueryable family fenced the teardown"
+    [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" = 1 ] ||
+        fail "an unqueryable IPv6 family was skipped without reporting it"
+
+    rm -f "$Z2_IP6_PROBE_COUNT"
     CLEANUP_IPV6_OWNERSHIP_EXPECTED=0
     cleanup_owned_firewall audited ||
         fail "a family this generation never published still blocked cleanup"
+    [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" = 0 ] ||
+        fail "a proven-absent family produced a reservation"
 )
 rm -f "$MOCK/ip6tables"
 

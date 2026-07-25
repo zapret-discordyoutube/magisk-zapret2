@@ -36,13 +36,16 @@ write_stop_status() {
     # snapshot back as proof there is nothing left, a claim that then sustains
     # itself because this stop also retires the owner record.
     if [ "$state" = stopped ] && [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" != 1 ]; then
-        STATUS_RULESET_VERIFIED=1; STATUS_IPV6_ACTIVE=0
+        STATUS_RULESET_VERIFIED=1
     else
         STATUS_RULESET_VERIFIED=0
-        [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" != 1 ] && STATUS_IPV6_ACTIVE=0 || STATUS_IPV6_ACTIVE=1
     fi
+    # ipv6_active answers "did this module publish there", and a teardown that
+    # skipped an unqueryable family has no evidence that it did. Recording 1
+    # would invent one, and every later teardown would read it back as proof.
+    # The withheld verification above is what carries the uncertainty.
     STATUS_RULES_EXPECTED=0; STATUS_QNUM="${STOP_QNUM:-${STATUS_QNUM:-${QNUM:-}}}"
-    STATUS_IPV4_ACTIVE=0; STATUS_CHAINS=0; STATUS_ANCHORS=0
+    STATUS_IPV4_ACTIVE=0; STATUS_IPV6_ACTIVE=0; STATUS_CHAINS=0; STATUS_ANCHORS=0
     STATUS_IPV4_RULES=0; STATUS_IPV6_RULES=0
     STATUS_NFQUEUE_SUPPORTED="${STATUS_NFQUEUE_SUPPORTED:-0}"
     STATUS_QUEUE_BYPASS_SUPPORTED="${STATUS_QUEUE_BYPASS_SUPPORTED:-0}"

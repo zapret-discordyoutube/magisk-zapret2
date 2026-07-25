@@ -309,8 +309,12 @@ grep -Fqx 'ruleset_verified=1' "$STATE/status.snapshot" ||
 # boot of such a device. The rollback finishes, retires the journal and says
 # in the receipt that IPv6 stayed unverified.
 rb_ipv6_case() {
+    # No owner record and no committed receipt: nothing proves this generation
+    # published nothing over IPv6, so an unqueryable frontend must be reported
+    # as a reservation rather than skipped silently.
     rm -f "$STATE/full-rollback.transaction" "$STATE/full-rollback.meta" \
-        "$STATE/nfqws2.pid" "$STATE/owner.meta" "$STATE/runtime.owner" "$MOD/disable"
+        "$STATE/nfqws2.pid" "$STATE/owner.meta" "$STATE/runtime.owner" \
+        "$STATE/status.snapshot" "$MOD/disable"
     sed 's/^autostart=.*/autostart=1/' "$MOD/zapret2/runtime.ini" > "$MOD/zapret2/runtime.ini.tmp"
     mv "$MOD/zapret2/runtime.ini.tmp" "$MOD/zapret2/runtime.ini"
     chmod 0644 "$MOD/zapret2/runtime.ini"
@@ -369,6 +373,49 @@ set -e
 assert_line "$OUT.ipv6-resume" 'Z2_RB_FIREWALL_CLEAN=0'
 [ ! -e "$STATE/full-rollback.transaction" ] ||
     fail "a resumed rollback stranded the journal on an unverifiable IPv6 family"
+
+# With a committed receipt proving this generation published no IPv6 rules, the
+# same unqueryable frontend hides nothing of ours, so there is no reservation
+# to report and the rollback is simply complete.
+rm -f "$STATE/full-rollback.transaction" "$STATE/full-rollback.meta" "$MOD/disable"
+cat > "$STATE/status.snapshot" <<EOF
+status=stopped
+boot_id=$(cat /proc/sys/kernel/random/boot_id)
+ipv4_active=0
+ipv6_active=0
+ruleset_verified=1
+owner_metadata_verified=0
+qnum=200
+EOF
+chmod 0600 "$STATE/status.snapshot"
+PATH="$MOCK:$PATH" STATE_DIR="$STATE" Z2_MOCK_LOG="$LOG" \
+    sh "$MOD/zapret2/scripts/zapret-full-rollback.sh" --machine > "$OUT.ipv6-proven"
+assert_line "$OUT.ipv6-proven" 'Z2_RB_STATUS=complete'
+assert_line "$OUT.ipv6-proven" 'Z2_RB_FIREWALL_CLEAN=1'
+
+# A stop on the same device must stay repeatable. Each stop retires the owner
+# record that carried the IPv6 answer, so a receipt that withheld verification
+# must not make the next stop refuse — otherwise the first successful stop
+# poisons every stop until the next reboot, and uninstall inherits the refusal.
+rm -f "$STATE/full-rollback.transaction" "$STATE/full-rollback.meta" \
+    "$STATE/hosts.rollback.backup" "$STATE/status.snapshot" \
+    "$STATE/owner.meta" "$STATE/nfqws2.pid" "$MOD/disable"
+cat > "$MOCK/ip6tables" <<'EOF'
+#!/bin/sh
+exit 42
+EOF
+chmod 0755 "$MOCK/ip6tables"
+stop_run=1
+while [ "$stop_run" -le 3 ]; do
+    set +e
+    PATH="$MOCK:$PATH" STATE_DIR="$STATE" Z2_MOCK_LOG="$LOG" \
+        sh "$MOD/zapret2/scripts/zapret-stop.sh" > "$OUT.stop.$stop_run" 2>&1
+    stop_rc=$?
+    set -e
+    [ "$stop_rc" = 0 ] ||
+        fail "stop #$stop_run refused on an unqueryable IPv6 family: $(cat "$OUT.stop.$stop_run")"
+    stop_run=$((stop_run + 1))
+done
 cp "$MOCK/iptables" "$MOCK/ip6tables"
 chmod 0755 "$MOCK/ip6tables"
 

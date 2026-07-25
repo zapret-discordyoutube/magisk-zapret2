@@ -2538,21 +2538,22 @@ cleanup_owned_firewall() {
     result=$?
     [ "$result" = 0 ] || rc=1
     if command -v ip6tables >/dev/null 2>&1; then
-        if z2_fw_tool_available ip6tables; then
+        # One budget, one decision: if the frontend answers at any point — now
+        # or during the persistence probe — tear the family down. A busy
+        # xtables lock is exactly what that budget is for.
+        if z2_fw_tool_available ip6tables || ! firewall_family_persistently_unavailable ip6tables; then
             z2_fw_cleanup_family ip6tables "$baseline_mode" || rc=1
-        elif [ "${CLEANUP_IPV6_OWNERSHIP_EXPECTED:-1}" = 0 ]; then
-            # Our own committed record says this generation never published
-            # IPv6 rules, so an unqueryable frontend cannot be hiding any from
-            # us. An older generation's rules could still be there, and this is
-            # the one thing teardown cannot rule out — say so rather than let
-            # a clean result imply it was checked.
-            FIREWALL_IPV6_SKIPPED_UNPROVEN=1
         else
-            # Otherwise a present frontend whose mangle table cannot be queried
-            # proves nothing: treating an unproven family as clean is exactly
-            # the failure this cleanup exists to prevent.
-            FIREWALL_CLEANUP_PREFLIGHT_ERROR="IPv6 mangle backend is unavailable and IPv6 ownership cannot be disproved"
-            rc=1
+            # This family cannot be proven now, and on this device it cannot be
+            # proven later either. Refusing would fence every teardown until a
+            # reboot — and the next boot would refuse the same way. So skip it
+            # and make the uncertainty travel with the result: the caller
+            # reports it, the committed receipt withholds its verification
+            # claim, and the reboot clears whatever survived.
+            #
+            # No reservation is needed when our own record already proves this
+            # generation published nothing there.
+            [ "${CLEANUP_IPV6_OWNERSHIP_EXPECTED:-1}" = 0 ] || FIREWALL_IPV6_SKIPPED_UNPROVEN=1
         fi
     fi
     return "$rc"
@@ -2950,7 +2951,11 @@ emit_committed_status_v6() {
             owned=0; process=0; active=0
             pid=""; pid_verified=0; pid_start=""; generation=""; owner_verified=0
             ipv4=0; ipv6=0; rules=0; expected=0; ipv4_rules=0; ipv6_rules=0
-            ruleset=1; nfqueue=0; queue_bypass=0
+            # The receipt must not certify more than the snapshot it accompanies:
+            # a teardown that skipped an unqueryable family withheld this claim
+            # there, and asserting it here would hide that from the one channel
+            # the app actually reads after a lifecycle command.
+            ruleset="${STATUS_RULESET_VERIFIED:-1}"; nfqueue=0; queue_bypass=0
             ;;
         *) return 1 ;;
     esac
