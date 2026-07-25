@@ -103,15 +103,16 @@ main() {
         STOP_RUNTIME_OWNED=1
     fi
     STOP_QNUM="${STATUS_FILE_QNUM:-}"
-    # The owner record, else the committed snapshot, decides whether this
-    # generation ever published IPv6 rules; without either, assume it did.
+    # Only an authenticated owner record, or a snapshot whose ruleset was
+    # verified when it was committed, may claim this generation published no
+    # IPv6 rules. An error snapshot records what could not be proven, not a
+    # proof of absence, so it must not license skipping IPv6 teardown.
+    CLEANUP_IPV6_OWNERSHIP_EXPECTED=1
     if [ "$OWNER_STATE_AVAILABLE" = 1 ]; then
         STOP_QNUM="$OWNER_STATE_QNUM"
         CLEANUP_IPV6_OWNERSHIP_EXPECTED="${OWNER_STATE_IPV6_ACTIVE:-1}"
-    elif [ -n "${STATUS_FILE_STATUS:-}" ]; then
+    elif [ -n "${STATUS_FILE_STATUS:-}" ] && [ "${STATUS_FILE_RULESET_VERIFIED:-0}" = 1 ]; then
         CLEANUP_IPV6_OWNERSHIP_EXPECTED="${STATUS_FILE_IPV6_ACTIVE:-1}"
-    else
-        CLEANUP_IPV6_OWNERSHIP_EXPECTED=1
     fi
     if [ -z "$STOP_QNUM" ]; then
         # Neither the committed snapshot nor an owner record carries the queue

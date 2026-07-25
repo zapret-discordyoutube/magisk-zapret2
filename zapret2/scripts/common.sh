@@ -522,8 +522,14 @@ retire_dead_scratch_files() {
     for path in "$@"; do
         { [ -e "$path" ] || [ -L "$path" ]; } || continue
         base="${path##*/}"
-        owner="${base%.error}"
-        owner="${owner##*.}"
+        case "$base" in
+            # Staging names are "<target>.tmp.<pid>" and may carry a token or
+            # nonce after the PID, so the creator is the component that
+            # follows ".tmp." — not the last one.
+            *.tmp.*) owner="${base##*.tmp.}"; owner="${owner%%.*}" ;;
+            # Scratch names end in the creator PID, optionally with ".error".
+            *) owner="${base%.error}"; owner="${owner##*.}" ;;
+        esac
         is_decimal "$owner" && [ "$owner" -gt 0 ] 2>/dev/null || continue
         [ ! -d "/proc/$owner" ] || continue
         rm -rf "$path" 2>/dev/null || return 1

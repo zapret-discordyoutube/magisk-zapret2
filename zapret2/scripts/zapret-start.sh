@@ -330,6 +330,13 @@ write_ok_status() {
 rollback_start() {
     local rc=0
     ROLLBACK_ERRORS=""
+    # This transaction knows exactly which families it published, so it can
+    # tell "IPv6 was never built" from "IPv6 cannot be queried".
+    CLEANUP_IPV6_OWNERSHIP_EXPECTED=1
+    if [ "${IPV6_BUILT:-0}" = 0 ] && [ "${IPV6_ACTIVE:-0}" = 0 ] &&
+       [ "${STATUS_FILE_IPV6_ACTIVE:-0}" = 0 ]; then
+        CLEANUP_IPV6_OWNERSHIP_EXPECTED=0
+    fi
     if [ "$FIREWALL_MUTATED" = 1 ]; then
         cleanup_owned_firewall >/dev/null 2>&1 ||
             { rc=1; ROLLBACK_ERRORS="stable firewall namespace cleanup failed"; }
@@ -349,9 +356,13 @@ rollback_start() {
 firewall_is_clean_after_rollback() {
     command -v iptables >/dev/null 2>&1 || return 1
     owned_family_absent iptables || return 1
-    if command -v ip6tables >/dev/null 2>&1; then owned_family_absent ip6tables || return 1; fi
-    if ! command -v ip6tables >/dev/null 2>&1 &&
-       { [ "${IPV6_BUILT:-0}" = 1 ] || [ "${IPV6_ACTIVE:-0}" = 1 ] || [ "${STATUS_FILE_IPV6_ACTIVE:-0}" = 1 ]; }; then
+    # An unqueryable IPv6 frontend is acceptable only when this transaction
+    # never published IPv6 rules; otherwise absence stays unproven.
+    if command -v ip6tables >/dev/null 2>&1; then
+        owned_family_absent ip6tables ||
+            { [ "${CLEANUP_IPV6_OWNERSHIP_EXPECTED:-1}" = 0 ] && ! z2_fw_tool_available ip6tables; } ||
+            return 1
+    elif [ "${CLEANUP_IPV6_OWNERSHIP_EXPECTED:-1}" = 1 ]; then
         return 1
     fi
     return 0
@@ -390,10 +401,13 @@ snapshot_owned_state() {
             SNAP_ANCHORS=$((SNAP_ANCHORS + 1))
         ip6tables -t mangle -C INPUT -j "$Z2_FW_IN_CHAIN" >/dev/null 2>&1 &&
             SNAP_ANCHORS=$((SNAP_ANCHORS + 1))
-    elif ! command -v ip6tables >/dev/null 2>&1 &&
+    elif { ! command -v ip6tables >/dev/null 2>&1 || ! z2_fw_tool_available ip6tables; } &&
          { [ "${STATUS_FILE_IPV6_ACTIVE:-0}" = 1 ] || [ "${IPV6_BUILT:-0}" = 1 ] || [ "${IPV6_ACTIVE:-0}" = 1 ]; }; then
+        # An unqueryable frontend is not a disproof. Recording ipv6_active=0
+        # here would publish "no IPv6 rules" as a fact, and a later stop reads
+        # this snapshot to decide whether IPv6 needs teardown at all.
         SNAP_IPV6=1
-        DIAGNOSTICS="${DIAGNOSTICS}IPv6 owned-state presence cannot be disproved because ip6tables is unavailable; "
+        DIAGNOSTICS="${DIAGNOSTICS}IPv6 owned-state presence cannot be disproved because the ip6tables mangle table is unavailable; "
     fi
 }
 

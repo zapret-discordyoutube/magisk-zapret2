@@ -405,10 +405,17 @@ preflight_hosts || blocked "hosts overlay or existing backup is unsafe or confli
 load_effective_core_config_readonly >/dev/null 2>&1 || blocked "runtime.ini core values are invalid"
 restore_status_facts
 STOP_QNUM="${STATUS_FILE_QNUM:-${QNUM:-}}"
-CLEANUP_IPV6_OWNERSHIP_EXPECTED="${STATUS_FILE_IPV6_ACTIVE:-1}"
+# Same rule as stop: only an authenticated owner record or a snapshot that was
+# committed with a verified ruleset may claim IPv6 was never published. The
+# status facts default to zero when no snapshot exists, so absence of evidence
+# must not read as evidence of absence.
+CLEANUP_IPV6_OWNERSHIP_EXPECTED=1
+if [ -n "${STATUS_FILE_STATUS:-}" ] && [ "${STATUS_FILE_RULESET_VERIFIED:-0}" = 1 ]; then
+    CLEANUP_IPV6_OWNERSHIP_EXPECTED="$STATUS_FILE_IPV6_ACTIVE"
+fi
 if read_owner_state >/dev/null 2>&1; then
     STOP_QNUM="$OWNER_STATE_QNUM"
-    CLEANUP_IPV6_OWNERSHIP_EXPECTED="${OWNER_STATE_IPV6_ACTIVE:-1}"
+    CLEANUP_IPV6_OWNERSHIP_EXPECTED="$OWNER_STATE_IPV6_ACTIVE"
 fi
 
 arm_runtime_config || failed "cannot atomically disable autostart in runtime.ini"
