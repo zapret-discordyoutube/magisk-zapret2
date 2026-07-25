@@ -32,6 +32,85 @@ esac
 
 Z2_NL='
 '
+Z2_PRINTF_TAB='	'
+
+# Generalizes the z2_emit_line decision to every printf in the module: on mksh
+# each printf is a fork+exec of /system/bin/printf (~45ms on a modern Pixel),
+# and the machine protocol emits dozens per operation. The adapter renders the
+# narrow format dialect this codebase writes — literal text with \t and \n
+# plus at most one %s cycled over the arguments — through the raw print
+# builtin, and forks the real printf for anything outside it. Other shells
+# never see the override: their printf is a builtin already, and print is not
+# portable.
+z2_printf_expand_read() {
+    local rest="$1" out=""
+    Z2_PRINTF_EXPANDED=""
+    while :; do
+        case "$rest" in
+            *'\t'*)
+                out="$out${rest%%'\t'*}$Z2_PRINTF_TAB"
+                rest="${rest#*'\t'}"
+                ;;
+            *) break ;;
+        esac
+    done
+    out="$out$rest"
+    case "$out" in *\\*|*%*) return 1 ;; esac
+    Z2_PRINTF_EXPANDED="$out"
+    return 0
+}
+
+case "${KSH_VERSION:-}" in
+    *KSH*)
+printf() {
+    local fmt="${1-}" before after a
+    [ "$#" -eq 0 ] || shift
+    case "$fmt" in
+        '%s')
+            if [ "$#" -eq 1 ]; then
+                print -nr -- "$1"
+                return 0
+            fi
+            ;;
+        *%s*)
+            before="${fmt%%'%s'*}"
+            after="${fmt#*'%s'}"
+            case "$before$after" in
+                *%*) ;;
+                *)
+                    case "$after" in
+                        *'\n')
+                            if z2_printf_expand_read "$before"; then
+                                before="$Z2_PRINTF_EXPANDED"
+                                if z2_printf_expand_read "${after%'\n'}"; then
+                                    after="$Z2_PRINTF_EXPANDED"
+                                    if [ "$#" -le 1 ]; then
+                                        print -r -- "$before${1-}$after"
+                                    else
+                                        for a in "$@"; do
+                                            print -r -- "$before$a$after"
+                                        done
+                                    fi
+                                    return 0
+                                fi
+                            fi
+                            ;;
+                    esac
+                    ;;
+            esac
+            ;;
+        *%*) ;;
+        *'\n')
+            if [ "$#" -eq 0 ] && z2_printf_expand_read "${fmt%'\n'}"; then
+                print -r -- "$Z2_PRINTF_EXPANDED"
+                return 0
+            fi
+            ;;
+    esac
+    command printf "$fmt" "$@"
+}
+        ;;
+esac
 
 # One PATH probe at load answers every later "is stat available" question:
 # command -v walks the whole PATH on Android (~30ms) and the metadata
@@ -2606,24 +2685,38 @@ read_live_pidfile() {
     return 0
 }
 
+# Death polling needs only the identity dimension the kernel keeps immutable
+# for a live process: pid plus starttime, which the full entry proof already
+# pinned. Re-proving argv/exe every 100 ms paid three to four forks per turn
+# and added nothing — argv and exe cannot change while pid+starttime hold. A
+# zombie drops its cmdline, so the builtin prefix probe doubles as the
+# zombie-transition witness the wait loops must observe.
+stop_target_is_gone() {
+    local pid="$1" start="$2"
+    proc_starttime_read "$pid" 2>/dev/null || return 0
+    [ "$PROC_STARTTIME" = "$start" ] || return 0
+    proc_cmdline_may_match_nfqws "$pid" || return 0
+    return 1
+}
+
 stop_verified_nfqws_pid() {
     local pid="$1" start="$2" expected_argv_sha256="${3:-}" expected_qnum="${4:-}" n=0
     # A stop attempt ends the fact's lifetime: the wait loops below must see
-    # every death, including a zombie transition, with fresh full proofs.
+    # every death, including a zombie transition.
     retire_proven_process_fact
     verify_nfqws_pid "$pid" "$start" "$expected_argv_sha256" "$expected_qnum" || return 2
     kill -TERM "$pid" 2>/dev/null || return 1
     while [ "$n" -lt 50 ]; do
         sleep 0.1
-        verify_nfqws_pid "$pid" "$start" "$expected_argv_sha256" "$expected_qnum" || return 0
+        if stop_target_is_gone "$pid" "$start"; then return 0; fi
         n=$((n + 1))
     done
-    verify_nfqws_pid "$pid" "$start" "$expected_argv_sha256" "$expected_qnum" || return 0
+    if stop_target_is_gone "$pid" "$start"; then return 0; fi
     kill -KILL "$pid" 2>/dev/null || return 1
     n=0
     while [ "$n" -lt 30 ]; do
         sleep 0.1
-        verify_nfqws_pid "$pid" "$start" "$expected_argv_sha256" "$expected_qnum" || return 0
+        if stop_target_is_gone "$pid" "$start"; then return 0; fi
         n=$((n + 1))
     done
     return 1
@@ -2692,21 +2785,44 @@ stop_pidfile_process() {
 }
 
 scan_exact_owned_nfqws() {
-    local procdir pid start restore_noglob=0 cmdline runtime_nfqws2
+    local procdir pid start restore_noglob=0 cmdline runtime_nfqws2 candidates scan_rc
     OWNED_SCAN_PIDS=""
     runtime_nfqws2="${AUDIT_NFQWS2_OVERRIDE:-$NFQWS2}"
-    case "$-" in *f*) restore_noglob=1; set +f ;; esac
-    for procdir in /proc/[0-9]*; do
-        # The prefilter runs for every Android process, so it is inlined down
-        # to its three builtins: readability probe, one read, prefix match
-        # (proc_cmdline_may_match_nfqws documents why a prefix is the most a
-        # NUL-stripped read can prove). The strict identity proof is reserved
-        # for plausible candidates.
-        [ -r "$procdir/cmdline" ] || continue
+    # One pgrep enumeration replaces a shell walk over every Android process
+    # (hundreds to thousands of read iterations). pgrep is only a prefilter:
+    # over-matching is harmless because every candidate still passes the same
+    # prefix read and strict identity proof below, but under-matching is not,
+    # so the fast path is reserved for binary paths whose characters are all
+    # regex-literal (dot over-matches, which is safe), and any pgrep failure
+    # beyond "no matches" falls back to the exhaustive walk.
+    candidates=""
+    scan_rc=2
+    case "$runtime_nfqws2" in
+        ''|*[!A-Za-z0-9/._-]*) ;;
+        *)
+            candidates="$(pgrep -f "^$runtime_nfqws2" 2>/dev/null)"
+            scan_rc=$?
+            ;;
+    esac
+    if [ "$scan_rc" -gt 1 ]; then
+        candidates=""
+        case "$-" in *f*) restore_noglob=1; set +f ;; esac
+        for procdir in /proc/[0-9]*; do
+            candidates="$candidates ${procdir#/proc/}"
+        done
+        [ "$restore_noglob" = 1 ] && set -f
+    fi
+    for pid in $candidates; do
+        is_decimal "$pid" || continue
+        # The prefilter runs for every candidate process, so it is inlined
+        # down to its three builtins: readability probe, one read, prefix
+        # match (proc_cmdline_may_match_nfqws documents why a prefix is the
+        # most a NUL-stripped read can prove). The strict identity proof is
+        # reserved for plausible candidates.
+        [ -r "/proc/$pid/cmdline" ] || continue
         cmdline=""
-        IFS= read -r cmdline < "$procdir/cmdline" 2>/dev/null || [ -n "$cmdline" ] || continue
+        IFS= read -r cmdline < "/proc/$pid/cmdline" 2>/dev/null || [ -n "$cmdline" ] || continue
         case "$cmdline" in "$runtime_nfqws2"*) ;; *) continue ;; esac
-        pid="${procdir#/proc/}"
         proc_starttime_read "$pid" || continue
         start="$PROC_STARTTIME"
         if verify_nfqws_pid "$pid" "$start" "" ""; then
@@ -2714,7 +2830,6 @@ scan_exact_owned_nfqws() {
             else OWNED_SCAN_PIDS="$pid"; fi
         fi
     done
-    [ "$restore_noglob" = 1 ] && set -f
     z2_emit_line "$OWNED_SCAN_PIDS"
 }
 

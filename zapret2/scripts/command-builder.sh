@@ -54,6 +54,13 @@ if [ "${1:-}" = --list-presets-machine ]; then
     ready=0
     quarantined=0
     total=0
+    # One buffered write instead of one printf per preset: on Android mksh
+    # printf is an external binary, and a fork per catalog row made this
+    # bounded listing cost seconds on a real catalog.
+    listing=""
+    row_tab='	'
+    row_nl='
+'
     for preset_file in "$PRESETS_DIR"/*.txt; do
         [ -e "$preset_file" ] || [ -L "$preset_file" ] || continue
         preset_name="${preset_file##*/}"
@@ -72,14 +79,14 @@ if [ "${1:-}" = --list-presets-machine ]; then
         fi
         if [ -z "$reason" ]; then
             ready=$((ready + 1))
-            printf 'Z2_PRESET\tREADY\tOK\t%s\n' "$preset_name"
+            listing="${listing}Z2_PRESET${row_tab}READY${row_tab}OK${row_tab}${preset_name}${row_nl}"
         else
             quarantined=$((quarantined + 1))
-            printf 'Z2_PRESET\tQUARANTINED\t%s\t%s\n' "$reason" "$preset_name"
+            listing="${listing}Z2_PRESET${row_tab}QUARANTINED${row_tab}${reason}${row_tab}${preset_name}${row_nl}"
         fi
     done
-    printf 'Z2_PRESET_SUMMARY\t2\tready=%s\tquarantined=%s\ttotal=%s\n' \
-        "$ready" "$quarantined" "$total"
+    printf '%sZ2_PRESET_SUMMARY\t2\tready=%s\tquarantined=%s\ttotal=%s\n' \
+        "$listing" "$ready" "$quarantined" "$total"
     exit 0
 fi
 
@@ -921,12 +928,28 @@ if [ "$COMMAND_BUILDER_CLI_MODE" -eq 1 ]; then
             [ "$#" -eq 4 ] || { printf 'Z2_PRESET_ERROR\tINVALID_ARGUMENTS\n'; exit 2; }
             load_effective_core_config_readonly || { printf 'Z2_PRESET_ERROR\tRUNTIME_UNAVAILABLE\n'; exit 2; }
             ensure_state_tmp_dir || { printf 'Z2_PRESET_ERROR\tRUNTIME_UNAVAILABLE\n'; exit 2; }
-            artifact="${Z2_STATE_TMP}/preset-preflight.$$"
-            if compile_preset_artifact "$3" "$4" "$artifact" && run_compiled_artifact "$artifact" dry-run >/dev/null 2>&1; then
-                rm -f "$artifact"; printf 'Z2_PRESET_VALIDATION\t1\tOK\t%s\n' "$4"; exit 0
+            # The candidate is compiled into the canonical slot: once the app
+            # publishes the validated candidate under its final name, the
+            # binding (same content identity, same runtime.ini) is current and
+            # the receipt is fresh, so the restart that follows skips its own
+            # compile and dry-run instead of repeating this one. A candidate
+            # that is never published leaves a stale binding behind, which the
+            # next start simply recompiles.
+            state_path_is_managed_file "$COMPILED_ARGV_FILE" || { printf 'Z2_PRESET_ERROR\tRUNTIME_UNAVAILABLE\n'; exit 2; }
+            if compile_preset_artifact "$3" "$4" "$COMPILED_ARGV_FILE"; then
+                if run_compiled_artifact "$COMPILED_ARGV_FILE" dry-run >/dev/null 2>&1; then
+                    # The receipt is an optimization, never a gate: without it
+                    # the restart revalidates exactly as before.
+                    write_compiled_validation_receipt "$COMPILED_ARGV_FILE" || :
+                    printf 'Z2_PRESET_VALIDATION\t1\tOK\t%s\n' "$4"; exit 0
+                fi
+                # The compile replaced the canonical artifact and the dry-run
+                # then refused it; an artifact that never passed validation
+                # must not stay in the slot.
+                rm -f "$COMPILED_ARGV_FILE"
             fi
             [ "$PRESET_VALIDATION_CODE" != OK ] || PRESET_VALIDATION_CODE=NFQWS_DRY_RUN_FAILED
-            rm -f "$artifact"; printf 'Z2_PRESET_VALIDATION\t0\t%s\t%s\n' "$PRESET_VALIDATION_CODE" "$4"; exit 1
+            printf 'Z2_PRESET_VALIDATION\t0\t%s\t%s\n' "$PRESET_VALIDATION_CODE" "$4"; exit 1
             ;;
         --preview-preset-machine)
             [ "$#" -eq 4 ] || { printf 'Z2_PRESET_ERROR\tINVALID_ARGUMENTS\n'; exit 2; }
