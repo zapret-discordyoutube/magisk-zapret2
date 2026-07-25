@@ -129,6 +129,7 @@
     <string name="control_purge_success_unverified">One cleanup step could not be verified: IPv6 firewall rules may still be loaded. The pending reboot removes them.</string>
     <string name="control_purge_failure_title">Complete erase failed</string>
     <string name="control_purge_failure_body">Some data could not be removed safely. Review the diagnostic details below.</string>
+    <string name="control_purge_failure_removal_scheduled">The module itself is still scheduled for removal: the removal marker is already set, so the next reboot deletes it. Install Zapret2 again after that reboot if you want it back.</string>
     <string name="control_purge_reboot_required">Reboot before reinstalling the module.</string>
     <string name="control_purge_failure_unknown">No purge diagnostic was returned.</string>
     <string name="control_service_checking">Checking service status</string>

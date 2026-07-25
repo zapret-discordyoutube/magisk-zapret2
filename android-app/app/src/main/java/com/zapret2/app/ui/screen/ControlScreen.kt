@@ -899,6 +899,16 @@ private fun ModulePurgeResultDialog(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                // The removal fence is published before the module touches anything, so a failing
+                // receipt still leaves the module scheduled for deletion. Reporting only the
+                // failure would let the user expect a module the next boot removes.
+                if (result.moduleRemovalStillScheduled) {
+                    Text(
+                        text = stringResource(R.string.control_purge_failure_removal_scheduled),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 if (result.rebootRequired) {
                     Text(
                         text = stringResource(R.string.control_purge_reboot_required),

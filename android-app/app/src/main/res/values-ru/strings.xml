@@ -129,6 +129,7 @@
     <string name="control_purge_success_unverified">Один шаг очистки не удалось проверить: правила IPv6 могут оставаться загруженными. Перезагрузка их снимет.</string>
     <string name="control_purge_failure_title">Полное удаление не завершено</string>
     <string name="control_purge_failure_body">Часть данных не удалось безопасно удалить. Проверьте диагностические данные ниже.</string>
+    <string name="control_purge_failure_removal_scheduled">Сам модуль всё равно остаётся запланированным к удалению: метка удаления уже выставлена, поэтому следующая перезагрузка его удалит. Если Zapret2 нужен снова, установите модуль заново после этой перезагрузки.</string>
     <string name="control_purge_reboot_required">Перезагрузите устройство перед повторной установкой модуля.</string>
     <string name="control_purge_failure_unknown">Сценарий полного удаления не вернул диагностические данные.</string>
     <string name="control_service_checking">Проверка состояния службы</string>

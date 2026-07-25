@@ -217,15 +217,28 @@ object ModulePurgeController {
             )
         }
         val report = (parsed as ParseResult.Valid).value
-        val outcome = when {
-            report.status == Status.COMPLETE && report.satisfiesCompleteContract && commitCommand.success ->
-                Outcome.COMPLETE
-            report.status == Status.COMPLETE -> Outcome.INVALID_PROTOCOL
-            report.status == Status.PARTIAL -> Outcome.PARTIAL
-            report.status == Status.BLOCKED -> Outcome.BLOCKED
-            else -> Outcome.ERROR
-        }
-        return Result(outcome = outcome, report = report, command = commitCommand)
+        return Result(
+            outcome = classifyReport(report, commitCommand.success),
+            report = report,
+            command = commitCommand,
+        )
+    }
+
+    /**
+     * Grades a parsed receipt against the command that printed it.
+     *
+     * A `complete` record is honoured only when it satisfies its whole contract and its command
+     * agreed; anything else claiming `complete` is a protocol violation. Every other status is
+     * carried through as itself, so [Outcome.PARTIAL] means exactly "the module printed a `partial`
+     * receipt" — which the module reserves for states reached after the removal fence is published.
+     */
+    internal fun classifyReport(report: Report, commandSucceeded: Boolean): Outcome = when {
+        report.status == Status.COMPLETE && report.satisfiesCompleteContract && commandSucceeded ->
+            Outcome.COMPLETE
+        report.status == Status.COMPLETE -> Outcome.INVALID_PROTOCOL
+        report.status == Status.PARTIAL -> Outcome.PARTIAL
+        report.status == Status.BLOCKED -> Outcome.BLOCKED
+        else -> Outcome.ERROR
     }
 
     internal fun parsePrepareOutput(lines: List<String>): ParseResult<PrepareReport> {

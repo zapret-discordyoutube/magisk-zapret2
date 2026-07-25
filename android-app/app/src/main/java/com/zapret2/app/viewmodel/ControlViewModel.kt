@@ -360,6 +360,27 @@ sealed interface ModulePurgeUiState {
             get() = erased && outcome != ModulePurgeController.Outcome.COMPLETE
 
         /**
+         * Whether the module is still on its way out even though this result is reported as a
+         * failure.
+         *
+         * `commit` publishes the durable `$MODDIR/remove` fence before it touches a single tree, so
+         * every receipt printed after that point describes a module the root manager deletes at the
+         * next boot no matter what else failed. The module reserves the `partial` status for
+         * exactly those post-fence states — every rejection that happens before the fence is
+         * published reports `blocked` or `error` — and [ModulePurgeController.Outcome.PARTIAL] is
+         * set for exactly a `partial` receipt, so this is the app's honest, fail-closed reading of
+         * "the fence is already up". [rebootRequired] is a belt on the same fact: a partial receipt
+         * always demands the reboot that completes the removal.
+         *
+         * Without it the failure dialog says only that something could not be removed, and the user
+         * concludes the module survived — while the next boot deletes it out from under them.
+         */
+        val moduleRemovalStillScheduled: Boolean
+            get() = !erased &&
+                outcome == ModulePurgeController.Outcome.PARTIAL &&
+                rebootRequired
+
+        /**
          * Whether the dialog shows what the module and the transport actually said, on the erased
          * path as much as the failing one. See [FullRollbackUiState.Result.showsDiagnostic]: the
          * static reservation above it names the single unproven firewall family and nothing else.
@@ -379,6 +400,9 @@ sealed interface ModulePurgeUiState {
  * would show a READY module with a version and live start/stop/update/purge controls that reach
  * nothing, and nothing would correct it for the lifetime of the ViewModel: the environment is
  * reconciled once, from `loadInitialState()`.
+ *
+ * The reset also arms [ControlUiState.modulePurgeCompleted], which makes it terminal for the
+ * session. See [withModuleStatusPublication].
  */
 internal fun ControlUiState.afterModulePurge(result: ModulePurgeController.Result): ControlUiState =
     if (!result.moduleFullyRemoved) {
@@ -396,8 +420,41 @@ internal fun ControlUiState.afterModulePurge(result: ModulePurgeController.Resul
             hasAuthoritativeRuntimeSettings = false,
             iptablesActive = false,
             nfqueueRulesCount = 0,
+            modulePurgeCompleted = true,
         )
     }
+
+/**
+ * Applies a module status/environment publication unless this session already erased the module.
+ *
+ * [afterModulePurge] is not the last write the screen sees. A status read that was already in
+ * flight when the purge committed still holds the pre-purge environment it sampled — the refresh
+ * sequence counter only retires *older* reads, and the purge does not participate in it — and every
+ * later read (pull-to-refresh, the settlement observer, a re-entered screen, `loadInitialState`)
+ * is free to run once the exclusive-action latch is released. Any of them would republish a READY
+ * module with its version and live controls over the reset, and the user would be looking at a
+ * module that no longer exists.
+ *
+ * So the erase is terminal for the session, deterministically: the verdict lives in the state
+ * itself, every publication is applied through this gate against the *current* state rather than a
+ * sampled one, and no timeout is involved. It cannot be un-armed either — nothing can reinstall the
+ * module into a process whose purge script was deleted along with it, so only a fresh process may
+ * describe a module again.
+ */
+internal fun ControlUiState.withModuleStatusPublication(
+    publish: ControlUiState.() -> ControlUiState,
+): ControlUiState = if (modulePurgeCompleted) this else publish()
+
+/** The single projection of a purge receipt onto the result dialog's state. */
+internal fun modulePurgeResultState(
+    result: ModulePurgeController.Result,
+    diagnostic: String,
+): ModulePurgeUiState.Result = ModulePurgeUiState.Result(
+    outcome = result.outcome,
+    erased = result.erased,
+    rebootRequired = result.rebootRequired,
+    diagnostic = diagnostic,
+)
 
 internal object FullRollbackAvailabilityPolicy {
     fun isAvailable(
@@ -450,6 +507,14 @@ data class ControlUiState(
     val errorDialog: ControlErrorDialog? = null,
     val fullRollback: FullRollbackUiState = FullRollbackUiState.Idle,
     val modulePurge: ModulePurgeUiState = ModulePurgeUiState.Idle,
+    /**
+     * Session-terminal: an erase that removed the module already happened in this process.
+     *
+     * Deliberately not persisted. A successful purge clears the app's own saved state along with
+     * the module, and a fresh process reconciles the environment from scratch, so the flag only has
+     * to outlive the status reads of the process that erased the module.
+     */
+    val modulePurgeCompleted: Boolean = false,
     val lastResult: ControlLastResult? = null,
     val message: UiText? = null,
 ) {
@@ -1199,12 +1264,7 @@ class ControlViewModel @Inject constructor(
                 updateRelease = null,
                 errorDialog = null,
                 fullRollback = FullRollbackUiState.Idle,
-                modulePurge = ModulePurgeUiState.Result(
-                    outcome = result.outcome,
-                    erased = erased,
-                    rebootRequired = result.rebootRequired,
-                    diagnostic = diagnostic,
-                ),
+                modulePurge = modulePurgeResultState(result, diagnostic),
                 lastResult = lastResult,
             )
         }
@@ -1345,19 +1405,25 @@ class ControlViewModel @Inject constructor(
                 }
 
                 _uiState.update { state ->
-                    state.copy(
-                        hasRootAccess = rootAccess.granted,
-                        rootAccessState = rootAccess.state,
-                        moduleInstallState = environment?.activeState ?: ModuleInstallState.UNKNOWN,
-                        pendingModuleState = environment?.pendingState ?: PendingModuleState.NONE,
-                        moduleMutationState = ModuleMutationState.IDLE,
-                        nfqueueSupported = environment?.nfqueueSupported == true,
-                        moduleVersion = environment?.displayedVersion.orEmpty(),
-                        autostart = coreValues["autostart"] != "0",
-                        hasAuthoritativeRuntimeSettings = stableModuleConfig,
-                        moduleDiagnostic = runtimeMutationDiagnostic,
-                        showQuicBanner = showQuicBanner,
-                    )
+                    // Initialization can still be in flight when a restored purge commits, and its
+                    // environment is the pre-purge one it probed. Same gate as every status read.
+                    state.withModuleStatusPublication {
+                        copy(
+                            hasRootAccess = rootAccess.granted,
+                            rootAccessState = rootAccess.state,
+                            moduleInstallState = environment?.activeState
+                                ?: ModuleInstallState.UNKNOWN,
+                            pendingModuleState = environment?.pendingState
+                                ?: PendingModuleState.NONE,
+                            moduleMutationState = ModuleMutationState.IDLE,
+                            nfqueueSupported = environment?.nfqueueSupported == true,
+                            moduleVersion = environment?.displayedVersion.orEmpty(),
+                            autostart = coreValues["autostart"] != "0",
+                            hasAuthoritativeRuntimeSettings = stableModuleConfig,
+                            moduleDiagnostic = runtimeMutationDiagnostic,
+                            showQuicBanner = showQuicBanner,
+                        )
+                    }
                 }
 
                 if (!wifiOnlyNormalized) {
@@ -1370,17 +1436,22 @@ class ControlViewModel @Inject constructor(
             } catch (error: Exception) {
                 val rootState = detectedRootState
                     ?: ServiceLifecycleController.RootAccessState.SHELL_FAILURE
-                _uiState.update {
-                    it.copy(
-                        hasRootAccess = rootState == ServiceLifecycleController.RootAccessState.GRANTED,
-                        rootAccessState = rootState,
-                        hasAuthoritativeRuntimeSettings = false,
-                        status = if (rootState == ServiceLifecycleController.RootAccessState.GRANTED) {
-                            ControlStatus.UNAVAILABLE
-                        } else {
-                            rootState.toControlStatus()
-                        },
-                    )
+                _uiState.update { current ->
+                    current.withModuleStatusPublication {
+                        copy(
+                            hasRootAccess =
+                                rootState == ServiceLifecycleController.RootAccessState.GRANTED,
+                            rootAccessState = rootState,
+                            hasAuthoritativeRuntimeSettings = false,
+                            status = if (
+                                rootState == ServiceLifecycleController.RootAccessState.GRANTED
+                            ) {
+                                ControlStatus.UNAVAILABLE
+                            } else {
+                                rootState.toControlStatus()
+                            },
+                        )
+                    }
                 }
                 showErrorDialog(
                     kind = ControlErrorKind.INITIALIZATION,
@@ -1406,12 +1477,14 @@ class ControlViewModel @Inject constructor(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            _uiState.update {
-                it.copy(
-                    isRunning = false,
-                    status = ControlStatus.UNAVAILABLE,
-                    iptablesActive = false,
-                )
+            _uiState.update { current ->
+                current.withModuleStatusPublication {
+                    copy(
+                        isRunning = false,
+                        status = ControlStatus.UNAVAILABLE,
+                        iptablesActive = false,
+                    )
+                }
             }
             null
         }
@@ -1421,6 +1494,13 @@ class ControlViewModel @Inject constructor(
         val isRunning: Boolean,
         val canStopService: Boolean,
         val moduleMutationState: ModuleMutationState,
+    )
+
+    /** What every status read reports once the module this session erased is gone for good. */
+    private fun purgedServiceSnapshot(): ServiceSnapshot = ServiceSnapshot(
+        isRunning = false,
+        canStopService = false,
+        moduleMutationState = ModuleMutationState.IDLE,
     )
 
     private suspend fun checkStatus(): ServiceSnapshot {
@@ -1433,8 +1513,12 @@ class ControlViewModel @Inject constructor(
      * coordinator while restarting, and a reverse wait here would deadlock observation against saves.
      * Installation metadata is retained from the initialization/publication boundary; an ordinary
      * status read consumes only the module's typed lifecycle snapshot.
+     * Once this session erased the module there is nothing left to read — the module's own status
+     * script went with it — so the read is skipped outright and every publication below stays
+     * gated on [withModuleStatusPublication] for the read that was already in flight.
      */
     private suspend fun refreshStatus(): ServiceSnapshot {
+        if (_uiState.value.modulePurgeCompleted) return purgedServiceSnapshot()
         val refreshId = statusRefreshSequence.incrementAndGet()
         val cachedEnvironment = _uiState.value
         val environment = ModuleEnvironmentSnapshot(
@@ -1447,26 +1531,30 @@ class ControlViewModel @Inject constructor(
         val statusWithoutQuery = environment.serviceAccess.statusWithoutQuery()
         if (statusWithoutQuery != null) {
             if (refreshId == statusRefreshSequence.get()) {
-                _uiState.update {
-                    it.copy(
-                        isRunning = false,
-                        canStopService = false,
-                        status = statusWithoutQuery,
-                        networkType = UiText.Resource(networkStatsManager.getNetworkType().labelRes),
-                        uptime = "",
-                        iptablesActive = false,
-                        nfqueueRulesCount = 0,
-                        iptablesDetail = NetworkStatsManager.IptablesDetail(),
-                        processStats = ProcessStats(),
-                        hasRootAccess = cachedEnvironment.hasRootAccess,
-                        rootAccessState = cachedEnvironment.rootAccessState,
-                        moduleInstallState = environment.activeState,
-                        pendingModuleState = environment.pendingState,
-                        moduleMutationState = ModuleMutationState.IDLE,
-                        moduleVersion = environment.displayedVersion,
-                        nfqueueSupported = environment.nfqueueSupported,
-                        hasAuthoritativeRuntimeSettings = false,
-                    )
+                _uiState.update { current ->
+                    current.withModuleStatusPublication {
+                        copy(
+                            isRunning = false,
+                            canStopService = false,
+                            status = statusWithoutQuery,
+                            networkType = UiText.Resource(
+                                networkStatsManager.getNetworkType().labelRes,
+                            ),
+                            uptime = "",
+                            iptablesActive = false,
+                            nfqueueRulesCount = 0,
+                            iptablesDetail = NetworkStatsManager.IptablesDetail(),
+                            processStats = ProcessStats(),
+                            hasRootAccess = cachedEnvironment.hasRootAccess,
+                            rootAccessState = cachedEnvironment.rootAccessState,
+                            moduleInstallState = environment.activeState,
+                            pendingModuleState = environment.pendingState,
+                            moduleMutationState = ModuleMutationState.IDLE,
+                            moduleVersion = environment.displayedVersion,
+                            nfqueueSupported = environment.nfqueueSupported,
+                            hasAuthoritativeRuntimeSettings = false,
+                        )
+                    }
                 }
             }
             return ServiceSnapshot(
@@ -1485,23 +1573,25 @@ class ControlViewModel @Inject constructor(
                 networkStatsManager.getNetworkType().labelRes,
             )
             if (publishResult) {
-                _uiState.update {
-                    it.copy(
-                        status = projectedControlStatus(
-                            serviceStatus = serviceStatus,
-                            canStopService = current.canStopService,
-                        ),
-                        hasRootAccess = serviceStatus.rootGranted,
-                        rootAccessState = serviceStatus.rootAccessState,
-                        moduleInstallState = environment.activeState,
-                        pendingModuleState = environment.pendingState,
-                        moduleMutationState = lifecycleMutationState,
-                        moduleVersion = environment.displayedVersion,
-                        nfqueueSupported = environment.nfqueueSupported,
-                        hasAuthoritativeRuntimeSettings = false,
-                        moduleDiagnostic = projectedLifecycleDiagnostic(serviceStatus),
-                        networkType = currentNetworkType,
-                    )
+                _uiState.update { latest ->
+                    latest.withModuleStatusPublication {
+                        copy(
+                            status = projectedControlStatus(
+                                serviceStatus = serviceStatus,
+                                canStopService = current.canStopService,
+                            ),
+                            hasRootAccess = serviceStatus.rootGranted,
+                            rootAccessState = serviceStatus.rootAccessState,
+                            moduleInstallState = environment.activeState,
+                            pendingModuleState = environment.pendingState,
+                            moduleMutationState = lifecycleMutationState,
+                            moduleVersion = environment.displayedVersion,
+                            nfqueueSupported = environment.nfqueueSupported,
+                            hasAuthoritativeRuntimeSettings = false,
+                            moduleDiagnostic = projectedLifecycleDiagnostic(serviceStatus),
+                            networkType = currentNetworkType,
+                        )
+                    }
                 }
             }
             if (
@@ -1543,32 +1633,34 @@ class ControlViewModel @Inject constructor(
         )
         if (refreshId == statusRefreshSequence.get()) {
             _uiState.update { current ->
-                current.copy(
-                    isRunning = isRunning,
-                    canStopService = canStopService,
-                    status = status,
-                    uptime = processStats.uptime,
-                    networkType = UiText.Resource(netStats.networkType.labelRes),
-                    iptablesActive = serviceStatus.iptablesActive,
-                    nfqueueRulesCount = effectiveRulesCount,
-                    iptablesDetail = detail,
-                    processStats = processStats,
-                    hasRootAccess = serviceStatus.rootGranted,
-                    rootAccessState = serviceStatus.rootAccessState,
-                    moduleInstallState = environment.activeState,
-                    pendingModuleState = environment.pendingState,
-                    moduleMutationState = lifecycleMutationState,
-                    moduleVersion = environment.displayedVersion,
-                    nfqueueSupported = environment.nfqueueSupported,
-                    hasAuthoritativeRuntimeSettings = current.hasAuthoritativeRuntimeSettings &&
-                        environment.activeState == ModuleInstallState.READY &&
-                        lifecycleMutationState == ModuleMutationState.IDLE,
-                    moduleDiagnostic = projectedLifecycleDiagnostic(serviceStatus)
-                        ?: current.moduleDiagnostic.takeUnless {
-                            serviceStatus.metadataComplete &&
-                                current.hasAuthoritativeRuntimeSettings
-                        },
-                )
+                current.withModuleStatusPublication {
+                    copy(
+                        isRunning = isRunning,
+                        canStopService = canStopService,
+                        status = status,
+                        uptime = processStats.uptime,
+                        networkType = UiText.Resource(netStats.networkType.labelRes),
+                        iptablesActive = serviceStatus.iptablesActive,
+                        nfqueueRulesCount = effectiveRulesCount,
+                        iptablesDetail = detail,
+                        processStats = processStats,
+                        hasRootAccess = serviceStatus.rootGranted,
+                        rootAccessState = serviceStatus.rootAccessState,
+                        moduleInstallState = environment.activeState,
+                        pendingModuleState = environment.pendingState,
+                        moduleMutationState = lifecycleMutationState,
+                        moduleVersion = environment.displayedVersion,
+                        nfqueueSupported = environment.nfqueueSupported,
+                        hasAuthoritativeRuntimeSettings = current.hasAuthoritativeRuntimeSettings &&
+                            environment.activeState == ModuleInstallState.READY &&
+                            lifecycleMutationState == ModuleMutationState.IDLE,
+                        moduleDiagnostic = projectedLifecycleDiagnostic(serviceStatus)
+                            ?: current.moduleDiagnostic.takeUnless {
+                                serviceStatus.metadataComplete &&
+                                    current.hasAuthoritativeRuntimeSettings
+                            },
+                    )
+                }
             }
         }
 

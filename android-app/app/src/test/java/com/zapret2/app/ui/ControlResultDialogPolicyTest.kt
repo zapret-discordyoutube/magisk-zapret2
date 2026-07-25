@@ -45,6 +45,29 @@ class ControlResultDialogPolicyTest {
         }
     }
 
+    /**
+     * The purge publishes the durable module-removal fence before it deletes anything, so a receipt
+     * that reports a failure afterwards still describes a module the next boot deletes. The dialog
+     * is the only place the user learns that, and it must read the state model's verdict rather
+     * than inventing its own.
+     */
+    @Test
+    fun failedPurgeDialogStatesThatTheModuleIsStillScheduledForRemoval() {
+        val body = productionFile("ui/screen/ControlScreen.kt")
+            .readText()
+            .substringAfter("private fun ModulePurgeResultDialog(")
+            .substringBefore("\n@Composable")
+
+        assertTrue(
+            "the purge result dialog stopped naming the pending module removal",
+            body.contains("R.string.control_purge_failure_removal_scheduled"),
+        )
+        assertTrue(
+            "the pending-removal sentence must be gated on the state model's verdict",
+            body.contains("if (result.moduleRemovalStillScheduled) {"),
+        )
+    }
+
     private fun productionFile(relativePath: String): File = repositoryPath(
         "android-app/app/src/main/java/com/zapret2/app/$relativePath",
     )
