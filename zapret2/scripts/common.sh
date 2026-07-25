@@ -258,10 +258,12 @@ ensure_state_tmp_dir() {
     fi
     # Validate unconditionally: a losing mkdir race must never be accepted on
     # the strength of [ -d ] alone, which follows a symlink planted between
-    # the existence test and the mkdir.
+    # the existence test and the mkdir. chmod and stat follow symlinks too, so
+    # re-assert the identity afterwards rather than trusting the pre-check.
+    [ -d "$Z2_STATE_TMP" ] && [ ! -L "$Z2_STATE_TMP" ] || return 1
+    chmod 0700 "$Z2_STATE_TMP" 2>/dev/null || return 1
     [ -d "$Z2_STATE_TMP" ] && [ ! -L "$Z2_STATE_TMP" ] || return 1
     path_uid_is_root "$Z2_STATE_TMP" || return 1
-    chmod 0700 "$Z2_STATE_TMP" 2>/dev/null || return 1
 }
 
 state_file_is_secure() {
@@ -330,10 +332,13 @@ INSTALL_META_ARCHIVE_SHA256=""
 INSTALL_META_CACHED_PATH=""
 read_install_generation_meta() {
     local path="${1:-$INSTALL_GENERATION_META}" key value version="" module="" generation="" archive="" seen="" size
-    # The generation record is written once by the installer and is immutable
-    # for the lifetime of this process; one authenticated read per transaction
-    # is sufficient.
+    # The installer writes this record once and nothing rewrites it while the
+    # module runs, so the parse is cached. The path checks are cheap and are
+    # repeated on every call: callers use this as a postcondition, and a
+    # postcondition that skips verification is not one.
     if [ -n "$INSTALL_META_CACHED_PATH" ] && [ "$INSTALL_META_CACHED_PATH" = "$path" ]; then
+        [ -f "$path" ] && [ ! -L "$path" ] && path_uid_is_root "$path" &&
+            path_mode_is_0600 "$path" && path_nlink_is_one "$path" || return 1
         return 0
     fi
     INSTALL_META_GENERATION=""; INSTALL_META_ARCHIVE_SHA256=""; INSTALL_META_CACHED_PATH=""
@@ -489,14 +494,34 @@ retire_obsolete_state_artifacts() {
         { [ -e "$path" ] || [ -L "$path" ]; } || continue
         rm -f "$path" 2>/dev/null || return 1
     done
-    # Previous-boot scratch cannot belong to any live operation. The sweep is
-    # confined to recover_boot_stale_runtime_state, the only setter of this
-    # flag, so a concurrent app-side preset preview is never raced during
-    # ordinary runtime audits.
     if [ "${BOOT_STALE_RUNTIME_RECOVERY:-0}" = 1 ] &&
        { [ -e "$Z2_STATE_TMP" ] || [ -L "$Z2_STATE_TMP" ]; }; then
         rm -rf "$Z2_STATE_TMP" 2>/dev/null || return 1
+        return 0
     fi
+    retire_dead_scratch_files
+}
+
+# Scratch names all end in the PID of the process that created them, and the
+# writers refuse a path that already exists — so residue from a killed
+# operation would fence the next firewall transaction forever. Removing only
+# entries whose creator is gone keeps a concurrent preset preview, which holds
+# no lifecycle lock, safe.
+retire_dead_scratch_files() {
+    local path base owner restore_noglob=0
+    [ -d "$Z2_STATE_TMP" ] && [ ! -L "$Z2_STATE_TMP" ] || return 0
+    case "$-" in *f*) restore_noglob=1; set +f;; esac
+    set -- "$Z2_STATE_TMP"/*
+    [ "$restore_noglob" = 1 ] && set -f
+    for path in "$@"; do
+        { [ -e "$path" ] || [ -L "$path" ]; } || continue
+        base="${path##*/}"
+        owner="${base%.error}"
+        owner="${owner##*.}"
+        is_decimal "$owner" && [ "$owner" -gt 0 ] 2>/dev/null || continue
+        [ ! -d "/proc/$owner" ] || continue
+        rm -rf "$path" 2>/dev/null || return 1
+    done
     return 0
 }
 
@@ -2621,6 +2646,7 @@ read_iptables_status() {
     STATUS_FILE_ERROR_SCHEMA=0; STATUS_FILE_ERROR_STATUS=OK
     STATUS_FILE_ERROR_DOMAIN=NONE; STATUS_FILE_ERROR_CODE=NONE
     STATUS_FILE_ERROR_STAGE=NONE; STATUS_FILE_ERROR_DETAIL=""
+    STATUS_FILE_BOOT_ID=""
     [ "$path" = "$IPTABLES_STATUS" ] || return 1
     if [ "${OBSERVER_STATE_DIR_VERIFIED:-0}" = 1 ]; then
         observer_state_file_is_secure "$path" && [ -r "$path" ] || return 1
@@ -2651,6 +2677,7 @@ read_iptables_status() {
             own_pid_starttime) STATUS_FILE_OWN_PID_STARTTIME="$value" ;;
             own_argv_sha256) STATUS_FILE_OWN_ARGV_SHA256="$value" ;;
             owner_generation) STATUS_FILE_OWNER_GENERATION="$value" ;;
+            boot_id) STATUS_FILE_BOOT_ID="$value" ;;
             diagnostics) STATUS_FILE_DIAGNOSTICS="$value" ;;
             error_schema) STATUS_FILE_ERROR_SCHEMA="$value" ;;
             error_status) STATUS_FILE_ERROR_STATUS="$value" ;;
@@ -2660,6 +2687,12 @@ read_iptables_status() {
             error_detail) STATUS_FILE_ERROR_DETAIL="$value" ;;
         esac
     done < "$path"
+    # The snapshot describes processes and netfilter objects that a reboot
+    # destroys, so one from an earlier boot is not stale data to reconcile —
+    # it describes nothing that exists. Reject it here and every consumer is
+    # correct without needing a separate retirement pass.
+    read_current_boot_id || return 1
+    [ "$STATUS_FILE_BOOT_ID" = "$CURRENT_BOOT_ID" ] || return 1
     normalize_qnum "$STATUS_FILE_QNUM" && STATUS_FILE_QNUM="$QNUM_NORMALIZED" || STATUS_FILE_QNUM=""
     for value in "$STATUS_FILE_RULES_TOTAL" "$STATUS_FILE_IPV4_RULES" \
         "$STATUS_FILE_IPV6_RULES" "$STATUS_FILE_RULES_EXPECTED" \
@@ -2717,11 +2750,13 @@ write_iptables_status() {
         "$error_detail" ||
         return 1
     ensure_state_dir || return 1
+    read_current_boot_id || return 1
     state_file_target_is_safe "$IPTABLES_STATUS" || return 1
     [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || return 1
     umask 077
     {
         echo "status=$state"
+        echo "boot_id=$CURRENT_BOOT_ID"
         echo "timestamp=$(date '+%Y-%m-%d %H:%M:%S')"
         echo "rules_ok=${STATUS_RULES_OK:-0}"
         echo "rules_fail=${STATUS_RULES_FAIL:-0}"

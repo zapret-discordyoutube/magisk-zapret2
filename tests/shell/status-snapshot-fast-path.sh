@@ -29,6 +29,7 @@ write_snapshot() {
     argv_sha="$1"
     cat > "$STATE/status.snapshot" <<EOF
 status=ok
+boot_id=$(cat /proc/sys/kernel/random/boot_id)
 rules_total=2
 own_pid=$NFQWS_PID
 own_pid_starttime=$NFQWS_START

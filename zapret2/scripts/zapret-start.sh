@@ -186,6 +186,9 @@ prepare_options() {
     fi
     # The Android app renders this mirror of the exact daemon command line on
     # its logs screen; no shell code reads it back.
+    state_path_is_managed_file "$CMDLINE_FILE.tmp.$$" || return 1
+    rm -f "$CMDLINE_FILE.tmp.$$" 2>/dev/null
+    [ ! -e "$CMDLINE_FILE.tmp.$$" ] && [ ! -L "$CMDLINE_FILE.tmp.$$" ] || return 1
     {
         printf '%s\n' "$NFQWS2"
         printf '%s\n' '--daemon' "--pidfile=$PIDFILE"

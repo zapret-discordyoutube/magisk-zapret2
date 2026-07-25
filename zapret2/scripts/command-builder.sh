@@ -400,16 +400,13 @@ validate_preset_file() {
 }
 
 collect_capture_ports() {
-    local preset_file="$1" output extra ports_valid=1
-    if [ -n "${STATE_DIR:-}" ] && command -v ensure_state_tmp_dir >/dev/null 2>&1; then
-        # Fail closed: when the authenticated scratch directory is unavailable
-        # this must not silently fall back to a caller-controlled TMPDIR.
-        ensure_state_tmp_dir || return 1
-        output="$STATE_DIR/tmp/z2-ports.$$"
-    else
-        output="${TMPDIR:-/tmp}/z2-ports.$$"
-    fi
-    awk '
+    # The port union is two short lines, so it is carried in shell variables
+    # instead of a scratch file: a file here would need its own symlink and
+    # existence guards, and the awk output never justified that surface.
+    local preset_file="$1" captured rest newline
+    newline='
+'
+    captured="$(awk '
         function add_interval(family, first, last) {
             if (family == "tcp") {
                 tcp_count++; tcp_first[tcp_count]=first+0; tcp_last[tcp_count]=last+0
@@ -480,17 +477,21 @@ collect_capture_ports() {
         }
         END {
             flush_profile()
-            print normalize(tcp_first, tcp_last, tcp_count)
-            print normalize(udp_first, udp_last, udp_count)
+            # Key each line so an empty union stays distinguishable after
+            # command substitution strips trailing newlines.
+            print "tcp=" normalize(tcp_first, tcp_last, tcp_count)
+            print "udp=" normalize(udp_first, udp_last, udp_count)
         }
-    ' "$preset_file" > "$output" || { rm -f "$output"; return 1; }
-    {
-        IFS= read -r COMPILED_TCP_PORTS || ports_valid=0
-        IFS= read -r COMPILED_UDP_PORTS || ports_valid=0
-        if IFS= read -r extra; then ports_valid=0; fi
-    } < "$output"
-    rm -f "$output"
-    [ "$ports_valid" = 1 ] || return 1
+    ' "$preset_file")" || return 1
+    case "$captured" in
+        "tcp="*"$newline""udp="*) ;;
+        *) return 1 ;;
+    esac
+    rest="${captured#*"$newline"}"
+    case "$rest" in *"$newline"*) return 1 ;; esac
+    COMPILED_TCP_PORTS="${captured%%"$newline"*}"
+    COMPILED_TCP_PORTS="${COMPILED_TCP_PORTS#tcp=}"
+    COMPILED_UDP_PORTS="${rest#udp=}"
     [ -n "$COMPILED_TCP_PORTS$COMPILED_UDP_PORTS" ] || {
         preset_validation_fail NO_ENABLED_PROFILE
         return 1

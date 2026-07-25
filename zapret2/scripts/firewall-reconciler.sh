@@ -122,6 +122,7 @@ z2_fw_ensure_scratch_dir() {
     fi
     [ -d "$STATE_DIR/tmp" ] && [ ! -L "$STATE_DIR/tmp" ] || return 1
     chmod 0700 "$STATE_DIR/tmp" 2>/dev/null || return 1
+    [ -d "$STATE_DIR/tmp" ] && [ ! -L "$STATE_DIR/tmp" ] || return 1
 }
 
 z2_fw_run_restore() {

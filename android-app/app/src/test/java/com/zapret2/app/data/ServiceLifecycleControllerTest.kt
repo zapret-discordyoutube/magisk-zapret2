@@ -317,6 +317,44 @@ class ServiceLifecycleControllerTest {
         }
 
     @Test
+    fun statusObservation_neverLosesAnInvalidationRaisedWhileTheCascadeIsStillRunning() =
+        runBlocking {
+            ServiceLifecycleController.invalidateStatusProtocolNegotiation()
+            val requested = mutableListOf<Int>()
+            var invalidateWhileProbing = false
+            val probe: suspend (Int) -> ServiceLifecycleController.CommandResult = { version ->
+                requested += version
+                when (version) {
+                    5 -> {
+                        // The installation authority observes a replaced package after this
+                        // cascade started but before its result is published. An installed script
+                        // still answers every older flag, so the retired result must not survive.
+                        if (invalidateWhileProbing) {
+                            ServiceLifecycleController.invalidateStatusProtocolNegotiation()
+                        }
+                        stoppedPayload(version)
+                    }
+                    else -> unsupportedProtocolResult()
+                }
+            }
+
+            invalidateWhileProbing = true
+            assertTrue(ServiceLifecycleController.observeNegotiatedStatus(probe).fullyStopped)
+            assertEquals(listOf(6, 5), requested)
+
+            invalidateWhileProbing = false
+            requested.clear()
+            assertTrue(ServiceLifecycleController.observeNegotiatedStatus(probe).fullyStopped)
+            assertEquals(listOf(6, 5), requested)
+
+            requested.clear()
+            assertTrue(ServiceLifecycleController.observeNegotiatedStatus(probe).fullyStopped)
+            assertEquals(listOf(5), requested)
+
+            ServiceLifecycleController.invalidateStatusProtocolNegotiation()
+        }
+
+    @Test
     fun statusObservation_neverRemembersAProtocolThatAnsweredAnIncompletePayload() = runBlocking {
         ServiceLifecycleController.invalidateStatusProtocolNegotiation()
         val requested = mutableListOf<Int>()

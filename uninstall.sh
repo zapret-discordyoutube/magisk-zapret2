@@ -489,13 +489,7 @@ manager_removal_marker_is_exact() {
 }
 
 manager_remove_all_owned_state() {
-    local tool pending_nfqws="$PENDING_MODPATH/zapret2/nfqws2"
-    [ -f "$PURGE_CONTRACT" ] && [ ! -L "$PURGE_CONTRACT" ] || {
-        report_error "Root-manager removal cleanup contract is unavailable"
-        return 1
-    }
-    . "$PURGE_CONTRACT" || return 1
-
+    local rc
     # This branch also runs from the Action purge while the device is up, so a
     # lifecycle transaction may be mid-flight. Removing its state directory —
     # including the lock it holds — would let that transaction republish a
@@ -506,12 +500,35 @@ manager_remove_all_owned_state() {
         :
     else
         classify_lifecycle_lock
-        if [ "$LIFECYCLE_OBSERVED_STATE" = active ]; then
-            report_error "A live Zapret2 lifecycle transaction owns the module; removal was refused"
-            return 1
-        fi
-        report_warning "Lifecycle lock is stale or unreadable; continuing root-manager removal"
+        case "$LIFECYCLE_OBSERVED_STATE" in
+            idle|stale) ;;
+            *)
+                report_error "A live or unauthenticated Zapret2 lifecycle owner holds the module; removal was refused"
+                return 1
+                ;;
+        esac
+        report_warning "Lifecycle lock is stale; continuing root-manager removal"
     fi
+    manager_remove_locked_state
+    rc=$?
+    # The success path removed the state directory together with the lock it
+    # published; on failure the lock must not outlive this process, or every
+    # later observation reports a recovery barrier against a dead owner.
+    if [ "$rc" -ne 0 ] && [ "${LOCK_HELD:-0}" = 1 ] &&
+       { [ -e "$LIFECYCLE_LOCK" ] || [ -L "$LIFECYCLE_LOCK" ]; }; then
+        release_lifecycle_lock >/dev/null 2>&1 || true
+    fi
+    LOCK_HELD=0
+    return "$rc"
+}
+
+manager_remove_locked_state() {
+    local tool pending_nfqws="$PENDING_MODPATH/zapret2/nfqws2"
+    [ -f "$PURGE_CONTRACT" ] && [ ! -L "$PURGE_CONTRACT" ] || {
+        report_error "Root-manager removal cleanup contract is unavailable"
+        return 1
+    }
+    . "$PURGE_CONTRACT" || return 1
 
     # The root-owned empty module remove marker is the durable global fence.
     # zapret-start and every mutation entry refuse work while it exists, so no

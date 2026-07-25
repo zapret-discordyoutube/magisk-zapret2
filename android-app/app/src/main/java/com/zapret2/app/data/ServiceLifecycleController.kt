@@ -10,6 +10,8 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Single entry point for root-backed Zapret2 lifecycle operations in the app process.
@@ -32,15 +34,31 @@ object ServiceLifecycleController {
     /** Machine status protocols, newest first; older entries exist only for older module packages. */
     private val statusProtocolCascade = listOf(6, 5, 4, 3, 1)
 
+    private data class NegotiatedStatusProtocol(val version: Int, val generation: Long)
+
     /**
-     * Protocol the installed status script last answered with, or null while it is unknown.
+     * Generation of the installed package the negotiation cache is allowed to describe.
      *
-     * Negotiation writes happen under [lifecycleMutex], but invalidation may arrive from any
-     * caller, so the field is volatile. A lost invalidation is benign: the stale version is
-     * probed first, answers unsupported, and the full cascade runs again.
+     * [invalidateStatusProtocolNegotiation] retires a generation by bumping this counter, which is
+     * the only authority over cache validity. Nothing else may be, because the installed script
+     * accepts every historical `--machine*` flag at once: a newer package answers a stale request
+     * with a truthful older payload instead of rejecting it, so a lost invalidation would pin this
+     * process to the older protocol for its whole life and silently drop the fields only the newer
+     * one carries.
      */
-    @Volatile
-    private var negotiatedStatusProtocol: Int? = null
+    private val statusProtocolGeneration = AtomicLong(0)
+
+    /**
+     * Protocol the installed status script answered with, stamped with the generation that proved
+     * it, or null while no generation has proven one.
+     *
+     * Negotiation writes happen under [lifecycleMutex] while invalidation arrives from any caller,
+     * so a write can always race an invalidation. Stamping the generation captured before the
+     * cascade started makes that race resolve in the invalidation's favour: an entry is trusted
+     * only while its stamp still equals [statusProtocolGeneration], so a mid-cascade invalidation
+     * discards the result of that cascade rather than being overwritten by it.
+     */
+    private val negotiatedStatusProtocol = AtomicReference<NegotiatedStatusProtocol?>(null)
 
     enum class RootAccessState { GRANTED, DENIED, MANAGER_UNAVAILABLE, SHELL_FAILURE, TIMEOUT, BUSY }
 
@@ -664,18 +682,23 @@ object ServiceLifecycleController {
      * A package that predates the current protocol answers every newer request with the
      * unsupported-protocol contract, so replaying the whole cascade would spend four rejected
      * `zapret-status.sh` processes on every refresh. The version that answered is therefore tried
-     * first on later observations. Whenever the remembered version is no longer understood the
-     * negotiation is dropped and the full cascade runs again from the newest protocol, so a package
-     * generation change can only cost one extra observation.
+     * first on later observations. Whenever the remembered version is no longer understood, or the
+     * generation that proved it has been retired, the negotiation is dropped and the full cascade
+     * runs again from the newest protocol, so a package generation change costs one extra
+     * observation and never a downgraded payload.
      */
     internal suspend fun observeNegotiatedStatus(
         probe: suspend (Int) -> CommandResult,
     ): ServiceStatus {
-        negotiatedStatusProtocol?.let { remembered ->
-            val cached = probe(remembered)
-            if (!cached.isUnsupportedMachineProtocol()) return parseStatusCommandResult(cached)
-            negotiatedStatusProtocol = null
-        }
+        // Captured before the first probe so that any invalidation racing this cascade wins.
+        val generation = statusProtocolGeneration.get()
+        negotiatedStatusProtocol.get()
+            ?.takeIf { it.generation == generation }
+            ?.let { remembered ->
+                val cached = probe(remembered.version)
+                if (!cached.isUnsupportedMachineProtocol()) return parseStatusCommandResult(cached)
+                negotiatedStatusProtocol.compareAndSet(remembered, null)
+            }
         var unsupported: ServiceStatus? = null
         statusProtocolCascade.forEach { version ->
             val result = probe(version)
@@ -683,7 +706,9 @@ object ServiceLifecycleController {
             if (!result.isUnsupportedMachineProtocol()) {
                 // Only a payload that satisfied the strict parser proves which protocol the
                 // installed script speaks; anything else stays unnegotiated and fails closed.
-                if (status.metadataComplete) negotiatedStatusProtocol = version
+                if (status.metadataComplete) {
+                    negotiatedStatusProtocol.set(NegotiatedStatusProtocol(version, generation))
+                }
                 return status
             }
             unsupported = status
@@ -692,14 +717,19 @@ object ServiceLifecycleController {
     }
 
     /**
-     * Drops the negotiated protocol so the next observation re-negotiates from the newest version.
+     * Retires the negotiated protocol so the next observation re-negotiates from the newest version.
      *
      * The installation authority calls this when it observes a different verified module
      * generation, because a replaced package may speak a newer machine protocol than the one this
-     * process negotiated.
+     * process negotiated. Tests reuse it to reset this singleton between cases.
+     *
+     * Bumping [statusProtocolGeneration] retires the stored negotiation and every cascade that is
+     * already in flight in one write, so an invalidation is authoritative from the instant it
+     * returns: a negotiation finishing afterwards carries a retired stamp and is never observed.
+     * The invalidation itself is never lost, whatever thread it arrives on.
      */
     internal fun invalidateStatusProtocolNegotiation() {
-        negotiatedStatusProtocol = null
+        statusProtocolGeneration.incrementAndGet()
     }
 
     private fun CommandResult.isUnsupportedMachineProtocol(): Boolean =

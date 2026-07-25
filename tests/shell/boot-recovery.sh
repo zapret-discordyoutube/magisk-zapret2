@@ -153,7 +153,7 @@ EOF
         write_owner_state 999999 1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 200 boot-recovery-owner active || exit 32
         write_numeric_pidfile 999999 || exit 33
         read_owner_state || exit 34
-        printf '%s\n' 'status=ok' 'qnum=200' > "$STATUS_SNAPSHOT"
+        printf '%s\n' 'status=ok' 'qnum=200' "boot_id=$stale_boot" > "$STATUS_SNAPSHOT"
         chmod 0600 "$STATUS_SNAPSHOT"
     ) || fail "$mode fixture owner publication failed"
 

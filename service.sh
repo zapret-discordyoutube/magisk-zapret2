@@ -69,7 +69,10 @@ fi
 # forking getprop once a second; fall back to the poll loop without it.
 if command -v resetprop >/dev/null 2>&1; then
     until [ "$(getprop sys.boot_completed)" = "1" ]; do
-        resetprop -w sys.boot_completed 0 >/dev/null 2>&1 || sleep 1
+        # No old value: resetprop then blocks until the property changes from
+        # whatever it is now. Passing one would return immediately, because
+        # sys.boot_completed does not exist until init sets it.
+        resetprop -w sys.boot_completed >/dev/null 2>&1 || sleep 1
     done
 else
     until [ "$(getprop sys.boot_completed)" = "1" ]; do
@@ -140,22 +143,30 @@ if [ "$AUTOSTART" = "1" ]; then
     # zapret-start.sh gates runtime state, module removal, and uninstall
     # tombstones, and its own audit retires proven cross-boot publications
     # under the lifecycle lock — so a healthy boot needs no separate pass.
-    /system/bin/sh "$START_SCRIPT"
+    START_OUTPUT="$(/system/bin/sh "$START_SCRIPT" 2>&1)"
     START_RC=$?
-    if [ "$START_RC" -ne 0 ]; then
-        # Only the boot entry point may discard an unsafe previous-boot state
-        # generation wholesale. Run that pass now and retry the start once.
-        log "Autostart failed (exit $START_RC); running previous-boot recovery"
-        if ! recover_boot_stale_runtime_state; then
-            log "ERROR: Previous-boot runtime recovery failed: ${BOOT_RECOVERY_DIAGNOSTIC:-unsafe recovery state}"
-        else
-            if [ "$BOOT_INCOMPATIBLE_STATE_RETIRED" = 1 ]; then
-                log "Incompatible boot-local state was discarded"
+    [ -z "$START_OUTPUT" ] || log "$START_OUTPUT"
+    # Only a start refused *by* recovery state may run the boot recovery pass:
+    # that refusal happens before the start mutates anything, so the pass still
+    # sees previous-boot state only. Any other failure may have published a
+    # process or rules during this boot, and discarding state wholesale would
+    # then destroy live evidence rather than stale generations.
+    case "$START_RC:$START_OUTPUT" in
+        0:*) ;;
+        *Z2_ERROR_CODE=RECOVERY_BLOCKED*)
+            log "Autostart was refused by recovery state; running previous-boot recovery"
+            if ! recover_boot_stale_runtime_state; then
+                log "ERROR: Previous-boot runtime recovery failed: ${BOOT_RECOVERY_DIAGNOSTIC:-unsafe recovery state}"
+            else
+                if [ "$BOOT_INCOMPATIBLE_STATE_RETIRED" = 1 ]; then
+                    log "Incompatible boot-local state was discarded"
+                fi
+                START_OUTPUT="$(/system/bin/sh "$START_SCRIPT" 2>&1)"
+                START_RC=$?
+                [ -z "$START_OUTPUT" ] || log "$START_OUTPUT"
             fi
-            /system/bin/sh "$START_SCRIPT"
-            START_RC=$?
-        fi
-    fi
+            ;;
+    esac
     if [ "$START_RC" -eq 0 ]; then
         log "Autostart command completed successfully (exit $START_RC)"
     else
