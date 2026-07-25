@@ -71,6 +71,30 @@ P5. **Root-manager canon.** `customize.sh` stages and validates; `service.sh`
     `uninstall.sh` cleans owned state. Destructive removal is fenced by the
     `remove` marker published *before* teardown begins.
 
+P6. **Unprovable is not clean, all the way to the user.** A firewall family
+    whose frontend exists but cannot answer is never reported as absent. Some
+    devices ship without `ip6table_mangle`, so this condition repeats every
+    boot: refusing outright would fence stop, uninstall and purge forever, and
+    a reboot would refuse the same way. The family is skipped instead, and the
+    uncertainty travels with the result rather than being resolved locally —
+    `cleanup_owned_firewall` raises it, the committed receipt withholds its
+    verification claim instead of contradicting it, the status projection
+    preserves that withheld claim rather than restoring it on the next read,
+    the purge receipt downgrades itself to `partial`, and the app names the
+    reservation beside the result. Every place that turned "we could not look"
+    back into "it is clean" was a defect, and each one sat on a different
+    boundary — which is why the decision is made once, by
+    `resolve_ipv6_ownership_expectation` and one probe budget spent where the
+    baseline is captured, and never re-derived downstream.
+
+P7. **Diagnostics never undo a completed operation.** Once an effect is
+    durable, a failure to record it may be reported but must not roll it back
+    or fence the next operation. A rollback that cannot write its receipt still
+    retires its journal; a purge that cannot remove a staging workspace still
+    reports the module directory and private state it did remove, measured
+    rather than assumed, because the same receipt is what the app reads to
+    decide what the device still holds.
+
 ## 3. Changes in 2.2.0 (module)
 
 - **Removed the legacy direct-rule migration** (`legacy_*` family, its snapshot
