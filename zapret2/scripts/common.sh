@@ -472,6 +472,7 @@ recover_stale_owner_publication() {
         rm -f "$STATUS_SNAPSHOT" || return 1
     fi
     rm -f "$OWNER_STATE" || return 1
+    retire_owner_read_cache
     STALE_OWNER_PUBLICATION_RETIRED=1
     return 0
 }
@@ -1595,6 +1596,8 @@ abort_lifecycle_lock_acquire() {
 
 release_lifecycle_lock() {
     local self_start token quarantine
+    # Past this point other writers may mutate publications again.
+    retire_owner_read_cache
     [ "$LOCK_HELD" = 1 ] || { LOCK_HELD=0; return 0; }
     self_start="$(proc_starttime "$$")" || return 1
     token="$LOCK_OWNER_TOKEN"
@@ -1776,10 +1779,12 @@ normalize_owner_port_list() {
         case "$item" in
             *:*) first="${item%%:*}"; last="${item#*:}"; case "$last" in *:*) return 1;; esac
                 is_decimal "$first" && is_decimal "$last" || return 1
-                first="$(printf '%s' "$first" | sed 's/^0*//')"; last="$(printf '%s' "$last" | sed 's/^0*//')"; [ -n "$first" ] || first=0; [ -n "$last" ] || last=0
+                while :; do case "$first" in 0?*) first="${first#0}" ;; *) break ;; esac; done
+                while :; do case "$last" in 0?*) last="${last#0}" ;; *) break ;; esac; done
                 [ "$first" -le 65535 ] 2>/dev/null && [ "$last" -le 65535 ] 2>/dev/null && [ "$first" -le "$last" ] 2>/dev/null || return 1
                 normalized="$first:$last" ;;
-            *) is_decimal "$item" || return 1; normalized="$(printf '%s' "$item" | sed 's/^0*//')"; [ -n "$normalized" ] || normalized=0
+            *) is_decimal "$item" || return 1; normalized="$item"
+                while :; do case "$normalized" in 0?*) normalized="${normalized#0}" ;; *) break ;; esac; done
                 [ "$normalized" -le 65535 ] 2>/dev/null || return 1 ;;
         esac
         result="${result}${result:+,}$normalized"
@@ -1886,7 +1891,55 @@ owner_state_is_current_boot() {
     [ "$OWNER_STATE_BOOT_ID" = "$CURRENT_BOOT_ID" ]
 }
 
+# One locked transaction has exactly one cooperating writer of the owner
+# publication: the lock holder itself. A completed read is therefore a fact
+# until this process mutates the publication, while Android prices every
+# re-proof in forks (tens of milliseconds per command substitution), so
+# helpers re-asking the already-answered question dominated whole lifecycle
+# transactions. The cache arms only while the lifecycle lock is held and
+# never under a test's binary override; every publication mutation and the
+# lock release retire it.
+Z2_OWNER_READ_CACHE=""
+
+retire_owner_read_cache() {
+    Z2_OWNER_READ_CACHE=""
+}
+
+owner_read_cache_active() {
+    [ "${LOCK_HELD:-0}" != 0 ] && [ -z "${AUDIT_NFQWS2_OVERRIDE:-}" ]
+}
+
 read_owner_state() {
+    if owner_read_cache_active && [ -n "$Z2_OWNER_READ_CACHE" ]; then
+        if [ "$Z2_OWNER_READ_CACHE" = valid ]; then
+            # The cached fields are stable: OWNER_STATE_* has no writer besides
+            # the fresh parse. Only the derived globals are re-primed, because
+            # a caller may legitimately have repointed them at the generation
+            # it is preparing since the previous read.
+            owner_state_prime_derived
+            return 0
+        fi
+        return 1
+    fi
+    if read_owner_state_fresh; then
+        if owner_read_cache_active; then Z2_OWNER_READ_CACHE=valid; fi
+        return 0
+    fi
+    if owner_read_cache_active; then Z2_OWNER_READ_CACHE=invalid; fi
+    return 1
+}
+
+owner_state_prime_derived() {
+    OWNER_WRITE_FIREWALL_TAG="$OWNER_STATE_FIREWALL_TAG"; OWNER_WRITE_OUT_CHAIN="$OWNER_STATE_OUT_CHAIN"; OWNER_WRITE_IN_CHAIN="$OWNER_STATE_IN_CHAIN"
+    OWNER_WRITE_QNUM="$OWNER_STATE_QNUM"
+    OWNER_WRITE_PORTS_TCP="$OWNER_STATE_PORTS_TCP"; OWNER_WRITE_PORTS_UDP="$OWNER_STATE_PORTS_UDP"; OWNER_WRITE_STUN_PORTS="$OWNER_STATE_STUN_PORTS"
+    OWNER_WRITE_TCP_PKT_OUT="$OWNER_STATE_TCP_PKT_OUT"; OWNER_WRITE_TCP_PKT_IN="$OWNER_STATE_TCP_PKT_IN"
+    OWNER_WRITE_UDP_PKT_OUT="$OWNER_STATE_UDP_PKT_OUT"; OWNER_WRITE_UDP_PKT_IN="$OWNER_STATE_UDP_PKT_IN"
+    OWNER_WRITE_DESYNC_MARK="$OWNER_STATE_DESYNC_MARK"
+    FIREWALL_TAG="$OWNER_STATE_FIREWALL_TAG"; ZAPRET2_OUT="$OWNER_STATE_OUT_CHAIN"; ZAPRET2_IN="$OWNER_STATE_IN_CHAIN"
+}
+
+read_owner_state_fresh() {
     local expected_nfqws2="${AUDIT_NFQWS2_OVERRIDE:-$NFQWS2}"
     OWNER_STATE_PID=""; OWNER_STATE_START=""; OWNER_STATE_ARGV_SHA256=""
     OWNER_STATE_QNUM=""; OWNER_STATE_EXE=""; OWNER_STATE_GENERATION=""; OWNER_STATE_BOOT_ID=""; OWNER_STATE_PHASE=""; OWNER_STATE_SCHEMA_VERSION=""
@@ -1898,7 +1951,7 @@ read_owner_state() {
     OWNER_STATE_IPV4_SPEC=""; OWNER_STATE_IPV6_SPEC=""; OWNER_STATE_FIREWALL_FINGERPRINT=""
     OWNER_STATE_FIREWALL_TAG=""; OWNER_STATE_OUT_CHAIN=""; OWNER_STATE_IN_CHAIN=""
     state_file_is_secure "$OWNER_STATE" && [ -r "$OWNER_STATE" ] || return 1
-    local key value version="" tcp_count udp_count stun_count expected seen_keys="|" field_sequence="" size
+    local key value version="" tcp_count udp_count stun_count expected seen_keys="|" field_sequence="" size old_ifs
     size="$(wc -c < "$OWNER_STATE" 2>/dev/null)" || return 1
     is_decimal "$size" && [ "$size" -gt 0 ] 2>/dev/null &&
         [ "$size" -le "$OWNER_STATE_MAX_BYTES" ] 2>/dev/null || return 1
@@ -1960,7 +2013,11 @@ read_owner_state() {
     is_safe_token "$OWNER_STATE_INSTALL_GENERATION" && [ "${#OWNER_STATE_INSTALL_GENERATION}" -le 128 ] 2>/dev/null || return 1
     is_lower_sha256 "$OWNER_STATE_INSTALL_ARCHIVE_SHA256" || return 1
     is_safe_firewall_identity "$OWNER_STATE_FIREWALL_TAG" "$OWNER_STATE_OUT_CHAIN" "$OWNER_STATE_IN_CHAIN" || return 1
-    OWNER_WRITE_FIREWALL_TAG="$OWNER_STATE_FIREWALL_TAG"; OWNER_WRITE_OUT_CHAIN="$OWNER_STATE_OUT_CHAIN"; OWNER_WRITE_IN_CHAIN="$OWNER_STATE_IN_CHAIN"
+    # A cold lifecycle process has no prior OWNER_WRITE_* generation. Prime
+    # every derived global solely from the just-validated owner fields;
+    # otherwise a valid record is accidentally accepted only in the writer's
+    # original shell where these globals happen to remain populated.
+    owner_state_prime_derived
     normalize_owner_optional_port_list "$OWNER_STATE_PORTS_TCP" || return 1; [ "$OWNER_PORT_LIST_NORMALIZED" = "$OWNER_STATE_PORTS_TCP" ] || return 1
     normalize_owner_optional_port_list "$OWNER_STATE_PORTS_UDP" || return 1; [ "$OWNER_PORT_LIST_NORMALIZED" = "$OWNER_STATE_PORTS_UDP" ] || return 1
     [ -n "$OWNER_STATE_PORTS_TCP$OWNER_STATE_PORTS_UDP" ] || return 1
@@ -1974,8 +2031,12 @@ read_owner_state() {
     [ "$OWNER_STATE_IPV4_ACTIVE" = 1 ] || return 1
     is_canonical_nonnegative_i64 "$OWNER_STATE_IPV4_RULES" &&
         is_canonical_nonnegative_i64 "$OWNER_STATE_IPV6_RULES" || return 1
-    tcp_count="$(owner_port_rule_count "$OWNER_STATE_PORTS_TCP")" || return 1
-    udp_count="$(owner_port_rule_count "$OWNER_STATE_PORTS_UDP")" || return 1
+    if [ -n "$OWNER_STATE_PORTS_TCP" ]; then
+        old_ifs="$IFS"; IFS=,; set -- $OWNER_STATE_PORTS_TCP; IFS="$old_ifs"; tcp_count=$#
+    else tcp_count=0; fi
+    if [ -n "$OWNER_STATE_PORTS_UDP" ]; then
+        old_ifs="$IFS"; IFS=,; set -- $OWNER_STATE_PORTS_UDP; IFS="$old_ifs"; udp_count=$#
+    else udp_count=0; fi
     if [ "$OWNER_STATE_IPV4_MULTIPORT" = 1 ]; then
         expected=0; [ -z "$OWNER_STATE_PORTS_TCP" ] || expected=$((expected + 1)); [ -z "$OWNER_STATE_PORTS_UDP" ] || expected=$((expected + 1))
     else expected=$((tcp_count + udp_count)); fi
@@ -1986,19 +2047,9 @@ read_owner_state() {
     else expected=$((tcp_count + udp_count)); fi
     expected=$((expected * (1 + OWNER_STATE_IPV6_CONNBYTES)))
     [ "$OWNER_STATE_IPV6_RULES" = $((expected * OWNER_STATE_IPV6_ACTIVE)) ] || return 1
-    # A cold lifecycle process has no prior OWNER_WRITE_* generation.  Build
-    # the authenticated v8 specs solely from the just-validated owner fields;
-    # otherwise a valid record is accidentally accepted only in the writer's
-    # original shell where these globals happen to remain populated.
-    OWNER_WRITE_QNUM="$OWNER_STATE_QNUM"
-    OWNER_WRITE_PORTS_TCP="$OWNER_STATE_PORTS_TCP"; OWNER_WRITE_PORTS_UDP="$OWNER_STATE_PORTS_UDP"; OWNER_WRITE_STUN_PORTS="$OWNER_STATE_STUN_PORTS"
-    OWNER_WRITE_TCP_PKT_OUT="$OWNER_STATE_TCP_PKT_OUT"; OWNER_WRITE_TCP_PKT_IN="$OWNER_STATE_TCP_PKT_IN"
-    OWNER_WRITE_UDP_PKT_OUT="$OWNER_STATE_UDP_PKT_OUT"; OWNER_WRITE_UDP_PKT_IN="$OWNER_STATE_UDP_PKT_IN"
-    OWNER_WRITE_DESYNC_MARK="$OWNER_STATE_DESYNC_MARK"
     [ "$(owner_build_family_spec ipv4 "$OWNER_STATE_IPV4_ACTIVE" "$OWNER_STATE_IPV4_CONNBYTES" "$OWNER_STATE_IPV4_MULTIPORT" "$OWNER_STATE_IPV4_MARK" "$OWNER_STATE_IPV4_RULES")" = "$OWNER_STATE_IPV4_SPEC" ] || return 1
     [ "$(owner_build_family_spec ipv6 "$OWNER_STATE_IPV6_ACTIVE" "$OWNER_STATE_IPV6_CONNBYTES" "$OWNER_STATE_IPV6_MULTIPORT" "$OWNER_STATE_IPV6_MARK" "$OWNER_STATE_IPV6_RULES")" = "$OWNER_STATE_IPV6_SPEC" ] || return 1
     [ "$(owner_spec_fingerprint "$OWNER_STATE_IPV4_SPEC" "$OWNER_STATE_IPV6_SPEC")" = "$OWNER_STATE_FIREWALL_FINGERPRINT" ] || return 1
-    FIREWALL_TAG="$OWNER_STATE_FIREWALL_TAG"; ZAPRET2_OUT="$OWNER_STATE_OUT_CHAIN"; ZAPRET2_IN="$OWNER_STATE_IN_CHAIN"
     return 0
 }
 
@@ -2011,6 +2062,9 @@ write_numeric_pidfile() {
 write_owner_state() {
     local pid="$1" start="$2" argv_sha256="$3" qnum="$4" generation="$5" phase="$6"
     local tmp="$OWNER_STATE.tmp.$$" boot_id size
+    # Any write attempt retires the cached read fact, whether or not the
+    # publication ends up replaced: the next reader re-proves from disk.
+    retire_owner_read_cache
     read_current_boot_id || return 1
     boot_id="$CURRENT_BOOT_ID"
     is_canonical_positive_decimal "$pid" && is_canonical_nonnegative_i64 "$start" || return 1
@@ -2279,7 +2333,10 @@ stop_pidfile_process() {
     if [ "$rc" -eq 0 ]; then
         process_snapshot_pidfile_matches && process_snapshot_owner_matches || return 1
         if [ "$PROCESS_PREFLIGHT_PIDFILE_PRESENT" = 1 ]; then rm -f "$PIDFILE" 2>/dev/null || rc=1; fi
-        if [ "$PROCESS_PREFLIGHT_OWNER_PRESENT" = 1 ]; then rm -f "$OWNER_STATE" 2>/dev/null || rc=1; fi
+        if [ "$PROCESS_PREFLIGHT_OWNER_PRESENT" = 1 ]; then
+            rm -f "$OWNER_STATE" 2>/dev/null || rc=1
+            retire_owner_read_cache
+        fi
     fi
     return "$rc"
 }
