@@ -121,6 +121,11 @@ case "${1:-}" in
         ;;
 esac
 
+# common.sh publishes the shared CR byte; the CLI mode above only sources it
+# when the packaged file is present, so keep a fallback rather than silently
+# stripping nothing from CRLF input.
+: "${Z2_CR:=$(printf '\r')}"
+
 PRESET_VALIDATION_CODE=OK
 PRESET_VALIDATION_DETAIL=
 PRESET_DEPENDENCY_PATH=
@@ -256,7 +261,7 @@ validate_preset_file() {
         preset_validation_fail PRESET_TOO_LARGE "$logical_name"; return 1;
     }
 
-    cr="$(printf '\r')"
+    cr="$Z2_CR"
     while IFS= read -r line || [ -n "$line" ]; do
         line="${line%"$cr"}"
         case "$line" in
@@ -506,26 +511,40 @@ collect_capture_ports() {
 }
 
 compile_preset_artifact() {
-    local preset_file="$1" logical_name="$2" artifact="$3" tmp source_sha runtime_sha size
+    local preset_file="$1" logical_name="$2" artifact="$3" tmp source_sha runtime_sha size hashes rest
+    local install_generation=unbound
+    local install_archive_sha256=0000000000000000000000000000000000000000000000000000000000000000
     # Retire any previous artifact's metadata proof first: an early failure
     # here must not leave a stale proof that lets a later run_compiled_artifact
     # skip its own authentication.
     COMPILED_METADATA_FOR=""
     validate_preset_file "$preset_file" "$logical_name" || return 1
     collect_capture_ports "$preset_file" || return 1
-    source_sha="$(sha256sum "$preset_file" 2>/dev/null)" || return 1
+    hashes="$(sha256sum "$preset_file" "$RUNTIME_CONFIG" 2>/dev/null)" || return 1
+    case "$hashes" in *"$Z2_NL"*) ;; *) return 1;; esac
+    source_sha="${hashes%%"$Z2_NL"*}"
     source_sha="${source_sha%% *}"
     case "$source_sha" in [0-9a-f][0-9a-f]*) [ "${#source_sha}" -eq 64 ] || return 1 ;; *) return 1 ;; esac
-    runtime_sha="$(sha256sum "$RUNTIME_CONFIG" 2>/dev/null)" || return 1
+    rest="${hashes#*"$Z2_NL"}"
+    case "$rest" in *"$Z2_NL"*) return 1;; esac
+    runtime_sha="${rest%% *}"
     runtime_sha="${runtime_sha%% *}"
     case "$runtime_sha" in [0-9a-f][0-9a-f]*) [ "${#runtime_sha}" -eq 64 ] || return 1 ;; *) return 1 ;; esac
+    # Offline preview/qualification may compile outside an installed
+    # generation; such an artifact is deliberately never reusable by a live
+    # launcher. Installed callers bind both immutable generation dimensions.
+    if read_install_generation_meta 2>/dev/null; then
+        install_generation="$INSTALL_META_GENERATION"
+        install_archive_sha256="$INSTALL_META_ARCHIVE_SHA256"
+    fi
     tmp="$artifact.tmp.$$"
     [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || return 1
     umask 077
     {
-        printf 'Z2_ARGV\t2\n'
-        printf 'PRESET\t%s\nSHA256\t%s\nRUNTIME_SHA256\t%s\nTCP\t%s\nUDP\t%s\n' \
-            "$logical_name" "$source_sha" "$runtime_sha" "$COMPILED_TCP_PORTS" "$COMPILED_UDP_PORTS"
+        printf 'Z2_ARGV\t3\n'
+        printf 'PRESET\t%s\nSHA256\t%s\nRUNTIME_SHA256\t%s\nINSTALL_GENERATION\t%s\nINSTALL_ARCHIVE_SHA256\t%s\nTCP\t%s\nUDP\t%s\n' \
+            "$logical_name" "$source_sha" "$runtime_sha" "$install_generation" \
+            "$install_archive_sha256" "$COMPILED_TCP_PORTS" "$COMPILED_UDP_PORTS"
         printf 'TCP_PKT_OUT\t%s\nTCP_PKT_IN\t%s\nUDP_PKT_OUT\t%s\nUDP_PKT_IN\t%s\nARGS\n' \
             "$COMPILED_TCP_PKT_OUT" "$COMPILED_TCP_PKT_IN" \
             "$COMPILED_UDP_PKT_OUT" "$COMPILED_UDP_PKT_IN"
@@ -558,7 +577,6 @@ compile_preset_artifact() {
     size="$(wc -c < "$tmp" 2>/dev/null)" || { rm -f "$tmp"; return 1; }
     case "$size" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
     [ "$size" -gt 0 ] && [ "$size" -le "$COMPILED_ARGV_MAX_BYTES" ] || { rm -f "$tmp"; return 1; }
-    chmod 0600 "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
     mv -f "$tmp" "$artifact" || { rm -f "$tmp"; return 1; }
     COMPILED_ARGV_FILE="$artifact"
     # The compiler is now the authority for every metadata field the artifact
@@ -566,6 +584,8 @@ compile_preset_artifact() {
     COMPILED_PRESET="$logical_name"
     COMPILED_SOURCE_SHA256="$source_sha"
     COMPILED_RUNTIME_SHA256="$runtime_sha"
+    COMPILED_INSTALL_GENERATION="$install_generation"
+    COMPILED_INSTALL_ARCHIVE_SHA256="$install_archive_sha256"
     COMPILED_METADATA_FOR="$artifact"
 }
 
@@ -574,6 +594,10 @@ compiled_artifact_binding_current() {
     local current_source_sha current_runtime_sha
     read_compiled_artifact_metadata "$artifact" || return 1
     [ "$COMPILED_PRESET" = "$logical_name" ] || return 1
+    read_install_generation_meta || return 1
+    [ "$COMPILED_INSTALL_GENERATION" = "$INSTALL_META_GENERATION" ] &&
+        [ "$COMPILED_INSTALL_ARCHIVE_SHA256" = "$INSTALL_META_ARCHIVE_SHA256" ] ||
+        return 1
     current_source_sha="$(sha256sum "$preset_file" 2>/dev/null)" || return 1
     current_source_sha="${current_source_sha%% *}"
     [ "$current_source_sha" = "$COMPILED_SOURCE_SHA256" ] || return 1
@@ -648,8 +672,7 @@ write_compiled_validation_receipt() {
         printf 'install_archive_sha256=%s\n' "$INSTALL_META_ARCHIVE_SHA256"
         printf 'argv_sha256=%s\n' "$argv_sha256"
     } > "$tmp" || { rm -f "$tmp"; return 1; }
-    chmod 0600 "$tmp" 2>/dev/null &&
-        mv -f "$tmp" "$COMPILED_VALIDATION_RECEIPT" || {
+    mv -f "$tmp" "$COMPILED_VALIDATION_RECEIPT" || {
             rm -f "$tmp"
             return 1
         }
@@ -666,9 +689,11 @@ ensure_compiled_artifact() {
 
 read_compiled_artifact_metadata() {
     local artifact="$1" line stage=0 seen_preset=0 seen_sha=0 seen_runtime_sha=0 seen_tcp=0 seen_udp=0
+    local seen_install_generation=0 seen_install_archive=0
     local seen_tcp_out=0 seen_tcp_in=0 seen_udp_out=0 seen_udp_in=0 size tab key value
     COMPILED_METADATA_FOR=""
     COMPILED_PRESET=; COMPILED_SOURCE_SHA256=; COMPILED_RUNTIME_SHA256=; COMPILED_TCP_PORTS=; COMPILED_UDP_PORTS=
+    COMPILED_INSTALL_GENERATION=; COMPILED_INSTALL_ARCHIVE_SHA256=
     COMPILED_TCP_PKT_OUT=; COMPILED_TCP_PKT_IN=; COMPILED_UDP_PKT_OUT=; COMPILED_UDP_PKT_IN=
     [ -f "$artifact" ] && [ ! -L "$artifact" ] && [ -r "$artifact" ] || return 1
     size="$(wc -c < "$artifact" 2>/dev/null)" || return 1
@@ -677,7 +702,7 @@ read_compiled_artifact_metadata() {
     tab='	'
     while IFS= read -r line || [ -n "$line" ]; do
         if [ "$stage" -eq 0 ]; then
-            [ "$line" = "Z2_ARGV${tab}2" ] || return 1
+            [ "$line" = "Z2_ARGV${tab}3" ] || return 1
             stage=1
             continue
         fi
@@ -689,6 +714,8 @@ read_compiled_artifact_metadata() {
                 PRESET) [ "$seen_preset" -eq 0 ] || return 1; COMPILED_PRESET="$value"; seen_preset=1 ;;
                 SHA256) [ "$seen_sha" -eq 0 ] || return 1; COMPILED_SOURCE_SHA256="$value"; seen_sha=1 ;;
                 RUNTIME_SHA256) [ "$seen_runtime_sha" -eq 0 ] || return 1; COMPILED_RUNTIME_SHA256="$value"; seen_runtime_sha=1 ;;
+                INSTALL_GENERATION) [ "$seen_install_generation" -eq 0 ] || return 1; COMPILED_INSTALL_GENERATION="$value"; seen_install_generation=1 ;;
+                INSTALL_ARCHIVE_SHA256) [ "$seen_install_archive" -eq 0 ] || return 1; COMPILED_INSTALL_ARCHIVE_SHA256="$value"; seen_install_archive=1 ;;
                 TCP) [ "$seen_tcp" -eq 0 ] || return 1; COMPILED_TCP_PORTS="$value"; seen_tcp=1 ;;
                 UDP) [ "$seen_udp" -eq 0 ] || return 1; COMPILED_UDP_PORTS="$value"; seen_udp=1 ;;
                 TCP_PKT_OUT) [ "$seen_tcp_out" -eq 0 ] || return 1; COMPILED_TCP_PKT_OUT="$value"; seen_tcp_out=1 ;;
@@ -702,13 +729,15 @@ read_compiled_artifact_metadata() {
         case "$line" in --*) ;; *) return 1 ;; esac
     done < "$artifact"
     [ "$stage" -eq 2 ] &&
-        [ "$seen_preset$seen_sha$seen_runtime_sha$seen_tcp$seen_udp$seen_tcp_out$seen_tcp_in$seen_udp_out$seen_udp_in" = 111111111 ] ||
+        [ "$seen_preset$seen_sha$seen_runtime_sha$seen_install_generation$seen_install_archive$seen_tcp$seen_udp$seen_tcp_out$seen_tcp_in$seen_udp_out$seen_udp_in" = 11111111111 ] ||
         return 1
     is_safe_preset_file_name "$COMPILED_PRESET" || return 1
     case "$COMPILED_SOURCE_SHA256" in *[!0-9a-f]*|'') return 1 ;; esac
     [ "${#COMPILED_SOURCE_SHA256}" -eq 64 ] || return 1
     case "$COMPILED_RUNTIME_SHA256" in *[!0-9a-f]*|'') return 1 ;; esac
     [ "${#COMPILED_RUNTIME_SHA256}" -eq 64 ] || return 1
+    is_safe_token "$COMPILED_INSTALL_GENERATION" || return 1
+    is_lower_sha256 "$COMPILED_INSTALL_ARCHIVE_SHA256" || return 1
     [ -z "$COMPILED_TCP_PORTS" ] ||
         validate_filter_ports "$COMPILED_TCP_PORTS" || return 1
     [ -z "$COMPILED_UDP_PORTS" ] ||
@@ -853,7 +882,7 @@ validate_strategy_catalog_file() {
     size="$(wc -c < "$file" 2>/dev/null)" || return 1
     case "$size" in ''|*[!0-9]*) return 1 ;; esac
     [ "$size" -le "$STRATEGY_CATALOG_MAX_BYTES" ] || return 1
-    cr="$(printf '\r')"
+    cr="$Z2_CR"
     while IFS= read -r line || [ -n "$line" ]; do
         line="${line%"$cr"}"
         case "$line" in ''|'#'*|';'*) continue ;; esac

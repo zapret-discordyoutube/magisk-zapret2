@@ -27,7 +27,8 @@ behaviour is strictly read-only on the device.
   harness records the last checkpoint with the canonical boot ID bound to the
   exact serial/evidence run and the private raw query's name, size, SHA-256, and
   canonical value, requires a different canonical boot ID during
-  verification, and validates the exact secure five-field uninstall tombstone.
+  verification, and proves that the private state directory and uninstall
+  transaction fence are absent after the root manager completes removal.
   It never uses Magisk's all-modules removal command or writes a removal marker.
 
 ## Prerequisites

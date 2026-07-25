@@ -331,6 +331,7 @@ package_contract_validate_manifest() {
         "immutable-exec|0755|zapret2/scripts/common.sh" \
         "immutable-exec|0755|zapret2/scripts/firewall-reconciler.sh" \
         "immutable-exec|0755|zapret2/scripts/command-builder.sh" \
+        "immutable-exec|0755|zapret2/scripts/daemon-replace-transaction.sh" \
         "immutable-exec|0755|zapret2/scripts/package-contract.sh" \
         "immutable-exec|0755|zapret2/scripts/runtime-config.sh" \
         "immutable-exec|0755|zapret2/scripts/runtime-init.sh" \
@@ -724,6 +725,7 @@ package_contract_compare_release() {
         system/bin/zapret2-full-rollback \
         zapret2/lifecycle-contract.version \
         zapret2/scripts/common.sh zapret2/scripts/command-builder.sh \
+        zapret2/scripts/daemon-replace-transaction.sh \
         zapret2/scripts/package-contract.sh zapret2/scripts/runtime-config.sh \
         zapret2/scripts/runtime-init.sh zapret2/scripts/zapret-start.sh \
         zapret2/scripts/zapret-stop.sh zapret2/scripts/zapret-status.sh

@@ -12,11 +12,21 @@
 # a single typed outcome. The app projects that payload; it never rebuilds the
 # steps, and it never decides on its own what the module's state is.
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ZAPRET_DIR="$(dirname "$SCRIPT_DIR")"
-MODDIR="$(dirname "$ZAPRET_DIR")"
+# The wrappers invoke this script by an absolute, already-canonical path, so
+# resolving it costs two forks (dirname plus the cd/pwd subshell) to return the
+# string we were handed. Take the cheap route when the path is already clean
+# and keep the canonicalizing fallback for every other invocation.
+case "$0" in
+    /*//*|/*/./*|/*/../*|*/..|*/.) SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)" ;;
+    /*/*) SCRIPT_DIR="${0%/*}" ;;
+    *) SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)" ;;
+esac
+ZAPRET_DIR="${SCRIPT_DIR%/*}"
+MODDIR="${ZAPRET_DIR%/*}"
+ZAPRET2_LAZY_FIREWALL_RECONCILER=1
 . "$SCRIPT_DIR/common.sh"
 . "$SCRIPT_DIR/command-builder.sh"
+. "$SCRIPT_DIR/daemon-replace-transaction.sh"
 
 set -f
 
@@ -226,7 +236,7 @@ read_runtime_generations() {
     RUNTIME_ACTIVE_PRESET_LINES=0
     [ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ] || return 1
     path_uid_is_root "$path" && path_nlink_is_one "$path" || return 1
-    cr="$(printf '\r')"
+    cr="$Z2_CR"
     while IFS= read -r line || [ -n "$line" ]; do
         stripped="${line%"$cr"}"
         if [ -z "$stripped" ]; then
@@ -438,37 +448,47 @@ preset_canonical_digest() {
 # still live. Read-only and constant in the size of the package and the process
 # table; this transaction never re-audits the firewall to answer it.
 service_process_is_running() {
-    state_dir_is_secure || return 1
-    OBSERVER_STATE_DIR_VERIFIED=1
-    read_iptables_status >/dev/null 2>&1 || return 1
-    [ "$STATUS_FILE_STATUS" = ok ] || return 1
-    [ "$STATUS_FILE_OWNER_METADATA_VERIFIED" = 1 ] || return 1
-    [ "$STATUS_FILE_RULESET_VERIFIED" = 1 ] || return 1
-    [ "$STATUS_FILE_IPV4_ACTIVE" = 1 ] || return 1
-    [ "$STATUS_FILE_RULES_TOTAL" = "$((STATUS_FILE_IPV4_RULES + STATUS_FILE_IPV6_RULES))" ] || return 1
-    [ "$STATUS_FILE_RULES_TOTAL" = "$STATUS_FILE_RULES_EXPECTED" ] || return 1
-    verify_status_snapshot_pid
+    read_owner_state && owner_state_is_current_boot &&
+        [ "$OWNER_STATE_PHASE" = active ] &&
+        reverify_published_nfqws_pid "$OWNER_STATE_PID" "$OWNER_STATE_START" \
+            "$OWNER_STATE_ARGV_SHA256" "$OWNER_STATE_QNUM"
 }
 
-# zapret-start.sh --replace is the replacement transaction, exactly as
-# zapret-restart.sh invokes it. It inherits this transaction's lifecycle
-# ownership through ZAPRET2_LIFECYCLE_TOKEN and may never release it, so its
-# failure paths keep converging on the clean stopped state while this
-# transaction stays responsible for the configuration it published.
+# The save/apply transaction already owns the lock, candidate dry-run and
+# generation receipts.  Replace the daemon in this process so none of those
+# facts are re-proven by a second fully loaded lifecycle shell.
 run_replace_transaction() {
-    local output rc=0
+    local output rc
     trap '' HUP INT TERM
-    output="$(ZAPRET2_EMIT_STATUS_V6=0 sh "$SCRIPT_DIR/zapret-start.sh" --replace 2>&1)" || rc=$?
+    replace_daemon_in_locked_transaction
+    rc=$?
+    # A changed port/capture topology is not eligible for daemon-only
+    # replacement. Nothing below the process boundary has been touched yet, so
+    # hand that uncommon case to the complete firewall transaction. Failures
+    # after the old daemon was stopped never enter a second transaction.
+    if [ "$rc" -ne 0 ] && [ "${Z2_DAEMON_REPLACE_CONTROLLED:-0}" = 0 ]; then
+        output=
+        rc=0
+        output="$(ZAPRET2_EMIT_STATUS_V6=0 sh "$SCRIPT_DIR/zapret-start.sh" --replace 2>&1)" || rc=$?
+        if [ "$rc" -ne 0 ]; then
+            parse_typed_error_envelope "$output" || {
+                CHILD_ERROR_DOMAIN=LIFECYCLE
+                CHILD_ERROR_CODE=LIFECYCLE_FAILED
+                CHILD_ERROR_STAGE=APPLY_REPLACE
+                CHILD_ERROR_DETAIL="the full replacement transaction failed without a typed envelope"
+            }
+        fi
+    fi
     trap 'apply_interrupted HUP' HUP
     trap 'apply_interrupted INT' INT
     trap 'apply_interrupted TERM' TERM
     [ "$rc" -eq 0 ] && return 0
-    parse_typed_error_envelope "$output" || {
-        CHILD_ERROR_DOMAIN=LIFECYCLE
-        CHILD_ERROR_CODE=LIFECYCLE_FAILED
-        CHILD_ERROR_STAGE=APPLY_REPLACE
-        CHILD_ERROR_DETAIL="the replacement transaction failed without a typed envelope"
-    }
+    if [ -z "$CHILD_ERROR_DOMAIN" ]; then
+        CHILD_ERROR_DOMAIN="${Z2_DAEMON_REPLACE_ERROR_DOMAIN:-LIFECYCLE}"
+        CHILD_ERROR_CODE="${Z2_DAEMON_REPLACE_ERROR_CODE:-LIFECYCLE_FAILED}"
+        CHILD_ERROR_STAGE="${Z2_DAEMON_REPLACE_ERROR_STAGE:-APPLY_REPLACE}"
+        CHILD_ERROR_DETAIL="${Z2_DAEMON_REPLACE_ERROR_DETAIL:-the replacement transaction failed without a typed result}"
+    fi
     return 1
 }
 
@@ -617,6 +637,7 @@ run_save_content_transaction() {
     }
     APPLY_SAVE_CANDIDATE_CONSUMED=1
     APPLY_PRESET_REPLACED=1
+    Z2_DAEMON_REPLACE_PREVALIDATED=1
 
     if [ "$APPLY_SAVE_SELECTION_CHANGE" = 1 ]; then
         if commit_runtime_candidate "$RUNTIME_NEXT_TEXT" "$RUNTIME_PREVIOUS_DIGEST" 1; then
@@ -737,6 +758,23 @@ main() {
             "zapret2 lifecycle is busy" BLOCKED
     APPLY_LOCK_TAKEN=1
 
+    # The request paths are known only to this endpoint, after common.sh has
+    # acquired the lock and primed its fixed state set. Add them in one stat
+    # call so validation, CAS and compilation consume the same metadata proof.
+    set -- "$RUNTIME_CONFIG"
+    [ ! -e "$PRESETS_DIR/$requested" ] && [ ! -L "$PRESETS_DIR/$requested" ] ||
+        set -- "$@" "$PRESETS_DIR/$requested"
+    if [ "$APPLY_SAVE_REQUEST" = 1 ]; then
+        [ ! -e "$PRESETS_DIR/$APPLY_SAVE_CANDIDATE" ] &&
+            [ ! -L "$PRESETS_DIR/$APPLY_SAVE_CANDIDATE" ] ||
+            set -- "$@" "$PRESETS_DIR/$APPLY_SAVE_CANDIDATE"
+    fi
+    [ ! -e "$Z2_STATE_TMP" ] && [ ! -L "$Z2_STATE_TMP" ] ||
+        set -- "$@" "$Z2_STATE_TMP"
+    meta_cache_add "$@" ||
+        apply_report_failure STATE STATE_UNAVAILABLE APPLY_STATE \
+            "transaction metadata could not be captured" IO_FAILED
+
     if ! audit_recovery_artifacts lifecycle; then
         apply_report_failure LIFECYCLE RECOVERY_BLOCKED APPLY_RECOVERY \
             "preset application blocked by recovery state: ${RECOVERY_ARTIFACT_DIAGNOSTIC:-unsafe recovery artifact}$(recovery_block_remedy)" \
@@ -780,10 +818,14 @@ main() {
         apply_report_failure CONFIG RUNTIME_READ_FAILED APPLY_CONFIG_READ \
             "runtime.ini content identity could not be computed" IO_FAILED
     RUNTIME_PREVIOUS_DIGEST="$RUNTIME_CANONICAL_DIGEST"
-    runtime_canonical_digest "$RUNTIME_NEXT_TEXT" ||
-        apply_report_failure CONFIG RUNTIME_READ_FAILED APPLY_CONFIG_READ \
-            "the requested runtime.ini generation identity could not be computed" IO_FAILED
-    RUNTIME_NEXT_DIGEST="$RUNTIME_CANONICAL_DIGEST"
+    if [ "$RUNTIME_NEXT_TEXT" = "$RUNTIME_CANONICAL_TEXT" ]; then
+        RUNTIME_NEXT_DIGEST="$RUNTIME_PREVIOUS_DIGEST"
+    else
+        runtime_canonical_digest "$RUNTIME_NEXT_TEXT" ||
+            apply_report_failure CONFIG RUNTIME_READ_FAILED APPLY_CONFIG_READ \
+                "the requested runtime.ini generation identity could not be computed" IO_FAILED
+        RUNTIME_NEXT_DIGEST="$RUNTIME_CANONICAL_DIGEST"
+    fi
 
     if [ "$APPLY_SAVE_REQUEST" = 1 ]; then
         run_save_content_transaction
@@ -838,6 +880,7 @@ main() {
         apply_report_success SAVED
     fi
 
+    Z2_DAEMON_REPLACE_PREVALIDATED=1
     if ! run_replace_transaction; then
         report_rollback_after_commit "the replacement transaction failed: $CHILD_ERROR_DETAIL" \
             RESTART_FAILED_ROLLED_BACK

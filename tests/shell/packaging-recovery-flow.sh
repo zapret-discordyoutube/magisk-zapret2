@@ -354,13 +354,16 @@ fi
 rm -f "$LIVE_STATE/unknown.child"
 PATH="$MOCK:$PATH" MODPATH="$LIVE" sh "$LIVE/uninstall.sh" > "$CASE/uninstall.out" || fail "uninstall retry after removing unknown state failed"
 [ ! -e "$LIVE_STATE/full-rollback.meta" ] && [ ! -e "$LIVE_STATE/hosts.rollback.backup" ] || fail "completed rollback generation was not retired"
-[ -f "$LIVE_STATE/uninstall.tombstone" ] || fail "uninstall tombstone missing"
+[ ! -e "$LIVE_STATE/uninstall.tombstone" ] && [ ! -L "$LIVE_STATE/uninstall.tombstone" ] ||
+    fail "completed direct uninstall left its transaction fence behind"
+[ ! -e "$LIVE_STATE" ] && [ ! -L "$LIVE_STATE" ] ||
+    fail "completed direct uninstall left an empty private state directory"
 
 rm -rf "$LIVE"
 run_installer || fail "reinstall after rollback/uninstall failed"
 [ ! -e "$UPDATE/disable" ] && [ ! -L "$UPDATE/disable" ] || fail "stale rollback disable marker resurrected"
-[ -f "$LIVE_STATE/uninstall.tombstone" ] ||
-    fail "clean package staging mutated independent uninstall state"
+[ ! -e "$LIVE_STATE" ] && [ ! -L "$LIVE_STATE" ] ||
+    fail "clean package staging recreated boot-local uninstall state"
 
 # Magisk's Delete button publishes the durable remove marker and invokes
 # uninstall.sh at the next boot before deleting the module directory. That
@@ -370,6 +373,8 @@ run_installer || fail "reinstall after rollback/uninstall failed"
 mv "$UPDATE" "$LIVE"
 : > "$LIVE/remove"
 chmod 0600 "$LIVE/remove"
+mkdir "$LIVE_STATE"
+chmod 0700 "$LIVE_STATE"
 printf '%s\n' 'malformed interrupted build evidence' > "$LIVE_STATE/build-track.ipv4.4115"
 chmod 0600 "$LIVE_STATE/build-track.ipv4.4115"
 PATH="$MOCK:$PATH" MODPATH="$LIVE" sh "$LIVE/uninstall.sh" > "$CASE/magisk-remove.out" ||

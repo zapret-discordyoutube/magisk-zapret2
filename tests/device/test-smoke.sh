@@ -475,7 +475,7 @@ case "${FAKE_FIREWALL_DIRTY:-none}" in none|v4|v6) ;; *) exit 92;; esac
 case "${FAKE_DUMP_FAILURE:-none}" in none|v4|v6) ;; *) exit 92;; esac
 case "${FAKE_REBOOTED:-0}" in 0|1) ;; *) exit 92;; esac
 case "${FAKE_BOOT_SCHEMA:-ok}" in ok|malformed|missing|duplicate|reordered|unknown|rc) ;; *) exit 92;; esac
-case "${FAKE_TOMBSTONE_CASE:-ok}" in ok|state_missing|state_symlink|state_stat|state_mode|query|entries|tombstone_missing|symlink|type|stat|mode|malformed|schema|duplicate|reordered|unknown|version|pid|start|token|module|foreign|live|proc_different|proc_unreadable|proc_malformed|proc_orphan) ;; *) exit 92;; esac
+case "${FAKE_TOMBSTONE_CASE:-ok}" in ok|state_present) ;; *) exit 92;; esac
 case "${FAKE_RAW_CASE:-none}" in none|e71|e72|e73|e74|e75|e81|e82|e83|e84|e86|e87|e88|e89|e90|e91|e101|e102|e103|e104|e105|e106|e107|e108|e109|e110|e111|e112|e113|e114|e115|e116|e117|e118|e119|e120|e121|e122|e123|e124|e125|e126|e131|e132|e133|e134|e135|e136|e137|e141|e142|e143|e144|e145|e146|e147|e148|e149) ;; *) exit 92;; esac
 case "${FAKE_ROOT_DENIED:-0}:${FAKE_UNINSTALLED:-0}:${FAKE_UNINSTALL_AUDIT_BAD:-0}" in [01]:[01]:[01]) ;; *) exit 92;; esac
 
@@ -594,10 +594,13 @@ handle_query() {
             [ "${FAKE_UNINSTALLED:-0}" = 1 ] || { printf 'paths still present\n'; query_footer 1; return 0; }
             printf 'Z2_UNINSTALL_LIVE_MODULE=absent\nZ2_UNINSTALL_UPDATE_MODULE=absent\nZ2_UNINSTALL_WRAPPERS=absent\nZ2_UNINSTALL_PATHS_COMPLETE=1\n'; query_footer 0; return 0
             ;;
-        *'z2_state_entries=$(ls -A /data/adb/zapret2-state'*)
-            trace_primitive uninstall-tombstone-read
+        *'[ ! -e /data/adb/zapret2-state ]'*)
+            trace_primitive uninstall-state-absence
             [ "${FAKE_UNINSTALLED:-0}" = 1 ] || { printf 'state unavailable\n'; query_footer 1; return 0; }
-            run_uninstall_audit_query "$hq_cmd"; return 0
+            [ "${FAKE_TOMBSTONE_CASE:-ok}" = ok ] ||
+                { printf 'private state remains\n'; query_footer 1; return 0; }
+            printf 'Z2_UNINSTALL_STATE_DIR=absent\nZ2_UNINSTALL_TOMBSTONE=absent\nZ2_UNINSTALL_STATE_COMPLETE=1\n'
+            query_footer 0; return 0
             ;;
         *'command -v iptables-save'*'iptables-save'*)
             [ "${FAKE_DUMP_FAILURE:-none}" = v4 ] && { printf 'iptables-save failed\n'; query_footer 9; return 0; }
@@ -1020,124 +1023,9 @@ for TAMPER_KIND in run-binding meta-boot raw-boot; do
         fail "tampered uninstall checkpoint advanced sequence: $TAMPER_KIND"
 done
 
-# Raw tombstone/query states are evaluated only by the production verifier.
-for TOMBSTONE_CASE in state_missing state_symlink state_stat state_mode query entries tombstone_missing symlink type stat mode malformed schema duplicate reordered unknown version pid start token module foreign live proc_unreadable proc_malformed proc_orphan; do
-    run_uninstall_rejection tombstone-$TOMBSTONE_CASE FAKE_REBOOTED=1 FAKE_TOMBSTONE_CASE="$TOMBSTONE_CASE"
-done
-
-PROC_DIFFERENT_EVIDENCE=$TMP/uninstall-proc-different-evidence
-PROC_DIFFERENT_LOG=$TMP/uninstall-proc-different.log
-cp -R "$FLOW_EVIDENCE" "$PROC_DIFFERENT_EVIDENCE"
-: > "$PROC_DIFFERENT_LOG"
-env FAKE_ADB_LOG="$PROC_DIFFERENT_LOG" FAKE_UNINSTALLED=1 FAKE_REBOOTED=1 FAKE_TOMBSTONE_CASE=proc_different ADB_BIN="$FAKE_ADB" sh "$HARNESS" \
-    --serial TEST-SERIAL --evidence-dir "$PROC_DIFFERENT_EVIDENCE" --stage uninstall-verify >/dev/null
-[ "$(sed -n 's/^stage=//p' "$PROC_DIFFERENT_EVIDENCE/sequence.state")" = uninstall-verify ] ||
-    fail "readable foreign proc starttime was not accepted as a dead tombstone owner"
-
-# Mutation adequacy: production rejects each raw state above, while temporary
-# copies with the boot or exact root-query predicate removed must reach a later
-# read-only primitive in the fake operation trace.
-make_uninstall_mutant() {
-    mum_output=$1 mum_kind=$2
-    awk -v kind="$mum_kind" '
-        kind == "boot-change" && index($0, "[ \"$vu_post_boot\" != \"$vu_pre_boot\" ] || fail") {
-            print "    : # mutation test: reboot-change predicate removed"
-            changed++
-            next
-        }
-        kind == "root-state-stat" && /exit 162/ { sub("exit 162", ":"); changed++ }
-        kind == "root-file-stat" && /exit 167/ { sub("exit 167", ":"); changed++ }
-        kind == "root-mode" && /exit 168/ { sub("exit 168", ":"); changed++ }
-        kind == "root-schema" && /exit 170/ { sub("exit 170", ":"); changed++ }
-        (kind == "root-module" || kind == "root-module-single") && /exit 181/ { sub("exit 181", ":"); changed++ }
-        kind == "root-module" && index($0, "Z2_UNINSTALL_TOMBSTONE_MODULE_DIR=/data/adb/modules/zapret2") {
-            sub(" Z2_UNINSTALL_TOMBSTONE_MODULE_DIR=/data/adb/modules/zapret2", "")
-            changed++
-        }
-        kind == "root-proc-unreadable" && /exit 182/ { sub("exit 182", ":"); changed++ }
-        kind == "root-proc-malformed" && /exit 184/ { sub("exit 184", ":"); changed++ }
-        kind == "root-proc-live" && /exit 185/ {
-            sub("exit 185", ":")
-            changed++
-        }
-        { print }
-        END {
-            expected = (kind == "root-module" ? 2 : 1)
-            if (changed != expected) exit 91
-        }
-    ' "$HARNESS" > "$mum_output" || fail "could not instrument uninstall mutant: $mum_kind"
-    chmod 0755 "$mum_output"
-}
-
-MUTANT_DIR=$TMP/uninstall-mutants
-mkdir "$MUTANT_DIR"
-for MUTANT_KIND in boot-change root-state-stat root-file-stat root-mode root-schema root-module root-proc-unreadable root-proc-malformed root-proc-live; do
-    MUTANT_HARNESS=$MUTANT_DIR/$MUTANT_KIND.sh
-    MUTANT_EVIDENCE=$MUTANT_DIR/$MUTANT_KIND-evidence
-    MUTANT_LOG=$MUTANT_DIR/$MUTANT_KIND.log
-    cp -R "$FLOW_EVIDENCE" "$MUTANT_EVIDENCE"
-    : > "$MUTANT_LOG"
-    make_uninstall_mutant "$MUTANT_HARNESS" "$MUTANT_KIND"
-    case "$MUTANT_KIND" in
-        boot-change)
-            MUTANT_PATTERN='^OP direct uninstall-path-audit$'
-            MUTANT_ENV='FAKE_REBOOTED=0'
-            ;;
-        root-state-stat)
-            MUTANT_PATTERN='^OP direct uninstall-state-listing$'
-            MUTANT_ENV='FAKE_REBOOTED=1 FAKE_TOMBSTONE_CASE=state_stat'
-            ;;
-        root-file-stat)
-            MUTANT_PATTERN='^OP direct uninstall-state-listing$'
-            MUTANT_ENV='FAKE_REBOOTED=1 FAKE_TOMBSTONE_CASE=stat'
-            ;;
-        root-mode)
-            MUTANT_PATTERN='^OP direct uninstall-state-listing$'
-            MUTANT_ENV='FAKE_REBOOTED=1 FAKE_TOMBSTONE_CASE=mode'
-            ;;
-        root-schema)
-            MUTANT_PATTERN='^OP direct uninstall-state-listing$'
-            MUTANT_ENV='FAKE_REBOOTED=1 FAKE_TOMBSTONE_CASE=duplicate'
-            ;;
-        root-module)
-            MUTANT_PATTERN='^OP direct uninstall-state-listing$'
-            MUTANT_ENV='FAKE_REBOOTED=1 FAKE_TOMBSTONE_CASE=module'
-            ;;
-        root-proc-unreadable)
-            MUTANT_PATTERN='^OP direct uninstall-state-listing$'
-            MUTANT_ENV='FAKE_REBOOTED=1 FAKE_TOMBSTONE_CASE=proc_unreadable'
-            ;;
-        root-proc-malformed)
-            MUTANT_PATTERN='^OP direct uninstall-state-listing$'
-            MUTANT_ENV='FAKE_REBOOTED=1 FAKE_TOMBSTONE_CASE=proc_malformed'
-            ;;
-        root-proc-live)
-            MUTANT_PATTERN='^OP direct uninstall-state-listing$'
-            MUTANT_ENV='FAKE_REBOOTED=1 FAKE_TOMBSTONE_CASE=live'
-            ;;
-    esac
-    if [ "$MUTANT_KIND" = root-module ]; then
-        SINGLE_HARNESS=$MUTANT_DIR/root-module-single.sh
-        SINGLE_EVIDENCE=$MUTANT_DIR/root-module-single-evidence
-        SINGLE_LOG=$MUTANT_DIR/root-module-single.log
-        cp -R "$FLOW_EVIDENCE" "$SINGLE_EVIDENCE"
-        : > "$SINGLE_LOG"
-        make_uninstall_mutant "$SINGLE_HARNESS" root-module-single
-        assert_fails env FAKE_ADB_LOG="$SINGLE_LOG" FAKE_UNINSTALLED=1 FAKE_REBOOTED=1 FAKE_TOMBSTONE_CASE=module ADB_BIN="$FAKE_ADB" sh "$SINGLE_HARNESS" \
-            --serial TEST-SERIAL --evidence-dir "$SINGLE_EVIDENCE" --stage uninstall-verify
-        [ "$(sed -n 's/^stage=//p' "$SINGLE_EVIDENCE/sequence.state")" = uninstall ] ||
-            fail "single root-module mutant bypassed the paired host validator"
-    fi
-    MUTANT_BEFORE=$(grep -Ec "$MUTANT_PATTERN" "$FAKE_STATE_DIR/primitive.log" 2>/dev/null || true)
-    # MUTANT_ENV contains only fixed test-owned assignments selected above.
-    env FAKE_ADB_LOG="$MUTANT_LOG" FAKE_UNINSTALLED=1 $MUTANT_ENV ADB_BIN="$FAKE_ADB" sh "$MUTANT_HARNESS" \
-        --serial TEST-SERIAL --evidence-dir "$MUTANT_EVIDENCE" --stage uninstall-verify >/dev/null
-    MUTANT_AFTER=$(grep -Ec "$MUTANT_PATTERN" "$FAKE_STATE_DIR/primitive.log" 2>/dev/null || true)
-    [ "$MUTANT_AFTER" -eq $((MUTANT_BEFORE + 1)) ] ||
-        fail "uninstall mutation survivor did not reach its later primitive: $MUTANT_KIND"
-    [ "$(sed -n 's/^stage=//p' "$MUTANT_EVIDENCE/sequence.state")" = uninstall-verify ] ||
-        fail "uninstall mutation survivor did not complete: $MUTANT_KIND"
-done
+# Successful root-manager removal owns the entire private state tree. Any
+# surviving directory, including a dead tombstone carrier, is incomplete.
+run_uninstall_rejection state-present FAKE_REBOOTED=1 FAKE_TOMBSTONE_CASE=state_present
 
 # Manual root-manager uninstall verification rejects an adversarial /proc audit.
 cp -R "$FLOW_EVIDENCE" "$TMP/bad-uninstall-evidence"
@@ -1154,8 +1042,8 @@ BOOT_PRE=$(sed -n 's/^pre_boot_id=//p' "$BOOT_TRANSITION")
 BOOT_POST=$(sed -n 's/^post_boot_id=//p' "$BOOT_TRANSITION")
 [ -n "$BOOT_PRE" ] && [ -n "$BOOT_POST" ] && [ "$BOOT_PRE" != "$BOOT_POST" ] || fail "uninstall boot transition evidence does not prove a reboot"
 UNINSTALL_STATE_AUDIT=$FLOW_EVIDENCE/stages/uninstall-verify/state-audit.txt
-for UNINSTALL_PAIR in Z2_UNINSTALL_TOMBSTONE_VERSION=1 Z2_UNINSTALL_TOMBSTONE_PID=4321 Z2_UNINSTALL_TOMBSTONE_STARTTIME=98765 Z2_UNINSTALL_TOMBSTONE_TOKEN=fixture-token Z2_UNINSTALL_TOMBSTONE_MODULE_DIR=/data/adb/modules/zapret2 Z2_UNINSTALL_TOMBSTONE_OWNER=dead; do
-    grep -Fxq "$UNINSTALL_PAIR" "$UNINSTALL_STATE_AUDIT" || fail "canonical uninstall tombstone evidence is missing: $UNINSTALL_PAIR"
+for UNINSTALL_PAIR in Z2_UNINSTALL_STATE_DIR=absent Z2_UNINSTALL_TOMBSTONE=absent Z2_UNINSTALL_STATE_COMPLETE=1; do
+    grep -Fxq "$UNINSTALL_PAIR" "$UNINSTALL_STATE_AUDIT" || fail "canonical uninstall state evidence is missing: $UNINSTALL_PAIR"
 done
 [ "$UNINSTALL_ONLY" = 0 ] || { printf 'PASS: focused uninstall verification contracts\n'; exit 0; }
 

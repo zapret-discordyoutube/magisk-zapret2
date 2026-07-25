@@ -158,11 +158,6 @@ read_compiled_artifact_metadata "$TMP/tcp.argv" || fail "TCP artifact metadata i
 [ "$COMPILED_TCP_PORTS" = 80 ] && [ -z "$COMPILED_UDP_PORTS" ] &&
     [ "$COMPILED_TCP_PKT_OUT:$COMPILED_TCP_PKT_IN:$COMPILED_UDP_PKT_OUT:$COMPILED_UDP_PKT_IN" = 20:10:20:10 ] ||
     fail "TCP-only preset opened unexpected ports"
-(
-    compile_preset_artifact() { return 97; }
-    ensure_compiled_artifact "$FIXTURE/presets/TCP only.txt" "TCP only.txt" "$TMP/tcp.argv"
-) || fail "unchanged compiled preset was rebuilt instead of reusing its bound artifact"
-
 cat > "$FIXTURE/install-generation.meta" <<EOF
 version=1
 module_dir=$MODDIR
@@ -170,6 +165,16 @@ generation=receipt-test
 archive_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 EOF
 chmod 0600 "$FIXTURE/install-generation.meta"
+INSTALL_META_CACHED_PATH=""
+compile_preset_artifact "$FIXTURE/presets/TCP only.txt" "TCP only.txt" "$TMP/tcp.argv" ||
+    fail "installed-generation artifact did not compile"
+[ "$COMPILED_INSTALL_GENERATION" = receipt-test ] &&
+    [ "$COMPILED_INSTALL_ARCHIVE_SHA256" = bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ] ||
+    fail "compiled artifact is not bound to the install generation"
+(
+    compile_preset_artifact() { return 97; }
+    ensure_compiled_artifact "$FIXTURE/presets/TCP only.txt" "TCP only.txt" "$TMP/tcp.argv"
+) || fail "unchanged generation-bound preset was rebuilt instead of reused"
 write_compiled_validation_receipt "$TMP/tcp.argv" ||
     fail "validated compiled preset receipt was not published"
 compiled_validation_receipt_current "$TMP/tcp.argv" ||
@@ -182,6 +187,8 @@ mv "$FIXTURE/install-generation.meta.next" "$FIXTURE/install-generation.meta"
 # promotion at reboot); a new transaction starts with an empty meta cache.
 INSTALL_META_CACHED_PATH=""
 assert_fails compiled_validation_receipt_current "$TMP/tcp.argv"
+assert_fails compiled_artifact_binding_current \
+    "$TMP/tcp.argv" "$FIXTURE/presets/TCP only.txt" "TCP only.txt"
 sed 's/generation=next-generation/generation=receipt-test/' \
     "$FIXTURE/install-generation.meta" > "$FIXTURE/install-generation.meta.next"
 chmod 0600 "$FIXTURE/install-generation.meta.next"
@@ -280,5 +287,7 @@ Z2_TEST_TMP="$TMP" sh "$ROOT/tests/shell/magisk-boot-installer.sh"
 Z2_TEST_TMP="$TMP" sh "$ROOT/tests/shell/packaging-recovery-flow.sh"
 Z2_TEST_TMP="$TMP" sh "$ROOT/tests/shell/preset-contract.sh"
 Z2_TEST_TMP="$TMP" sh "$ROOT/tests/shell/preset-apply-transaction.sh"
+Z2_TEST_TMP="$TMP" sh "$ROOT/tests/shell/preset-save-transaction.sh"
+Z2_TEST_TMP="$TMP" sh "$ROOT/tests/shell/daemon-replace-transaction.sh"
 
 echo "Shell integration tests passed"

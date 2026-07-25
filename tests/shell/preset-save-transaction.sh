@@ -81,6 +81,18 @@ if [ "${Z2_SAVE_TEST_RUNNING:-1}" = 1 ]; then
 else
     service_process_is_running() { return 1; }
 fi
+replace_daemon_in_locked_transaction() {
+    printf 'replace:in-process\n' >> "${Z2_SAVE_TEST_LOG:?}"
+    if [ "${Z2_SAVE_TEST_REPLACE_FAILS:-0}" = 1 ]; then
+        Z2_DAEMON_REPLACE_CONTROLLED=1
+        Z2_DAEMON_REPLACE_ERROR_DOMAIN=PROCESS
+        Z2_DAEMON_REPLACE_ERROR_CODE=PROCESS_LAUNCH_FAILED
+        Z2_DAEMON_REPLACE_ERROR_STAGE=START_LAUNCH
+        Z2_DAEMON_REPLACE_ERROR_DETAIL="nfqws2 launch failed"
+        return 1
+    fi
+    return 0
+}
 
 if [ "${1:-}" = --content-digest ]; then
     preset_canonical_digest "$2" || exit 3
@@ -163,7 +175,7 @@ run_save '_Alpha.candidate.1.txt' "$ALPHA_DIGEST" 'Alpha.txt' auto
 expect_complete_payload
 expect_payload Z2_APPLY_OUTCOME APPLIED
 expect_payload Z2_APPLY_CONFIG_COMMITTED 0
-grep -q '^replace:--replace$' "$LOG" || fail "the replacement transaction was not invoked"
+grep -q '^replace:in-process$' "$LOG" || fail "the replacement transaction was not invoked"
 [ "$(active_preset)" = 'Alpha.txt' ] || fail "the selection changed on a content-only save"
 grep -q 'name=AlphaEdited' "$ZAPRET/presets/Alpha.txt" || fail "the saved content was not published"
 expect_no_staging_residue
@@ -189,7 +201,7 @@ run_save '_Beta.candidate.3.txt' "$BETA_DIGEST" 'Beta.txt' apply
 expect_payload Z2_APPLY_OUTCOME SAVED_AND_APPLIED
 expect_payload Z2_APPLY_CONFIG_COMMITTED 1
 [ "$(active_preset)" = 'Beta.txt' ] || fail "save-and-apply did not commit the selection"
-grep -q '^replace:--replace$' "$LOG" || fail "save-and-apply did not replace the daemon"
+grep -q '^replace:in-process$' "$LOG" || fail "save-and-apply did not replace the daemon"
 expect_no_staging_residue
 
 # 4. A stale expected digest is refused before anything is written.

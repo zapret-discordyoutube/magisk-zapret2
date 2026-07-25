@@ -1,7 +1,8 @@
-# Zapret2 2.2.0 — Architecture Redesign
+# Zapret2 2.2.x — Architecture Redesign
 
-Status: implemented in 2.2.0. This document records the analysis findings that
-motivated the redesign, the design principles adopted, and the concrete changes.
+Status: the foundation shipped in 2.2.0; the lifecycle hot-path and the two
+remaining storage contracts are completed in 2.2.1. This document records the
+analysis findings, the adopted invariants, and the concrete changes.
 
 ## 1. Why
 
@@ -196,8 +197,58 @@ P7. **Diagnostics never undo a completed operation.** Once an effect is
   the identity; argv/exe cannot change while both hold) instead of paying
   three to four forks per 100 ms turn. A subshell forked from a shell that
   has the full lifecycle library sourced costs ~68 ms on this class of
-  device, which is the dominant remaining cost of a replacement transaction —
-  reducing substitution counts on the hot path is the next scheduled pass.
+  device, which was the dominant remaining cost of a replacement transaction.
+
+## 3a. Completion in 2.2.1
+
+- **One-process daemon replacement.** A running preset save no longer launches
+  a second `zapret-start.sh` that repeats lifecycle, generation, process and
+  validation proofs under the same lock. `daemon-replace-transaction.sh`
+  consumes the already-authenticated argv and validation receipt, proves that
+  the capture topology is unchanged, replaces only the exact owned daemon and
+  publishes the new owner/status records. A topology change is rejected before
+  teardown and falls back to the full firewall transaction. A failure after
+  teardown converges to a verified stopped state without starting a second
+  transaction.
+- **Lazy firewall layer.** The preset endpoint does not parse
+  `firewall-reconciler.sh` on the unchanged-topology success path. It loads the
+  layer only for failure convergence or delegates a topology-changing save to
+  the complete replacement transaction.
+- **Transaction metadata prefetch.** The lifecycle lock primes one exact,
+  existing-path `stat` batch. Missing optional files no longer make BusyBox
+  `stat` discard metadata for the paths that do exist, and root-only immutable
+  facts are cached only while the lifecycle lock proves single-writer
+  ownership. Android mksh treats an unescaped `|` in parameter-expansion
+  patterns as alternation; the cache parser therefore escapes its record
+  delimiter. Without that detail the batch was populated correctly but every
+  lookup returned an empty first field and silently paid the original `stat`.
+- **No redundant permission forks.** Files created under `umask 077` are
+  already mode 0600; their immediate `chmod 0600` calls were removed. Process
+  shutdown similarly consumes the verified pid/owner proof once and checks
+  liveness before entering its bounded poll.
+- **Install-bound argv format.** `Z2_ARGV 3` records both the install
+  generation and its archive SHA-256. Live reuse requires an exact match in
+  addition to preset/runtime digests; an offline `unbound` artifact remains
+  valid for preview but can never be launched as a current installed artifact.
+- **Uninstall fence has a commit point.** Direct uninstall keeps its tombstone
+  across every failure and interruption, then reacquires the lifecycle lock,
+  authenticates the same owner and retires the fence only after all cleanup
+  succeeds. Root-manager removal still atomically removes the entire private
+  state tree. A successful uninstall therefore leaves neither a dead tombstone
+  nor an empty private state directory.
+
+### Device result
+
+The same save-content transaction was measured twice in each build on a
+Pixel 9 Pro XL: replace one valid strategy in the active preset, then restore
+the exact original bytes. The pre-2.2.1 hot path took 11,266 ms forward and
+10,418 ms restoring. After the changes above it took 4,243 ms and 4,202 ms.
+Both operations returned the complete typed `APPLIED` receipt; the original
+and final canonical preset SHA-256 were identical, the owner PID publication
+was verified, and the lifecycle log recorded `firewall retained`. This is a
+61% reduction for the paired operation and brings both profile enable/disable
+and strategy changes, which share this transaction, below the five-second
+module target.
 
 ## 4. Changes in 2.2.0 (app)
 
@@ -224,32 +275,8 @@ surviving journal surfaces on the very next lifecycle observation as
 `RECOVERY_BLOCKED`, which names the remedy. The field is worth adding the
 next time the receipt version is raised for other reasons.
 
-## 4b. Older defects found during review and left for a later change
-
-These predate the redesign and were confirmed but not changed here, because
-each alters a fence or an on-disk format and the redesign was already large:
-
-- **The uninstall tombstone is never retired.** `uninstall.sh` invoked
-  directly (without the root manager's `remove` marker) succeeds and leaves
-  `uninstall.tombstone`, which `uninstall_tombstone_allows_start` refuses on
-  sight — so a module that stays installed can never start again. Removal
-  through the root manager is unaffected: it deletes the whole state tree.
-  The user-facing remedy is documented in `USER_OPERATIONS_RU.md`.
-- **The compiled argv is not bound to the install generation.** The binding
-  covers the preset name, the preset digest and the `runtime.ini` digest, so a
-  module update whose preset and runtime are byte-identical reuses the argv
-  compiled by the previous release. The validation receipt *is*
-  generation-bound, so the artifact is re-validated by a fresh dry-run — but
-  it is not recompiled.
-
 ## 5. Deferred (designed, not shipped in 2.2.0)
 
-- **Single-endpoint preset application.** The app currently performs the
-  preset transaction step-by-step (11 root round-trips, duplicate parsers on
-  both sides of the boundary). The target design is one module endpoint
-  (`apply-preset <name>`) returning a typed receipt, with the app reduced to a
-  pure client. This moves the Kotlin/shell boundary and is scheduled separately
-  to keep 2.2.0 reviewable.
 - **App decomposition**: splitting `ServiceLifecycleController` /
   `UpdateManager` / `ControlViewModel`, DI for the privileged layer, moving
   long-running installs to WorkManager, replacing source-grep policy tests

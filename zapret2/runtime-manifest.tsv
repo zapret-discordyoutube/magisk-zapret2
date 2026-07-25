@@ -16,6 +16,7 @@ immutable-file|0644|zapret2/upstream-zapret2.archive.sha256
 immutable-exec|0755|zapret2/scripts/common.sh
 immutable-exec|0755|zapret2/scripts/firewall-reconciler.sh
 immutable-exec|0755|zapret2/scripts/command-builder.sh
+immutable-exec|0755|zapret2/scripts/daemon-replace-transaction.sh
 immutable-exec|0755|zapret2/scripts/package-contract.sh
 immutable-exec|0755|zapret2/scripts/runtime-config.sh
 immutable-exec|0755|zapret2/scripts/runtime-init.sh

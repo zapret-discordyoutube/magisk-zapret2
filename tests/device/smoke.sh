@@ -1100,70 +1100,16 @@ Z2_UNINSTALL_PATHS_COMPLETE'
     capture_no_owned_process_audit "$vu_dir/process-audit.txt"
 
     capture_root_query "$vu_dir/state-audit.txt" "
-[ -d $STATE_DIR ] && [ ! -L $STATE_DIR ] || exit 161
-z2_state_stat=\$(stat -c %a:%u:%g $STATE_DIR 2>/dev/null) || exit 162
-[ \"\$z2_state_stat\" = 700:0:0 ] || exit 163
-z2_state_entries=\$(ls -A $STATE_DIR 2>/dev/null) || exit 164
-[ \"\$z2_state_entries\" = uninstall.tombstone ] || exit 165
-[ -f $STATE_DIR/uninstall.tombstone ] && [ ! -L $STATE_DIR/uninstall.tombstone ] || exit 166
-z2_tombstone_stat=\$(stat -c %h:%a:%u:%g $STATE_DIR/uninstall.tombstone 2>/dev/null) || exit 167
-[ \"\$z2_tombstone_stat\" = 1:600:0:0 ] || exit 168
-z2_tombstone_keys=\$(sed 's/=.*//' $STATE_DIR/uninstall.tombstone 2>/dev/null) || exit 169
-[ \"\$z2_tombstone_keys\" = 'version
-pid
-starttime
-token
-module_dir' ] || exit 170
-z2_tombstone_version=\$(sed -n '1s/^version=//p' $STATE_DIR/uninstall.tombstone) || exit 171
-z2_tombstone_pid=\$(sed -n '2s/^pid=//p' $STATE_DIR/uninstall.tombstone) || exit 172
-z2_tombstone_start=\$(sed -n '3s/^starttime=//p' $STATE_DIR/uninstall.tombstone) || exit 173
-z2_tombstone_token=\$(sed -n '4s/^token=//p' $STATE_DIR/uninstall.tombstone) || exit 174
-z2_tombstone_module=\$(sed -n '5s/^module_dir=//p' $STATE_DIR/uninstall.tombstone) || exit 175
-[ \"\$z2_tombstone_version\" = 1 ] || exit 176
-case \"\$z2_tombstone_pid\" in ''|*[!0-9]*) exit 177;; esac
-[ \"\$z2_tombstone_pid\" -gt 0 ] 2>/dev/null || exit 178
-case \"\$z2_tombstone_start\" in ''|*[!0-9]*) exit 179;; esac
-case \"\$z2_tombstone_token\" in ''|*[!A-Za-z0-9._-]*) exit 180;; esac
-[ \"\$z2_tombstone_module\" = /data/adb/modules/zapret2 ] || exit 181
-if [ -e /proc/\$z2_tombstone_pid ] || [ -L /proc/\$z2_tombstone_pid ]; then
-    [ -r /proc/\$z2_tombstone_pid/stat ] || exit 182
-    z2_tombstone_live_start=\$(awk '{ print \$22 }' /proc/\$z2_tombstone_pid/stat 2>/dev/null) || exit 183
-    case \"\$z2_tombstone_live_start\" in ''|*[!0-9]*) exit 184;; esac
-    [ \"\$z2_tombstone_live_start\" != \"\$z2_tombstone_start\" ] || exit 185
-else
-    [ ! -e /proc/\$z2_tombstone_pid/stat ] && [ ! -L /proc/\$z2_tombstone_pid/stat ] || exit 186
-fi
-printf 'Z2_UNINSTALL_STATE_DIR=700:0:0\n'
-printf 'Z2_UNINSTALL_STATE_ENTRIES=uninstall.tombstone\n'
-printf 'Z2_UNINSTALL_TOMBSTONE=1:600:0:0\n'
-printf 'Z2_UNINSTALL_TOMBSTONE_VERSION=%s\n' \"\$z2_tombstone_version\"
-printf 'Z2_UNINSTALL_TOMBSTONE_PID=%s\n' \"\$z2_tombstone_pid\"
-printf 'Z2_UNINSTALL_TOMBSTONE_STARTTIME=%s\n' \"\$z2_tombstone_start\"
-printf 'Z2_UNINSTALL_TOMBSTONE_TOKEN=%s\n' \"\$z2_tombstone_token\"
-printf 'Z2_UNINSTALL_TOMBSTONE_MODULE_DIR=%s\n' \"\$z2_tombstone_module\"
-printf 'Z2_UNINSTALL_TOMBSTONE_OWNER=dead\n'
+[ ! -e $STATE_DIR ] && [ ! -L $STATE_DIR ] || exit 161
+printf 'Z2_UNINSTALL_STATE_DIR=absent\n'
+printf 'Z2_UNINSTALL_TOMBSTONE=absent\n'
 printf 'Z2_UNINSTALL_STATE_COMPLETE=1\n'"
     validate_query_schema "$vu_dir/state-audit.txt" 'Z2_UNINSTALL_STATE_DIR
-Z2_UNINSTALL_STATE_ENTRIES
 Z2_UNINSTALL_TOMBSTONE
-Z2_UNINSTALL_TOMBSTONE_VERSION
-Z2_UNINSTALL_TOMBSTONE_PID
-Z2_UNINSTALL_TOMBSTONE_STARTTIME
-Z2_UNINSTALL_TOMBSTONE_TOKEN
-Z2_UNINSTALL_TOMBSTONE_MODULE_DIR
-Z2_UNINSTALL_TOMBSTONE_OWNER
 Z2_UNINSTALL_STATE_COMPLETE'
-    for vu_pair in Z2_UNINSTALL_STATE_DIR=700:0:0 Z2_UNINSTALL_STATE_ENTRIES=uninstall.tombstone Z2_UNINSTALL_TOMBSTONE=1:600:0:0 Z2_UNINSTALL_TOMBSTONE_VERSION=1 Z2_UNINSTALL_TOMBSTONE_MODULE_DIR=/data/adb/modules/zapret2 Z2_UNINSTALL_TOMBSTONE_OWNER=dead Z2_UNINSTALL_STATE_COMPLETE=1; do
+    for vu_pair in Z2_UNINSTALL_STATE_DIR=absent Z2_UNINSTALL_TOMBSTONE=absent Z2_UNINSTALL_STATE_COMPLETE=1; do
         grep -Fxq "$vu_pair" "$vu_dir/state-audit.txt" || fail "post-uninstall state audit failed: $vu_pair"
     done
-    vu_tombstone_pid=$(sed -n 's/^Z2_UNINSTALL_TOMBSTONE_PID=//p' "$vu_dir/state-audit.txt")
-    case "$vu_tombstone_pid" in ''|*[!0-9]*) fail "post-uninstall tombstone pid is malformed";; esac
-    [ "$vu_tombstone_pid" -gt 0 ] 2>/dev/null || fail "post-uninstall tombstone pid is not positive"
-    vu_tombstone_start=$(sed -n 's/^Z2_UNINSTALL_TOMBSTONE_STARTTIME=//p' "$vu_dir/state-audit.txt")
-    case "$vu_tombstone_start" in ''|*[!0-9]*) fail "post-uninstall tombstone starttime is malformed";; esac
-    vu_tombstone_token=$(sed -n 's/^Z2_UNINSTALL_TOMBSTONE_TOKEN=//p' "$vu_dir/state-audit.txt")
-    case "$vu_tombstone_token" in ''|*[!A-Za-z0-9._-]*) fail "post-uninstall tombstone token is malformed";; esac
-    capture_root_query "$vu_dir/state-listing.txt" "ls -lan $STATE_DIR"
 }
 
 require_adb

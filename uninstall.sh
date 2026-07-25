@@ -625,10 +625,11 @@ case "$RECOVERY_ARTIFACT_CLASS" in
     *) fail_while_locked "Unexpected recovery-artifact class blocks uninstall: $RECOVERY_ARTIFACT_CLASS" ;;
 esac
 
-# Publish the persistent start gate while the uninstall parent still owns the
+# Publish the durable start gate while the uninstall parent still owns the
 # lifecycle lock.  zapret-stop.sh receives the exact live owner credentials;
-# every other start/stop/restart caller is refused.  The tombstone deliberately
-# survives successful uninstall until a fully staged reinstall clears it.
+# every other start/stop/restart caller is refused.  A failed or interrupted
+# uninstall preserves the tombstone; the successful direct path retires it in
+# its final serialized commit below.
 if ! publish_uninstall_tombstone; then
     fail_while_locked "Unable to publish and verify the uninstall tombstone; state was preserved"
 fi
@@ -738,8 +739,9 @@ if ! release_lifecycle_lock; then
 fi
 LOCK_ACQUIRED=0
 
-# The state directory intentionally remains as a tiny root-only tombstone
-# carrier.  Removing it after unlocking would reopen the final-start race.
+# The state directory remains a tiny root-only tombstone carrier until every
+# late cleanup step has succeeded. Removing it before the final serialized
+# commit would reopen the final-start race.
 if ! state_dir_is_secure || ! state_dir_resolves_exactly; then
     report_error "State directory changed during uninstall; it was preserved"
     exit 1
@@ -803,6 +805,41 @@ if state_directory_has_preserved_children; then
     report_error "Zapret2 service/firewall cleanup completed, but unknown state entries were preserved; uninstall cleanup is partial"
     exit 1
 fi
+
+# A direct invocation leaves the module package installed.  The tombstone is a
+# transaction fence, not permanent state: reacquire the lifecycle lock after
+# every late cleanup, authenticate the same live uninstall owner once more,
+# retire the fence, then release.  A crash before this commit preserves the
+# tombstone and continues to block start; a completed uninstall never strands
+# the installed module behind a dead owner.
+trap unlock_after_signal HUP INT TERM
+if ! acquire_lifecycle_lock; then
+    report_error "Completed uninstall could not reacquire lifecycle ownership; the tombstone was preserved"
+    exit 1
+fi
+LOCK_ACQUIRED=1
+if ! state_file_is_secure "$UNINSTALL_TOMBSTONE" || ! read_uninstall_tombstone ||
+   [ "$UNINSTALL_FILE_PID" != "$$" ] ||
+   [ "$UNINSTALL_FILE_TOKEN" != "$ZAPRET2_UNINSTALL_TOKEN" ] ||
+   [ "$UNINSTALL_FILE_MODULE" != "$MODPATH" ]; then
+    fail_while_locked "Completed uninstall tombstone changed before retirement; it was preserved"
+fi
+rm -f "$UNINSTALL_TOMBSTONE" 2>/dev/null ||
+    fail_while_locked "Completed uninstall tombstone could not be retired"
+[ ! -e "$UNINSTALL_TOMBSTONE" ] && [ ! -L "$UNINSTALL_TOMBSTONE" ] ||
+    fail_while_locked "Completed uninstall tombstone retirement could not be verified"
+if ! release_lifecycle_lock; then
+    LOCK_ACQUIRED=0
+    report_error "Uninstall committed, but final lifecycle lock release could not be verified"
+    exit 1
+fi
+LOCK_ACQUIRED=0
+trap - HUP INT TERM
+
+# No authoritative boot-local state remains.  An already-racing new start may
+# recreate or occupy this directory after the lock release; in that case rmdir
+# simply leaves the new transaction's state intact.
+rmdir "$STATE_DIR" 2>/dev/null || :
 
 if [ "${UNINSTALL_IPV6_UNVERIFIED:-0}" = 1 ]; then
     # The uninstall did everything it owns, but one family could not be

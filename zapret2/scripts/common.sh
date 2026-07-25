@@ -15,9 +15,34 @@
 ZAPRET_DIR="${ZAPRET_DIR:-$(dirname "$SCRIPT_DIR")}"
 MODDIR="${MODDIR:-$(dirname "$ZAPRET_DIR")}"
 FIREWALL_RECONCILER="$SCRIPT_DIR/firewall-reconciler.sh"
-[ ! -r "$FIREWALL_RECONCILER" ] || . "$FIREWALL_RECONCILER"
+Z2_FIREWALL_RECONCILER_LOADED=0
+
+# Most configuration mutations never inspect or publish netfilter state.  They
+# used to parse the complete reconciler anyway, making every later fork from
+# Android's mksh copy another large function tree.  Callers on those paths set
+# ZAPRET2_LAZY_FIREWALL_RECONCILER=1 and pay for this layer only if an
+# exceptional rollback actually has to dismantle retained rules.
+z2_load_firewall_reconciler() {
+    [ "$Z2_FIREWALL_RECONCILER_LOADED" = 1 ] && return 0
+    [ -r "$FIREWALL_RECONCILER" ] && [ ! -L "$FIREWALL_RECONCILER" ] || return 1
+    . "$FIREWALL_RECONCILER" || return 1
+    command -v z2_fw_reconcile_family >/dev/null 2>&1 || return 1
+    Z2_FIREWALL_RECONCILER_LOADED=1
+}
+
+if [ "${ZAPRET2_LAZY_FIREWALL_RECONCILER:-0}" != 1 ]; then
+    z2_load_firewall_reconciler || :
+fi
 
 umask 077
+
+# Private state files are published by creating a fresh sibling under this
+# umask and renaming it over the target. POSIX file creation applies the
+# umask, so such a file is 0600 the moment it exists: the chmod that used to
+# follow each creation set the mode it already had, and every one of those
+# was a fork of /system/bin/chmod. The publishers that truncate an existing
+# file, rotate the log, or hand a directory to another owner still chmod,
+# because there the mode is not a property of creation.
 
 # Android mksh ships printf as an external binary, so each printf call is a
 # fork+exec (~100ms on device). mksh's raw print builtin covers the single
@@ -33,6 +58,15 @@ esac
 Z2_NL='
 '
 Z2_PRINTF_TAB='	'
+
+# Line parsers strip CR from CRLF input, and each one used to mint the byte
+# with its own "$(printf '\r')" — a full subshell fork for one character, on
+# the hottest parsing paths. mksh spells the byte as a literal; every other
+# shell this module meets pays the fork once at load instead of per call.
+case "${KSH_VERSION:-}" in
+    *KSH*) Z2_CR=$'\r' ;;
+    *) Z2_CR="$(printf '\r')" ;;
+esac
 
 # Generalizes the z2_emit_line decision to every printf in the module: on mksh
 # each printf is a fork+exec of /system/bin/printf (~45ms on a modern Pixel),
@@ -325,13 +359,115 @@ Z2_PATH_META_MODE=""
 Z2_PATH_META_NLINK=""
 Z2_PATH_META_SIZE=""
 
+# Transaction-scoped metadata prefetch. stat answers as many paths per fork as
+# it is handed, and on Android a fork from this library costs about as much as
+# the whole rest of a lifecycle phase, so one batched call at the top of a
+# transaction replaces a dozen single-path ones spread through it. The cache is
+# only armed while this process holds the lifecycle lock — the same
+# single-writer invariant Z2_STATE_DIR_PROOF rests on — and every publisher
+# retires the entry it is about to overwrite, so a cached answer never
+# describes a file this transaction has already changed.
+Z2_META_CACHE=""
+
+meta_cache_retire_all() {
+    Z2_META_CACHE=""
+}
+
+meta_cache_forget() {
+    local head tail
+    case "$Z2_META_CACHE" in
+        *"$Z2_NL$1|"*) ;;
+        *) return 0 ;;
+    esac
+    head="${Z2_META_CACHE%%"$Z2_NL$1|"*}"
+    tail="${Z2_META_CACHE#*"$Z2_NL$1|"}"
+    tail="${tail#*"$Z2_NL"}"
+    Z2_META_CACHE="$head$Z2_NL$tail"
+}
+
+# Paths that do not exist are simply absent from the answer; the callers that
+# ask about them fall through to their own fresh probe.
+meta_cache_prime() {
+    local out
+    Z2_META_CACHE=""
+    [ "${LOCK_HELD:-0}" != 0 ] || return 0
+    [ "$Z2_HAVE_STAT" = 1 ] || return 0
+    [ "$#" -gt 0 ] || return 0
+    out="$(stat -c '%n|%u|%a|%h|%s' "$@" 2>/dev/null)" || out=""
+    [ -n "$out" ] || return 0
+    Z2_META_CACHE="$Z2_NL$out$Z2_NL"
+}
+
+meta_cache_read() {
+    local rest
+    case "$Z2_META_CACHE" in
+        *"$Z2_NL$1|"*) ;;
+        *) return 1 ;;
+    esac
+    rest="${Z2_META_CACHE#*"$Z2_NL$1|"}"
+    rest="${rest%%"$Z2_NL"*}"
+    # Android mksh treats an unescaped `|` in a parameter-expansion pattern as
+    # alternation, so `${rest%%|*}` matches the empty alternative and returns
+    # an empty field. Escape the record delimiter: otherwise every cache lookup
+    # silently misses and falls back to its own stat.
+    Z2_PATH_META_UID="${rest%%\|*}"; rest="${rest#*\|}"
+    Z2_PATH_META_MODE="${rest%%\|*}"; rest="${rest#*\|}"
+    Z2_PATH_META_NLINK="${rest%%\|*}"; rest="${rest#*\|}"
+    Z2_PATH_META_SIZE="$rest"
+    case "$Z2_PATH_META_UID$Z2_PATH_META_MODE$Z2_PATH_META_NLINK$Z2_PATH_META_SIZE" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    Z2_PATH_META_PATH="$1"
+    return 0
+}
+
+meta_cache_add() {
+    local out
+    [ "${LOCK_HELD:-0}" != 0 ] || return 0
+    [ "$Z2_HAVE_STAT" = 1 ] || return 0
+    [ "$#" -gt 0 ] || return 0
+    out="$(stat -c '%n|%u|%a|%h|%s' "$@" 2>/dev/null)" || return 1
+    [ -n "$out" ] || return 0
+    if [ -n "$Z2_META_CACHE" ]; then
+        Z2_META_CACHE="${Z2_META_CACHE}${out}${Z2_NL}"
+    else
+        Z2_META_CACHE="$Z2_NL$out$Z2_NL"
+    fi
+}
+
 path_meta_retire() {
     Z2_PATH_META_PATH=""
 }
 
+# The exact file set a lifecycle transaction proves things about. Listing it
+# here keeps the batch honest: a path that is not on it simply pays its own
+# stat, and a path that stops existing is absent from the answer.
+prime_transaction_metadata() {
+    # BusyBox stat returns a non-zero aggregate status when any operand is
+    # absent.  Build the exact existing set with shell builtins first, so one
+    # missing optional file cannot discard the answers for every present one.
+    set --
+    [ ! -e "$PIDFILE" ] && [ ! -L "$PIDFILE" ] || set -- "$@" "$PIDFILE"
+    [ ! -e "$OWNER_STATE" ] && [ ! -L "$OWNER_STATE" ] || set -- "$@" "$OWNER_STATE"
+    [ ! -e "$STATUS_SNAPSHOT" ] && [ ! -L "$STATUS_SNAPSHOT" ] || set -- "$@" "$STATUS_SNAPSHOT"
+    [ ! -e "$LOGFILE" ] && [ ! -L "$LOGFILE" ] || set -- "$@" "$LOGFILE"
+    [ ! -e "$RUNTIME_OWNER_MARKER" ] && [ ! -L "$RUNTIME_OWNER_MARKER" ] || set -- "$@" "$RUNTIME_OWNER_MARKER"
+    [ ! -e "$COMPILED_ARGV_FILE" ] && [ ! -L "$COMPILED_ARGV_FILE" ] || set -- "$@" "$COMPILED_ARGV_FILE"
+    [ ! -e "$COMPILED_VALIDATION_RECEIPT" ] && [ ! -L "$COMPILED_VALIDATION_RECEIPT" ] ||
+        set -- "$@" "$COMPILED_VALIDATION_RECEIPT"
+    [ ! -e "$STARTUP_LOG" ] && [ ! -L "$STARTUP_LOG" ] || set -- "$@" "$STARTUP_LOG"
+    [ ! -e "$ERROR_LOG" ] && [ ! -L "$ERROR_LOG" ] || set -- "$@" "$ERROR_LOG"
+    [ ! -e "$CMDLINE_FILE" ] && [ ! -L "$CMDLINE_FILE" ] || set -- "$@" "$CMDLINE_FILE"
+    [ ! -e "$INSTALL_GENERATION_META" ] && [ ! -L "$INSTALL_GENERATION_META" ] ||
+        set -- "$@" "$INSTALL_GENERATION_META"
+    meta_cache_prime "$@"
+}
+
+
 path_meta_capture() {
     local path="$1" meta
     Z2_PATH_META_PATH=""
+    meta_cache_read "$path" && return 0
     [ "$Z2_HAVE_STAT" = 1 ] || return 1
     meta="$(stat -c '%u %a %h %s' "$path" 2>/dev/null)" || return 1
     set -- $meta
@@ -351,12 +487,20 @@ path_meta_size_read() {
         Z2_PATH_SIZE="$Z2_PATH_META_SIZE"
         return 0
     fi
+    if meta_cache_read "$1"; then
+        Z2_PATH_SIZE="$Z2_PATH_META_SIZE"
+        return 0
+    fi
     Z2_PATH_SIZE="$(wc -c < "$1" 2>/dev/null)" || return 1
 }
 
 path_uid_is_root() {
     local path="$1" uid listing
     if [ -n "$Z2_PATH_META_PATH" ] && [ "$Z2_PATH_META_PATH" = "$path" ]; then
+        [ "$Z2_PATH_META_UID" = 0 ]
+        return
+    fi
+    if meta_cache_read "$path"; then
         [ "$Z2_PATH_META_UID" = 0 ]
         return
     fi
@@ -417,11 +561,11 @@ ensure_state_dir() {
     retire_state_dir_proof
     if [ -e "$STATE_DIR" ] || [ -L "$STATE_DIR" ]; then
         [ -d "$STATE_DIR" ] && [ ! -L "$STATE_DIR" ] || return 1
-        path_uid_is_root "$STATE_DIR" || return 1
+        state_dir_is_secure
+        return
     else
         mkdir "$STATE_DIR" 2>/dev/null || return 1
     fi
-    chmod 0700 "$STATE_DIR" 2>/dev/null || return 1
     state_dir_is_secure
 }
 
@@ -453,19 +597,36 @@ ensure_state_tmp_dir() {
     fi
     # Validate unconditionally: a losing mkdir race must never be accepted on
     # the strength of [ -d ] alone, which follows a symlink planted between
-    # the existence test and the mkdir. chmod and stat follow symlinks too, so
-    # re-assert the identity afterwards rather than trusting the pre-check.
+    # the existence test and the mkdir. umask 077 already gives a new
+    # directory 0700; an existing directory with any other mode is unsafe,
+    # not something a hot transaction should silently repair.
     [ -d "$Z2_STATE_TMP" ] && [ ! -L "$Z2_STATE_TMP" ] || return 1
-    chmod 0700 "$Z2_STATE_TMP" 2>/dev/null || return 1
-    [ -d "$Z2_STATE_TMP" ] && [ ! -L "$Z2_STATE_TMP" ] || return 1
-    path_uid_is_root "$Z2_STATE_TMP" || return 1
+    path_meta_capture "$Z2_STATE_TMP"
+    path_uid_is_root "$Z2_STATE_TMP" && [ "$Z2_PATH_META_MODE" = 700 ]
+    local rc=$?
+    path_meta_retire
+    return "$rc"
+}
+
+# A managed file's ownership is a property of the directory that holds it, not
+# a fact worth re-forking stat for on every proof. STATE_DIR is proven to be a
+# root-owned 0700 directory, so no unprivileged process can create an entry in
+# it or chown one, and while this process holds the lifecycle lock it is the
+# only cooperating root writer — the same single-writer invariant
+# Z2_STATE_DIR_PROOF already rests on. The existence and regular-file questions
+# stay fresh below because they are shell builtins and cost nothing; only the
+# ownership question is answered from the directory proof. Without the lock the
+# per-file stat is still paid, so read-only observers keep today's behavior.
+managed_file_uid_is_root() {
+    [ "${LOCK_HELD:-0}" != 0 ] && [ "$Z2_STATE_DIR_PROOF" = valid ] && return 0
+    path_uid_is_root "$1"
 }
 
 state_file_is_secure() {
     state_dir_is_secure || return 1
     state_path_is_managed_file "$1" || return 1
     [ -f "$1" ] && [ ! -L "$1" ] || return 1
-    path_uid_is_root "$1"
+    managed_file_uid_is_root "$1"
 }
 
 observer_state_file_is_secure() {
@@ -504,6 +665,10 @@ path_mode_is_0600() {
         [ "$Z2_PATH_META_MODE" = 600 ]
         return
     fi
+    if meta_cache_read "$path"; then
+        [ "$Z2_PATH_META_MODE" = 600 ]
+        return
+    fi
     if [ "$Z2_HAVE_STAT" = 1 ]; then
         mode="$(stat -c '%a' "$path" 2>/dev/null)" || return 1
         [ "$mode" = 600 ]
@@ -517,6 +682,10 @@ path_mode_is_0600() {
 path_nlink_is_one() {
     local path="$1" links listing
     if [ -n "$Z2_PATH_META_PATH" ] && [ "$Z2_PATH_META_PATH" = "$path" ]; then
+        [ "$Z2_PATH_META_NLINK" = 1 ]
+        return
+    fi
+    if meta_cache_read "$path"; then
         [ "$Z2_PATH_META_NLINK" = 1 ]
         return
     fi
@@ -1004,6 +1173,7 @@ canonical_mark() {
 prepare_private_runtime_file() {
     local path="$1"
     ensure_state_dir || return 1
+    meta_cache_forget "$path"
     state_file_target_is_safe "$path" || return 1
     umask 077
     : > "$path" || return 1
@@ -1014,6 +1184,7 @@ prepare_private_runtime_file() {
 write_private_runtime_line() {
     local path="$1" value="$2" tmp="$1.tmp.$$" size
     ensure_state_dir || return 1
+    meta_cache_forget "$path"
     state_file_target_is_safe "$path" || return 1
     state_path_is_managed_file "$tmp" || return 1
     [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || return 1
@@ -1021,13 +1192,13 @@ write_private_runtime_line() {
     [ "$size" -le "$RUNTIME_METADATA_MAX_BYTES" ] 2>/dev/null || return 1
     umask 077
     z2_emit_line "$value" > "$tmp" || { rm -f "$tmp"; return 1; }
-    chmod 0600 "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
     mv -f "$tmp" "$path" || { rm -f "$tmp"; return 1; }
 }
 
 write_runtime_owner_marker() {
     local tmp="$RUNTIME_OWNER_MARKER.tmp.$$"
     ensure_state_dir || return 1
+    meta_cache_forget "$RUNTIME_OWNER_MARKER"
     state_file_target_is_safe "$RUNTIME_OWNER_MARKER" || return 1
     state_path_is_managed_file "$tmp" || return 1
     [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || return 1
@@ -1037,7 +1208,6 @@ write_runtime_owner_marker() {
         echo "module_dir=$MODDIR"
         echo "nfqws=$NFQWS2"
     } > "$tmp" || { rm -f "$tmp"; return 1; }
-    chmod 0600 "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
     mv -f "$tmp" "$RUNTIME_OWNER_MARKER" || { rm -f "$tmp"; return 1; }
 }
 
@@ -1298,7 +1468,7 @@ apply_runtime_core_overrides() {
     runtime_config_exists || return 1
     local current_section="" line="" cr key value core_sections=0 seen_keys="|" required missing=""
     RUNTIME_CORE_REPAIR_MODE="defaults"
-    cr="$(printf '\r')"
+    cr="$Z2_CR"
     while IFS= read -r line || [ -n "$line" ]; do
         line="${line%"$cr"}"
         trim_config_value_in_place "$line"
@@ -1669,7 +1839,6 @@ claim_lifecycle_recovery_gate() {
     z2_emit_line "pid=$$
 starttime=$self_start
 token=$token" > "$tmp" || return 1
-    chmod 0600 "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
     if ln "$tmp" "$LIFECYCLE_LOCK_REAPER_RECOVERY" 2>/dev/null; then
         rm -f "$tmp"
         return 0
@@ -1700,7 +1869,6 @@ claim_lifecycle_gate() {
             z2_emit_line "pid=$$
 starttime=$self_start
 token=$token" > "$tmp" || return 1
-            chmod 0600 "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
             if ln "$tmp" "$LIFECYCLE_LOCK_REAPER" 2>/dev/null; then
                 rm -f "$tmp"
                 if [ -e "$LIFECYCLE_LOCK_REAPER_RECOVERY" ]; then
@@ -1763,6 +1931,7 @@ acquire_lifecycle_lock() {
         LOCK_OWNER_PID="$owner_pid"
         LOCK_OWNER_START="$owner_start"
         LOCK_OWNER_TOKEN="$token"
+        prime_transaction_metadata
         return 0
     fi
 
@@ -1777,8 +1946,7 @@ acquire_lifecycle_lock() {
     umask 077
     if ! z2_emit_line "pid=$$
 starttime=$self_start
-token=$token" > "$candidate/owner" ||
-       ! chmod 0600 "$candidate/owner" 2>/dev/null; then
+token=$token" > "$candidate/owner"; then
         rm -rf "$candidate" 2>/dev/null
         LIFECYCLE_ACQUIRE_CANDIDATE=""; LIFECYCLE_ACQUIRE_TOKEN=""
         return 1
@@ -1799,6 +1967,7 @@ token=$token" > "$candidate/owner" ||
                 export ZAPRET2_LIFECYCLE_TOKEN="$token"
                 export ZAPRET2_LIFECYCLE_OWNER_PID="$$"
                 export ZAPRET2_LIFECYCLE_OWNER_START="$self_start"
+                prime_transaction_metadata
                 return 0
             fi
             release_lifecycle_gate "$token" >/dev/null 2>&1 || true
@@ -1871,6 +2040,7 @@ release_lifecycle_lock() {
     retire_owner_read_cache
     retire_state_dir_proof
     retire_proven_process_fact
+    meta_cache_retire_all
     [ "$LOCK_HELD" = 1 ] || { LOCK_HELD=0; return 0; }
     proc_starttime_read "$$" || return 1
     self_start="$PROC_STARTTIME"
@@ -2433,7 +2603,6 @@ firewall_fingerprint=$OWNER_WRITE_FIREWALL_FINGERPRINT" > "$tmp" || { rm -f "$tm
     size="$(wc -c < "$tmp" 2>/dev/null)" || { rm -f "$tmp"; return 1; }
     is_decimal "$size" && [ "$size" -gt 0 ] 2>/dev/null &&
         [ "$size" -le "$OWNER_STATE_MAX_BYTES" ] 2>/dev/null || { rm -f "$tmp"; return 1; }
-    chmod 0600 "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
     mv -f "$tmp" "$OWNER_STATE" || { rm -f "$tmp"; return 1; }
     OWNER_WRITE_READY=0; OWNER_WRITE_SOURCE_GENERATION=""
 }
@@ -2701,14 +2870,18 @@ stop_target_is_gone() {
 
 stop_verified_nfqws_pid() {
     local pid="$1" start="$2" expected_argv_sha256="${3:-}" expected_qnum="${4:-}" n=0
+    # A transaction that already proved this exact process re-establishes only
+    # immutable pid/starttime liveness here.  Without such a proof the helper
+    # transparently performs the complete argv/exe verification.
+    reverify_published_nfqws_pid "$pid" "$start" "$expected_argv_sha256" "$expected_qnum" ||
+        return 2
     # A stop attempt ends the fact's lifetime: the wait loops below must see
     # every death, including a zombie transition.
     retire_proven_process_fact
-    verify_nfqws_pid "$pid" "$start" "$expected_argv_sha256" "$expected_qnum" || return 2
     kill -TERM "$pid" 2>/dev/null || return 1
     while [ "$n" -lt 50 ]; do
-        sleep 0.1
         if stop_target_is_gone "$pid" "$start"; then return 0; fi
+        sleep 0.1
         n=$((n + 1))
     done
     if stop_target_is_gone "$pid" "$start"; then return 0; fi
@@ -2764,17 +2937,15 @@ stop_pidfile_process() {
     [ "$PROCESS_CLEANUP_PREFLIGHT_PROVEN" = 1 ] || preflight_owned_process_cleanup || return 1
     process_snapshot_pidfile_matches && process_snapshot_owner_matches || return 1
     if [ "$PROCESS_PREFLIGHT_LIVE" = 1 ]; then
-        verify_nfqws_pid "$PROCESS_PREFLIGHT_PID" "$PROCESS_PREFLIGHT_START" \
-            "$PROCESS_PREFLIGHT_ARGV_SHA256" "$PROCESS_PREFLIGHT_QNUM" || return 1
         stop_verified_nfqws_pid "$PROCESS_PREFLIGHT_PID" "$PROCESS_PREFLIGHT_START" \
             "$PROCESS_PREFLIGHT_ARGV_SHA256" "$PROCESS_PREFLIGHT_QNUM" || rc=1
     fi
-    # Never kill a process that appeared after the read-only proof. A new exact
-    # process makes teardown incomplete and leaves its evidence intact.
-    scan_exact_owned_nfqws >/dev/null 2>&1 || rc=1
-    [ -z "$OWNED_SCAN_PIDS" ] || rc=1
+    # The preflight scan ran under the lifecycle lock.  No cooperating root
+    # writer can create a second module process before this transaction ends,
+    # and /data/adb is not traversable by unprivileged Android processes.
+    # Re-scanning the complete process set after the exact proven PID died
+    # therefore re-proved a transaction fact without strengthening it.
     if [ "$rc" -eq 0 ]; then
-        process_snapshot_pidfile_matches && process_snapshot_owner_matches || return 1
         if [ "$PROCESS_PREFLIGHT_PIDFILE_PRESENT" = 1 ]; then rm -f "$PIDFILE" 2>/dev/null || rc=1; fi
         if [ "$PROCESS_PREFLIGHT_OWNER_PRESENT" = 1 ]; then
             rm -f "$OWNER_STATE" 2>/dev/null || rc=1
@@ -2825,7 +2996,14 @@ scan_exact_owned_nfqws() {
         case "$cmdline" in "$runtime_nfqws2"*) ;; *) continue ;; esac
         proc_starttime_read "$pid" || continue
         start="$PROC_STARTTIME"
-        if verify_nfqws_pid "$pid" "$start" "" ""; then
+        if [ -n "$Z2_PROVEN_PROCESS_FACT" ] &&
+           [ "${OWNER_STATE_PID:-}" = "$pid" ] &&
+           [ "${OWNER_STATE_START:-}" = "$start" ] &&
+           reverify_published_nfqws_pid "$pid" "$start" \
+               "$OWNER_STATE_ARGV_SHA256" "$OWNER_STATE_QNUM"; then
+            if [ -n "$OWNED_SCAN_PIDS" ]; then OWNED_SCAN_PIDS="$OWNED_SCAN_PIDS $pid"
+            else OWNED_SCAN_PIDS="$pid"; fi
+        elif verify_nfqws_pid "$pid" "$start" "" ""; then
             if [ -n "$OWNED_SCAN_PIDS" ]; then OWNED_SCAN_PIDS="$OWNED_SCAN_PIDS $pid"
             else OWNED_SCAN_PIDS="$pid"; fi
         fi
@@ -3280,8 +3458,11 @@ prepare_lifecycle_log() {
         fi
     fi
     : >> "$LOGFILE" || return 1
-    chmod 0600 "$LOGFILE" 2>/dev/null || return 1
-    state_file_is_secure "$LOGFILE" || return 1
+    path_meta_capture "$LOGFILE"
+    state_file_is_secure "$LOGFILE" && path_mode_is_0600 "$LOGFILE"
+    local rc=$?
+    path_meta_retire
+    [ "$rc" -eq 0 ] || return 1
     LOG_READY=1
     return 0
 }
@@ -3525,7 +3706,6 @@ error_stage=$error_stage
 error_detail=$error_detail"
         echo "diagnostics=$diagnostics"
     } > "$tmp" || { rm -f "$tmp"; return 1; }
-    chmod 0600 "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
     mv -f "$tmp" "$IPTABLES_STATUS" || { rm -f "$tmp"; return 1; }
 }
 

@@ -19,9 +19,9 @@ mkdir -p "$STATE"
 chmod 0700 "$STATE"
 chmod 0644 "$ZAPRET/runtime.ini"
 
-# The module transaction always reaches the packaged replacement transaction
-# through zapret-start.sh --replace. This stub proves the exact invocation and
-# the inherited lifecycle ownership without building real firewall state.
+# Keep a stale zapret-start.sh stub deliberately: any regression that re-enters
+# the full lifecycle process writes a distinguishable call and fails the
+# one-replacement assertions below.
 cat > "$SCRIPTS/zapret-start.sh" <<'EOF'
 #!/bin/sh
 printf 'replace:%s\n' "$*" >> "${Z2_APPLY_TEST_LOG:?}"
@@ -88,6 +88,19 @@ if [ "${Z2_APPLY_TEST_RUNNING:-1}" = 1 ]; then
 else
     service_process_is_running() { return 1; }
 fi
+replace_daemon_in_locked_transaction() {
+    printf 'replace:in-process\n' >> "${Z2_APPLY_TEST_LOG:?}"
+    printf 'replace-token:%s\n' "${ZAPRET2_LIFECYCLE_TOKEN:-none}" >> "$Z2_APPLY_TEST_LOG"
+    if [ "${Z2_APPLY_TEST_REPLACE_FAILS:-0}" = 1 ]; then
+        Z2_DAEMON_REPLACE_CONTROLLED=1
+        Z2_DAEMON_REPLACE_ERROR_DOMAIN=PROCESS
+        Z2_DAEMON_REPLACE_ERROR_CODE=PROCESS_LAUNCH_FAILED
+        Z2_DAEMON_REPLACE_ERROR_STAGE=START_LAUNCH
+        Z2_DAEMON_REPLACE_ERROR_DETAIL="nfqws2 launch failed"
+        return 1
+    fi
+    return 0
+}
 if [ "${Z2_APPLY_TEST_BREAK_ROLLBACK:-0}" = 1 ]; then
     rollback_runtime_config() { return 1; }
 fi
@@ -225,8 +238,8 @@ expect_payload Z2_APPLY_CONFIG_COMMITTED 1
 expect_payload Z2_APPLY_SERVICE_WAS_RUNNING 1
 expect_payload Z2_ERROR_STATUS OK
 [ "$(active_preset)" = 'Alpha.txt' ] || fail "the selection was not published"
-grep -Fxq 'replace:--replace' "$LOG" ||
-    fail "the packaged replacement transaction was not invoked"
+grep -Fxq 'replace:in-process' "$LOG" ||
+    fail "the in-process replacement transaction was not invoked"
 [ "$(grep -c '^replace:' "$LOG")" = 1 ] ||
     fail "the replacement transaction was invoked more than once"
 ! grep -Fxq 'replace-token:none' "$LOG" ||
@@ -297,10 +310,12 @@ grep -Fxq 'selected_dns=cloudflare|google' "$ZAPRET/runtime.ini" ||
     fail "the transaction duplicated the selection key"
 expect_no_candidate
 
-# The packaged entry point reuses the owning boundaries instead of
-# reimplementing them, and is declared exactly once as a packaged executable.
-grep -Fq 'zapret-start.sh" --replace' "$ROOT/zapret2/scripts/zapret-apply-preset.sh" ||
-    fail "the apply transaction does not reuse zapret-start.sh --replace"
+# The packaged entry point consumes validation inside the owning transaction
+# instead of entering a second lifecycle shell.
+grep -Fq 'replace_daemon_in_locked_transaction' "$ROOT/zapret2/scripts/zapret-apply-preset.sh" ||
+    fail "the apply transaction does not use in-process daemon replacement"
+grep -Fq 'Z2_DAEMON_REPLACE_CONTROLLED' "$ROOT/zapret2/scripts/zapret-apply-preset.sh" ||
+    fail "the full replacement fallback is not fenced before process teardown"
 grep -Fq -- '--commit-candidate' "$ROOT/zapret2/scripts/zapret-apply-preset.sh" ||
     fail "the apply transaction does not reuse the runtime.ini commit boundary"
 [ "$(grep -c 'immutable-exec|0755|zapret2/scripts/zapret-apply-preset.sh' \
@@ -312,5 +327,8 @@ grep -Fq -- '--commit-candidate' "$ROOT/zapret2/scripts/zapret-apply-preset.sh" 
 [ "$(grep -c '"immutable-exec|0755|zapret2/scripts/zapret-apply-preset.sh"' \
     "$ROOT/zapret2/scripts/package-contract.sh")" = 1 ] ||
     fail "the apply transaction is not enumerated as a packaged executable"
+[ "$(grep -c '"immutable-exec|0755|zapret2/scripts/daemon-replace-transaction.sh"' \
+    "$ROOT/zapret2/scripts/package-contract.sh")" = 1 ] ||
+    fail "the daemon replacement layer is not enumerated as a packaged executable"
 
 echo "Preset apply transaction shell tests passed"

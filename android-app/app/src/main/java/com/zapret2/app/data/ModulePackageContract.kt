@@ -16,6 +16,8 @@ internal object ModulePackageContract {
     const val RUNTIME_MANIFEST_PATH = "zapret2/runtime-manifest.tsv"
     internal const val PACKAGE_CONTRACT_SCRIPT_PATH = "zapret2/scripts/package-contract.sh"
     internal const val COMMAND_BUILDER_SCRIPT_PATH = "zapret2/scripts/command-builder.sh"
+    internal const val DAEMON_REPLACE_TRANSACTION_PATH =
+        "zapret2/scripts/daemon-replace-transaction.sh"
 
     /**
      * Module-owned preset application transaction.
@@ -61,6 +63,7 @@ internal object ModulePackageContract {
         "zapret2/scripts/common.sh",
         "zapret2/scripts/firewall-reconciler.sh",
         COMMAND_BUILDER_SCRIPT_PATH,
+        DAEMON_REPLACE_TRANSACTION_PATH,
         PACKAGE_CONTRACT_SCRIPT_PATH,
         "zapret2/scripts/runtime-config.sh",
         "zapret2/scripts/runtime-init.sh",
