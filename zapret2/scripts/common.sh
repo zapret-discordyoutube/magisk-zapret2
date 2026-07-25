@@ -2511,12 +2511,16 @@ resolve_ipv6_ownership_expectation() {
 # persist. A frontend that is not installed at all can never become queryable.
 FIREWALL_PROBE_ATTEMPTS="${FIREWALL_PROBE_ATTEMPTS:-5}"
 firewall_family_persistently_unavailable() {
-    local tool="$1" attempt=0
+    local tool="$1" attempt=0 attempts="$FIREWALL_PROBE_ATTEMPTS"
+    # A zero, negative or non-numeric budget would skip the loop entirely and
+    # report "permanently unavailable" without probing once — the fail-open
+    # this function exists to prevent.
+    is_decimal "$attempts" && [ "$attempts" -ge 1 ] 2>/dev/null || attempts=5
     command -v "$tool" >/dev/null 2>&1 || return 0
-    while [ "$attempt" -lt "$FIREWALL_PROBE_ATTEMPTS" ]; do
+    while [ "$attempt" -lt "$attempts" ]; do
         z2_fw_tool_available "$tool" && return 1
         attempt=$((attempt + 1))
-        [ "$attempt" -ge "$FIREWALL_PROBE_ATTEMPTS" ] || sleep 1
+        [ "$attempt" -ge "$attempts" ] || sleep 1
     done
     return 0
 }
