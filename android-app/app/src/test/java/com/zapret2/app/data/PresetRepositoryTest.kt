@@ -142,6 +142,205 @@ class PresetRepositoryTest {
     }
 
     @Test
+    fun applyProtocol_projectsACommittedTransactionOntoItsExactOutcome() {
+        assertEquals(
+            PresetApplyTransaction.Reported(PresetMutationOutcome.Applied),
+            PresetMachineProtocol.parseApply(applyPayload(), "good.txt"),
+        )
+        assertEquals(
+            PresetApplyTransaction.Reported(PresetMutationOutcome.Saved),
+            PresetMachineProtocol.parseApply(
+                applyPayload(outcome = "SAVED", wasRunning = "0"),
+                "good.txt",
+            ),
+        )
+        assertEquals(
+            PresetApplyTransaction.Reported(
+                PresetMutationOutcome.Rejected(PresetIssue.FORBIDDEN_IPCACHE_OPTION),
+            ),
+            PresetMachineProtocol.parseApply(
+                applyPayload(
+                    outcome = "REJECTED",
+                    issue = "FORBIDDEN_IPCACHE_OPTION",
+                    committed = "0",
+                    wasRunning = "0",
+                    error = failedApplyEnvelope("CONFIG", "FORBIDDEN_IPCACHE_OPTION", "APPLY_VALIDATE"),
+                ),
+                "good.txt",
+            ),
+        )
+        assertEquals(
+            PresetApplyTransaction.Reported(PresetMutationOutcome.RestartFailedRolledBack),
+            PresetMachineProtocol.parseApply(
+                applyPayload(
+                    outcome = "RESTART_FAILED_ROLLED_BACK",
+                    committed = "0",
+                    error = failedApplyEnvelope("PROCESS", "PROCESS_LAUNCH_FAILED", "START_LAUNCH"),
+                ),
+                "good.txt",
+            ),
+        )
+        assertEquals(
+            PresetApplyTransaction.Reported(PresetMutationOutcome.RollbackFailed),
+            PresetMachineProtocol.parseApply(
+                applyPayload(
+                    outcome = "ROLLBACK_FAILED",
+                    error = failedApplyEnvelope("PROCESS", "PROCESS_LAUNCH_FAILED", "START_LAUNCH"),
+                ),
+                "good.txt",
+            ),
+        )
+        assertEquals(
+            PresetApplyTransaction.Reported(PresetMutationOutcome.IoFailed),
+            PresetMachineProtocol.parseApply(
+                applyPayload(
+                    outcome = "WRITE_FAILED",
+                    committed = "0",
+                    error = failedApplyEnvelope("CONFIG", "RUNTIME_COMMIT_FAILED", "RUNTIME_COMMIT"),
+                ),
+                "good.txt",
+            ),
+        )
+    }
+
+    @Test
+    fun applyProtocol_reportsAnOlderModuleAsUnsupportedRatherThanAsAFailure() {
+        assertEquals(
+            PresetApplyTransaction.Unsupported,
+            PresetMachineProtocol.parseApply(listOf("Z2_APPLY_UNSUPPORTED=1"), "good.txt"),
+        )
+        // The sentinel only counts alone: mixed with a payload it is not a missing entry point.
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseApply(
+                listOf("Z2_APPLY_UNSUPPORTED=1") + applyPayload(),
+                "good.txt",
+            ),
+        )
+    }
+
+    @Test
+    fun applyProtocol_failsClosedOnTruncatedInconsistentOrForeignPayloads() {
+        val truncated = applyPayload().dropLast(1)
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseApply(truncated, "good.txt"),
+        )
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseApply(applyPayload(schema = "2"), "good.txt"),
+        )
+        // A committed outcome may never travel with a failure envelope.
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseApply(
+                applyPayload(error = failedApplyEnvelope("LIFECYCLE", "LIFECYCLE_FAILED", "APPLY")),
+                "good.txt",
+            ),
+        )
+        // Nor may a refusal travel without one.
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseApply(
+                applyPayload(outcome = "REJECTED", issue = "PRESET_MISSING", committed = "0"),
+                "good.txt",
+            ),
+        )
+        // An applied preset that the module says was never published is not applied.
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseApply(applyPayload(committed = "0"), "good.txt"),
+        )
+        // A committed apply on a service the module says was down is self-contradictory.
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseApply(applyPayload(wasRunning = "0"), "good.txt"),
+        )
+        // The answer must be about the preset that was requested.
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseApply(applyPayload(), "other.txt"),
+        )
+        // An outcome only a newer module knows is never guessed at.
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseApply(applyPayload(outcome = "PARTIALLY_APPLIED"), "good.txt"),
+        )
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseApply(applyPayload() + listOf("Z2_UNEXPECTED=1"), "good.txt"),
+        )
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseApply(emptyList(), "good.txt"),
+        )
+    }
+
+    @Test
+    fun applyProtocol_acceptsTheUnsafeNameRefusalWithoutEchoingTheRequest() {
+        assertEquals(
+            PresetApplyTransaction.Reported(
+                PresetMutationOutcome.Rejected(PresetIssue.UNSAFE_PRESET_NAME),
+            ),
+            PresetMachineProtocol.parseApply(
+                applyPayload(
+                    outcome = "REJECTED",
+                    issue = "UNSAFE_PRESET_NAME",
+                    preset = "",
+                    previous = "",
+                    committed = "0",
+                    wasRunning = "0",
+                    error = failedApplyEnvelope("CONFIG", "UNSAFE_PRESET_NAME", "APPLY_REQUEST"),
+                ),
+                "../escape.txt",
+            ),
+        )
+        // Every other outcome must still name the preset it acted on.
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseApply(applyPayload(preset = ""), "good.txt"),
+        )
+    }
+
+    private fun applyPayload(
+        schema: String = "1",
+        outcome: String = "APPLIED",
+        issue: String = "NONE",
+        preset: String = "good.txt",
+        previous: String = "old.txt",
+        committed: String = "1",
+        wasRunning: String = "1",
+        error: List<String> = cleanApplyEnvelope(),
+    ): List<String> = listOf(
+        "Z2_APPLY_SCHEMA=$schema",
+        "Z2_APPLY_OUTCOME=$outcome",
+        "Z2_APPLY_ISSUE=$issue",
+        "Z2_APPLY_PRESET=$preset",
+        "Z2_APPLY_PREVIOUS_PRESET=$previous",
+        "Z2_APPLY_CONFIG_COMMITTED=$committed",
+        "Z2_APPLY_SERVICE_WAS_RUNNING=$wasRunning",
+    ) + error + listOf("Z2_APPLY_COMPLETE=1")
+
+    private fun cleanApplyEnvelope(): List<String> = listOf(
+        "Z2_ERROR_SCHEMA=1",
+        "Z2_ERROR_STATUS=OK",
+        "Z2_ERROR_DOMAIN=NONE",
+        "Z2_ERROR_STAGE=NONE",
+        "Z2_ERROR_CODE=NONE",
+        "Z2_ERROR_DETAIL=",
+    )
+
+    private fun failedApplyEnvelope(domain: String, code: String, stage: String): List<String> =
+        listOf(
+            "Z2_ERROR_SCHEMA=1",
+            "Z2_ERROR_STATUS=ERROR",
+            "Z2_ERROR_DOMAIN=$domain",
+            "Z2_ERROR_STAGE=$stage",
+            "Z2_ERROR_CODE=$code",
+            "Z2_ERROR_DETAIL=the module refused",
+        )
+
+    @Test
     fun preview_stagesDraftUnderMutationGateAndAlwaysRemovesIt() = runBlocking {
         val runner = FakePresetRunner(validation = PresetValidation.Compatible)
         val gate = RecordingGate()
@@ -168,67 +367,6 @@ class PresetRepositoryTest {
         assertEquals(0, runner.validationCalls)
         assertEquals(1, runner.configWrites)
         assertEquals(1, runner.restartCalls)
-    }
-
-    @Test
-    fun apply_prefersTheModuleTransactionAndRunsNoLegacySteps() = runBlocking {
-        val runner = FakePresetRunner(
-            validation = PresetValidation.Compatible,
-            transactionalOutcome = PresetMutationOutcome.Applied,
-        )
-        val gate = RecordingGate()
-        val repository = TransactionalPresetRepository(runner, gate)
-
-        val result = repository.apply("published.txt")
-
-        assertEquals(PresetMutationOutcome.Applied, result)
-        assertEquals(1, gate.calls)
-        assertEquals(1, runner.transactionalCalls)
-        assertEquals(0, runner.configWrites)
-        assertEquals(0, runner.restartCalls)
-        assertEquals(listOf("apply-transaction"), runner.events)
-    }
-
-    @Test
-    fun applyReceipt_projectsEveryOutcomeAndFallsBackOnlyWithoutAReceipt() {
-        fun parse(lines: List<String>, success: Boolean = true) =
-            PresetMachineProtocol.parseApplyReceipt(lines, success)
-
-        // No receipt or explicit unsupported answer → legacy fallback allowed.
-        assertEquals(null, parse(listOf("random noise")))
-        assertEquals(null, parse(listOf("Z2_APPLY_SCHEMA=1", "Z2_APPLY_OUTCOME=unsupported")))
-
-        val receipt = listOf(
-            "start log line",
-            "Z2_APPLY_SCHEMA=1",
-            "Z2_APPLY_WAS_RUNNING=1",
-        )
-        assertEquals(
-            PresetMutationOutcome.Applied,
-            parse(receipt + "Z2_APPLY_OUTCOME=applied"),
-        )
-        assertEquals(
-            PresetMutationOutcome.Saved,
-            parse(receipt + "Z2_APPLY_OUTCOME=saved"),
-        )
-        assertEquals(
-            PresetMutationOutcome.Rejected(PresetIssue.UNSAFE_PRESET_NAME),
-            parse(receipt + "Z2_APPLY_OUTCOME=rejected", success = false),
-        )
-        assertEquals(
-            PresetMutationOutcome.RestartFailedRolledBack,
-            parse(receipt + "Z2_APPLY_OUTCOME=restart_failed_rolled_back", success = false),
-        )
-        assertEquals(
-            PresetMutationOutcome.RollbackFailed,
-            parse(receipt + "Z2_APPLY_OUTCOME=rollback_failed", success = false),
-        )
-        // A green outcome on a failed command, a garbled outcome, or a missing
-        // outcome is a protocol violation: never a success, never a second run.
-        assertEquals(PresetMutationOutcome.IoFailed, parse(receipt + "Z2_APPLY_OUTCOME=applied", success = false))
-        assertEquals(PresetMutationOutcome.IoFailed, parse(receipt + "Z2_APPLY_OUTCOME=saved", success = false))
-        assertEquals(PresetMutationOutcome.IoFailed, parse(receipt + "Z2_APPLY_OUTCOME=exploded"))
-        assertEquals(PresetMutationOutcome.IoFailed, parse(receipt))
     }
 
     @Test
@@ -470,7 +608,7 @@ class PresetRepositoryTest {
     }
 
     @Test
-    fun successfulApplyPersistsWithoutRevalidatingPublishedBytes() = runBlocking {
+    fun olderModuleWithoutTheTransactionStillAppliesThroughTheStepwiseFallback() = runBlocking {
         val runner = FakePresetRunner(validation = PresetValidation.Compatible, restartSucceeds = true)
         val repository = TransactionalPresetRepository(runner, RecordingGate())
 
@@ -478,12 +616,126 @@ class PresetRepositoryTest {
 
         assertEquals(PresetMutationOutcome.Applied, result)
         assertEquals(ActivePresetConfig("good.txt"), runner.config)
-        // The transactional probe answered "unavailable" (null), so the legacy
-        // steps follow it — still without any deep revalidation.
         assertEquals(
             listOf("apply-transaction", "snapshot-config", "write-config", "restart"),
             runner.events,
         )
+    }
+
+    @Test
+    fun apply_usesOneModuleTransactionAndProjectsItsOutcomeWithoutRebuildingTheSteps() = runBlocking {
+        val runner = FakePresetRunner(
+            validation = PresetValidation.Compatible,
+            applyTransaction = PresetApplyTransaction.Reported(PresetMutationOutcome.Applied),
+        )
+        val gate = RecordingGate()
+        val repository = TransactionalPresetRepository(runner, gate)
+
+        val result = repository.apply("good.txt")
+
+        assertEquals(PresetMutationOutcome.Applied, result)
+        assertEquals(1, gate.calls)
+        assertEquals(listOf("apply-transaction"), runner.events)
+        assertEquals(0, runner.configWrites)
+        assertEquals(0, runner.restartCalls)
+        assertEquals(0, runner.validationCalls)
+    }
+
+    @Test
+    fun apply_projectsEveryRefusalAndRollbackOutcomeWithoutSofteningIt() = runBlocking {
+        val projected = listOf(
+            PresetMutationOutcome.Saved,
+            PresetMutationOutcome.Rejected(PresetIssue.NFQWS_DRY_RUN_FAILED),
+            PresetMutationOutcome.WriteFailedRolledBack,
+            PresetMutationOutcome.RestartFailedRolledBack,
+            PresetMutationOutcome.RollbackFailed,
+            PresetMutationOutcome.Blocked,
+            PresetMutationOutcome.IoFailed,
+        )
+
+        projected.forEach { outcome ->
+            val runner = FakePresetRunner(
+                validation = PresetValidation.Compatible,
+                applyTransaction = PresetApplyTransaction.Reported(outcome),
+            )
+            val repository = TransactionalPresetRepository(runner, RecordingGate())
+
+            assertEquals(outcome, repository.apply("good.txt"))
+            assertEquals(listOf("apply-transaction"), runner.events)
+        }
+    }
+
+    @Test
+    fun apply_resolvesAnUnprovenTransactionFromThePublishedSelection() = runBlocking {
+        val committed = FakePresetRunner(
+            validation = PresetValidation.Compatible,
+            applyTransaction = PresetApplyTransaction.Indeterminate,
+        )
+        committed.config = ActivePresetConfig("good.txt")
+        val untouched = FakePresetRunner(
+            validation = PresetValidation.Compatible,
+            applyTransaction = PresetApplyTransaction.Indeterminate,
+        )
+        untouched.config = ActivePresetConfig("old.txt")
+
+        assertEquals(
+            PresetMutationOutcome.RollbackFailed,
+            TransactionalPresetRepository(committed, RecordingGate()).apply("good.txt"),
+        )
+        assertEquals(0, committed.configWrites)
+        assertEquals(0, committed.restartCalls)
+        assertEquals(
+            PresetMutationOutcome.IoFailed,
+            TransactionalPresetRepository(untouched, RecordingGate()).apply("good.txt"),
+        )
+        assertEquals(0, untouched.configWrites)
+    }
+
+    @Test
+    fun apply_acceptsALostAnswerOnlyWhenTheLiveGenerationIsTheOneThisLeaseStamped() = runBlocking {
+        val runner = FakePresetRunner(
+            validation = PresetValidation.Compatible,
+            applyTransaction = PresetApplyTransaction.Indeterminate,
+            applyIsProven = true,
+        )
+        runner.config = ActivePresetConfig("good.txt")
+        val repository = TransactionalPresetRepository(runner, RecordingGate())
+
+        val result = repository.apply("good.txt")
+
+        assertEquals(PresetMutationOutcome.Applied, result)
+        assertEquals(listOf("apply-transaction", "snapshot-config", "prove-commit"), runner.events)
+        assertEquals(0, runner.configWrites)
+        assertEquals(0, runner.restartCalls)
+    }
+
+    @Test
+    fun apply_neverReplaysALostTransactionAsAFreshAttempt() = runBlocking {
+        val runner = FakePresetRunner(
+            validation = PresetValidation.Compatible,
+            applyTransactionFailure = IllegalStateException("root transport died"),
+        )
+        runner.config = ActivePresetConfig("good.txt")
+        val repository = TransactionalPresetRepository(runner, RecordingGate())
+
+        val result = repository.apply("good.txt")
+
+        assertEquals(PresetMutationOutcome.RollbackFailed, result)
+        assertEquals(1, runner.applyTransactionCalls)
+        assertEquals(0, runner.configWrites)
+        assertEquals(0, runner.restartCalls)
+    }
+
+    @Test
+    fun apply_rejectsAnUnsafeNameBeforeReachingTheModule() = runBlocking {
+        val runner = FakePresetRunner(validation = PresetValidation.Compatible)
+        val repository = TransactionalPresetRepository(runner, RecordingGate())
+
+        val result = repository.apply("../escape.txt")
+
+        assertEquals(PresetMutationOutcome.Rejected(PresetIssue.UNSAFE_PRESET_NAME), result)
+        assertEquals(0, runner.applyTransactionCalls)
+        assertTrue(runner.events.isEmpty())
     }
 
     private class RecordingGate : PresetMutationGate {
@@ -496,6 +748,13 @@ class PresetRepositoryTest {
 
     private class FakePresetRunner(
         var validation: PresetValidation,
+        /**
+         * Defaults to the module generation that predates the transaction, so every pre-existing
+         * expectation in this file keeps exercising the stepwise fallback that generation needs.
+         */
+        var applyTransaction: PresetApplyTransaction = PresetApplyTransaction.Unsupported,
+        private val applyTransactionFailure: Exception? = null,
+        private val applyIsProven: Boolean = false,
         private val restartSucceeds: Boolean = true,
         private val restartFailure: Exception? = null,
         private val replaceReturns: Boolean = true,
@@ -505,7 +764,6 @@ class PresetRepositoryTest {
         private val replaceFailure: Exception? = null,
         private val snapshotFileFailureOnCall: Int? = null,
         private val configWriteFailureOnCall: Int? = null,
-        private val transactionalOutcome: PresetMutationOutcome? = null,
     ) : PresetRunner {
         var config = ActivePresetConfig("old.txt")
         val files = linkedMapOf<String, String>()
@@ -515,15 +773,16 @@ class PresetRepositoryTest {
         var restartCalls = 0
         var replaceCalls = 0
         var snapshotFileCalls = 0
-        var transactionalCalls = 0
-
-        override suspend fun applyPresetTransaction(fileName: String): PresetMutationOutcome? {
-            events += "apply-transaction"
-            transactionalCalls++
-            return transactionalOutcome
-        }
+        var applyTransactionCalls = 0
 
         override suspend fun listPresets(): List<String>? = null
+
+        override suspend fun applyPresetTransaction(fileName: String): PresetApplyTransaction {
+            events += "apply-transaction"
+            applyTransactionCalls++
+            applyTransactionFailure?.let { throw it }
+            return applyTransaction
+        }
 
         override suspend fun validatePreset(candidateFileName: String, logicalFileName: String): PresetValidation {
             events += "validate"
@@ -608,6 +867,11 @@ class PresetRepositoryTest {
             restartCalls++
             restartFailure?.let { throw it }
             return restartSucceeds
+        }
+
+        override suspend fun committedApplyIsProven(): Boolean {
+            events += "prove-commit"
+            return applyIsProven
         }
     }
 }

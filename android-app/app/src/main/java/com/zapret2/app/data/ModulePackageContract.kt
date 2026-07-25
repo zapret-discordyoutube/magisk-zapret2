@@ -16,6 +16,15 @@ internal object ModulePackageContract {
     const val RUNTIME_MANIFEST_PATH = "zapret2/runtime-manifest.tsv"
     internal const val PACKAGE_CONTRACT_SCRIPT_PATH = "zapret2/scripts/package-contract.sh"
     internal const val COMMAND_BUILDER_SCRIPT_PATH = "zapret2/scripts/command-builder.sh"
+
+    /**
+     * Module-owned preset application transaction.
+     *
+     * Every package this app installs must ship it, which is why it is mandatory here. An older
+     * generation that is already installed cannot grow it, so [PresetRepository] detects its
+     * absence in the typed result path and falls back to the stepwise flow instead of failing.
+     */
+    internal const val APPLY_PRESET_SCRIPT_PATH = "zapret2/scripts/zapret-apply-preset.sh"
     internal const val LIFECYCLE_CONTRACT_PATH = "zapret2/lifecycle-contract.version"
     internal const val LIFECYCLE_CONTRACT_VERSION = "8"
     internal const val PURGE_CONTRACT_PATH = "zapret2/scripts/lifecycle/purge-contract.sh"
@@ -58,7 +67,7 @@ internal object ModulePackageContract {
         "zapret2/scripts/zapret-start.sh",
         "zapret2/scripts/zapret-stop.sh",
         "zapret2/scripts/zapret-restart.sh",
-        "zapret2/scripts/zapret-apply-preset.sh",
+        APPLY_PRESET_SCRIPT_PATH,
         "zapret2/scripts/zapret-status.sh",
         "zapret2/scripts/zapret-full-rollback.sh",
         PURGE_CONTRACT_PATH,

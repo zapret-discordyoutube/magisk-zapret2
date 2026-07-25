@@ -1,6 +1,7 @@
 package com.zapret2.app.data
 
 import java.io.File
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -30,6 +31,50 @@ class PresetApplicationPerformanceContractTest {
         assertTrue(perform.contains("if (action == Action.RESTART) null else getStatusLocked()"))
         assertTrue(perform.contains("ZAPRET2_EMIT_STATUS_V6=1"))
         assertTrue(perform.contains("parseLifecycleReceipt(commandResult)"))
+    }
+
+    @Test
+    fun presetApplication_isOneModuleTransactionOverOnePrivilegedRoundTrip() {
+        val repository = repositoryFile(
+            "android-app/app/src/main/java/com/zapret2/app/data/PresetRepository.kt",
+        ).readText()
+        val transaction = repository
+            .substringAfter("override suspend fun applyPresetTransaction(")
+            .substringBefore("override suspend fun validatePreset(")
+        val apply = repository
+            .substringAfter("override suspend fun apply(fileName: String)")
+            .substringBefore("private suspend fun applyTransaction(")
+        val script = repositoryFile("zapret2/scripts/zapret-apply-preset.sh").readText()
+
+        // One executeRoot for the whole mutation: the previous flow paid a libsu round trip and a
+        // full common.sh sourcing for the snapshot, the observation, each configuration write and
+        // the restart.
+        assertEquals(1, Regex("ServiceLifecycleController\\.executeRoot").findAll(transaction).count())
+        assertTrue(transaction.contains("RootCommandPolicy.LIFECYCLE"))
+        assertTrue(transaction.contains("ModuleMutationCoordinator.inheritLifecycleLock"))
+        assertTrue(transaction.contains("PresetMachineProtocol.parseApply"))
+        assertFalse(apply.contains("snapshotActiveConfig"))
+        assertFalse(apply.contains("isServiceRunning"))
+        assertFalse(apply.contains("writeConfig"))
+        assertFalse(apply.contains("restartOrFalse"))
+
+        // The module sources the shared lifecycle helpers once and reuses the transactions that
+        // already own the replacement and the runtime.ini publication.
+        assertEquals(
+            1,
+            Regex("^\\. \"\\\$SCRIPT_DIR/common\\.sh\"$", RegexOption.MULTILINE).findAll(script).count(),
+        )
+        assertTrue(script.contains("zapret-start.sh\" --replace"))
+        assertTrue(script.contains("--commit-candidate"))
+        // The only privileged children are the two boundaries that already own the replacement and
+        // the runtime.ini publication; the running-service answer is read from the committed
+        // receipt in process rather than by launching another status observer.
+        assertEquals(
+            setOf("runtime-config.sh", "zapret-start.sh"),
+            Regex("sh \"\\\$SCRIPT_DIR/([A-Za-z0-9._-]+)\"").findAll(script)
+                .map { it.groupValues[1] }
+                .toSet(),
+        )
     }
 
     @Test
