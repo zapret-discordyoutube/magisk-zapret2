@@ -363,7 +363,10 @@ firewall_is_clean_after_rollback() {
         owned_family_absent ip6tables ||
             { [ "${CLEANUP_IPV6_OWNERSHIP_EXPECTED:-1}" = 0 ] && ! z2_fw_tool_available ip6tables; } ||
             return 1
-    elif [ "${CLEANUP_IPV6_OWNERSHIP_EXPECTED:-1}" = 1 ]; then
+    elif [ "${IPV6_PUBLICATION_RECORDED:-0}" = 1 ]; then
+        # No frontend at all: the module could only have published there while
+        # one existed, so absence of a record is the answer. Stop asks the
+        # same question the same way.
         return 1
     fi
     return 0

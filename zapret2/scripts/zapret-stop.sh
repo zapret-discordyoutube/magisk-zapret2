@@ -29,12 +29,20 @@ write_stop_status() {
     STATUS_ERRORS="$message"; STATUS_OWN_PID=""; STATUS_OWN_PID_STARTTIME=""
     STATUS_OWN_ARGV_SHA256=""; STATUS_OWNER_GENERATION=""
     STATUS_PID_VERIFIED=0; STATUS_OWNER_METADATA_VERIFIED=0
-    # Only a completed stop proved the owned ruleset is gone. A failed stop
-    # records what it could not prove, and claiming verification here would
-    # let the next stop read this snapshot as proof there is nothing left.
-    if [ "$state" = stopped ]; then STATUS_RULESET_VERIFIED=1; else STATUS_RULESET_VERIFIED=0; fi
+    # Only a completed stop that proved every family proves the owned ruleset
+    # is gone. A failed stop records what it could not prove, and a stop that
+    # had to skip an unqueryable family proved one family less — claiming
+    # verification in either case would let the next teardown read this
+    # snapshot back as proof there is nothing left, a claim that then sustains
+    # itself because this stop also retires the owner record.
+    if [ "$state" = stopped ] && [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" != 1 ]; then
+        STATUS_RULESET_VERIFIED=1; STATUS_IPV6_ACTIVE=0
+    else
+        STATUS_RULESET_VERIFIED=0
+        [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" != 1 ] && STATUS_IPV6_ACTIVE=0 || STATUS_IPV6_ACTIVE=1
+    fi
     STATUS_RULES_EXPECTED=0; STATUS_QNUM="${STOP_QNUM:-${STATUS_QNUM:-${QNUM:-}}}"
-    STATUS_IPV4_ACTIVE=0; STATUS_IPV6_ACTIVE=0; STATUS_CHAINS=0; STATUS_ANCHORS=0
+    STATUS_IPV4_ACTIVE=0; STATUS_CHAINS=0; STATUS_ANCHORS=0
     STATUS_IPV4_RULES=0; STATUS_IPV6_RULES=0
     STATUS_NFQUEUE_SUPPORTED="${STATUS_NFQUEUE_SUPPORTED:-0}"
     STATUS_QUEUE_BYPASS_SUPPORTED="${STATUS_QUEUE_BYPASS_SUPPORTED:-0}"
