@@ -94,7 +94,10 @@ class PresetApplicationPerformanceContractTest {
         assertFalse(start.contains("z2_fw_reconcile_family iptables precleaned"))
         assertFalse(reconciler.contains("z2_fw_delete_anchors"))
         assertFalse(reconciler.contains("z2_fw_drop_chain"))
-        assertTrue(reconciler.contains("z2_fw_emit_baseline_cleanup"))
+        // The cleanup batch is built from the captured baseline; the builder
+        // assembles it fork-free into a variable rather than emitting through
+        // a captured subshell, but the contract is the same derivation.
+        assertTrue(reconciler.contains("z2_fw_build_baseline_cleanup"))
         assertTrue(verify.contains("\"${'$'}tool\" -t mangle -S"))
         assertFalse(verify.contains(" -C "))
         assertFalse(verify.contains("z2_fw_chain_rule_count"))
