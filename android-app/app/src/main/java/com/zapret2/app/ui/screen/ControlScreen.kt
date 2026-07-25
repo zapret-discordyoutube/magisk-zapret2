@@ -65,7 +65,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.zapret2.app.ui.theme.SizeTokens
 import com.zapret2.app.ui.theme.SpacingTokens
 import com.zapret2.app.R
-import com.zapret2.app.data.ServiceLifecycleController
 import com.zapret2.app.ui.UiText
 import com.zapret2.app.ui.resolve
 import com.zapret2.app.ui.components.AppSnackbarEffect
@@ -715,7 +714,9 @@ private fun FullRollbackResultDialog(
     result: FullRollbackUiState.Result,
     onDismiss: () -> Unit,
 ) {
-    val success = result.outcome == ServiceLifecycleController.FullRollbackOutcome.COMPLETE
+    // The module is disabled and the rollback is finished in every rolled-back outcome; a receipt
+    // that could not prove one reboot-cleared step is reported as done with a reservation.
+    val success = result.rolledBack
     AlertDialog(
         onDismissRequest = {},
         shape = MaterialTheme.shapes.extraLarge,
@@ -753,6 +754,13 @@ private fun FullRollbackResultDialog(
                     ),
                     style = MaterialTheme.typography.bodyMedium,
                 )
+                if (result.unverifiedCleanup) {
+                    Text(
+                        text = stringResource(R.string.control_full_rollback_success_unverified),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 if (result.rebootRequired) {
                     Text(
                         text = stringResource(R.string.control_full_rollback_reboot_required),

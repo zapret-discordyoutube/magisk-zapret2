@@ -314,9 +314,15 @@ sealed interface FullRollbackUiState {
     data object InProgress : FullRollbackUiState
     data class Result(
         val outcome: ServiceLifecycleController.FullRollbackOutcome,
+        val rolledBack: Boolean,
         val rebootRequired: Boolean,
         val diagnostic: String,
-    ) : FullRollbackUiState
+    ) : FullRollbackUiState {
+        /** Rolled back, with one cleanup step the module could not verify and the reboot clears. */
+        val unverifiedCleanup: Boolean
+            get() = rolledBack &&
+                outcome != ServiceLifecycleController.FullRollbackOutcome.COMPLETE
+    }
 }
 
 sealed interface ModulePurgeUiState {
@@ -437,6 +443,7 @@ private const val KEY_ERROR_DETAIL_RESOURCE = "control_error_detail_resource"
 private const val KEY_ERROR_DETAIL_DYNAMIC = "control_error_detail_dynamic"
 private const val KEY_ROLLBACK_IN_PROGRESS = "control_full_rollback_in_progress"
 private const val KEY_ROLLBACK_OUTCOME = "control_full_rollback_outcome"
+private const val KEY_ROLLBACK_ROLLED_BACK = "control_full_rollback_rolled_back"
 private const val KEY_ROLLBACK_REBOOT_REQUIRED = "control_full_rollback_reboot_required"
 private const val KEY_ROLLBACK_DIAGNOSTIC = "control_full_rollback_diagnostic"
 private const val KEY_PURGE_IN_PROGRESS = "control_module_purge_in_progress"
@@ -571,9 +578,18 @@ internal fun restoreControlUiState(savedStateHandle: SavedStateHandle): ControlU
             .restoreEnumNameOrRemove<ServiceLifecycleController.FullRollbackOutcome>(
                 KEY_ROLLBACK_OUTCOME,
             )
+        val persistedRolledBack = savedStateHandle
+            .restoreTypedOrRemove<Boolean>(KEY_ROLLBACK_ROLLED_BACK) == true
         outcome?.let {
             FullRollbackUiState.Result(
                 outcome = it,
+                // A stale or forged flag must never upgrade an outcome that cannot be rolled
+                // back; only a partial receipt can carry the claim that it nonetheless finished.
+                rolledBack = when (it) {
+                    ServiceLifecycleController.FullRollbackOutcome.COMPLETE -> true
+                    ServiceLifecycleController.FullRollbackOutcome.PARTIAL -> persistedRolledBack
+                    else -> false
+                },
                 rebootRequired = savedStateHandle
                     .restoreTypedOrRemove<Boolean>(KEY_ROLLBACK_REBOOT_REQUIRED) == true,
                 diagnostic = sanitizedBoundedUiDiagnostic(
@@ -687,10 +703,12 @@ private fun canonicalizeRestoredControlState(
     }
     if (fullRollback !is FullRollbackUiState.Result) {
         savedStateHandle.remove<String>(KEY_ROLLBACK_OUTCOME)
+        savedStateHandle.remove<Boolean>(KEY_ROLLBACK_ROLLED_BACK)
         savedStateHandle.remove<Boolean>(KEY_ROLLBACK_REBOOT_REQUIRED)
         savedStateHandle.remove<String>(KEY_ROLLBACK_DIAGNOSTIC)
     } else {
         savedStateHandle[KEY_ROLLBACK_OUTCOME] = fullRollback.outcome.name
+        savedStateHandle[KEY_ROLLBACK_ROLLED_BACK] = fullRollback.rolledBack
         savedStateHandle[KEY_ROLLBACK_REBOOT_REQUIRED] = fullRollback.rebootRequired
         savedStateHandle[KEY_ROLLBACK_DIAGNOSTIC] = fullRollback.diagnostic
     }
@@ -754,6 +772,7 @@ internal class FullRollbackOperationCoordinator(
         lastResult: ControlLastResult,
     ) {
         savedStateHandle[KEY_ROLLBACK_OUTCOME] = result.outcome.name
+        savedStateHandle[KEY_ROLLBACK_ROLLED_BACK] = result.rolledBack
         savedStateHandle[KEY_ROLLBACK_REBOOT_REQUIRED] = result.rebootRequired
         savedStateHandle[KEY_ROLLBACK_DIAGNOSTIC] = diagnostic
         savedStateHandle[KEY_LAST_RESULT] = lastResult.name
@@ -773,6 +792,7 @@ internal class FullRollbackOperationCoordinator(
 
     private fun clearPersistedResult() {
         savedStateHandle.remove<String>(KEY_ROLLBACK_OUTCOME)
+        savedStateHandle.remove<Boolean>(KEY_ROLLBACK_ROLLED_BACK)
         savedStateHandle.remove<Boolean>(KEY_ROLLBACK_REBOOT_REQUIRED)
         savedStateHandle.remove<String>(KEY_ROLLBACK_DIAGNOSTIC)
     }
@@ -994,7 +1014,9 @@ class ControlViewModel @Inject constructor(
                     } catch (_: Exception) {
                         // The controller already performed the authoritative post-command check.
                     }
-                    if (result.success) {
+                    // The rollback disarms autostart before anything else it does, so every
+                    // outcome that actually rolled back left it off, verified firewall or not.
+                    if (result.rolledBack) {
                         _uiState.update { it.copy(autostart = false) }
                     }
                     showFullRollbackResult(result)
@@ -1017,7 +1039,8 @@ class ControlViewModel @Inject constructor(
 
     private fun showFullRollbackResult(result: ServiceLifecycleController.FullRollbackResult) {
         val diagnostic = sanitizedBoundedUiDiagnostic(result.diagnosticText())
-        val lastResult = if (result.success) {
+        val rolledBack = result.rolledBack
+        val lastResult = if (rolledBack) {
             ControlLastResult.ROLLBACK_COMPLETED
         } else {
             ControlLastResult.ROLLBACK_FAILED
@@ -1034,6 +1057,7 @@ class ControlViewModel @Inject constructor(
                 errorDialog = null,
                 fullRollback = FullRollbackUiState.Result(
                     outcome = result.outcome,
+                    rolledBack = rolledBack,
                     rebootRequired = result.rebootRequired,
                     diagnostic = diagnostic,
                 ),
@@ -1208,6 +1232,7 @@ class ControlViewModel @Inject constructor(
 
     private fun clearPersistedRollback() {
         savedStateHandle.remove<String>(KEY_ROLLBACK_OUTCOME)
+        savedStateHandle.remove<Boolean>(KEY_ROLLBACK_ROLLED_BACK)
         savedStateHandle.remove<Boolean>(KEY_ROLLBACK_REBOOT_REQUIRED)
         savedStateHandle.remove<String>(KEY_ROLLBACK_DIAGNOSTIC)
     }

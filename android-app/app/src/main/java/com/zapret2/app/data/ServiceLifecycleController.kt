@@ -236,15 +236,25 @@ object ServiceLifecycleController {
         val legacyAmbiguous: Boolean,
         val diagnostic: String,
     ) {
-        val satisfiesCompleteContract: Boolean
-            get() = status == FullRollbackStatus.COMPLETE &&
-                processClean &&
-                firewallClean &&
+        /**
+         * Every effect the rollback itself owns: the process is down, the durable disable fence
+         * is armed, the hosts overlay was preserved, user data survived and no legacy state was
+         * left ambiguous. A verified-clean firewall is deliberately not part of it — the module
+         * performs that teardown either way and withholds the assertion only when it could not
+         * re-read one family afterwards, which the reboot this receipt demands clears regardless.
+         */
+        val satisfiesRolledBackContract: Boolean
+            get() = processClean &&
                 rollbackArmed &&
                 hostsPreserved &&
                 rebootRequired &&
                 userDataPreserved &&
                 !legacyAmbiguous
+
+        val satisfiesCompleteContract: Boolean
+            get() = status == FullRollbackStatus.COMPLETE &&
+                satisfiesRolledBackContract &&
+                firewallClean
     }
 
     sealed interface FullRollbackParseResult {
@@ -271,6 +281,34 @@ object ServiceLifecycleController {
     ) {
         val success: Boolean get() = outcome == FullRollbackOutcome.COMPLETE
         val rebootRequired: Boolean get() = report?.rebootRequired == true
+
+        /**
+         * The user-visible verdict: the rollback happened. The module reports partial when it
+         * finished everything it owns — module disabled, hosts preserved, recovery journal
+         * retired, metadata committed — but could not re-read one firewall family it had already
+         * torn down; that receipt withholds [FullRollbackReport.firewallClean] and nothing else,
+         * and the reboot it already demands removes anything that survived. Nothing is left for
+         * the user to retry, so it must be reported as done with the unverified step named by
+         * [rolledBackWithUnverifiedCleanup], never as a failure. The observed status still has to
+         * agree that the service is down, exactly as it does for [success].
+         */
+        val rolledBack: Boolean
+            get() = success || (
+                outcome == FullRollbackOutcome.PARTIAL &&
+                    serviceStatus?.fullyStopped == true &&
+                    report?.let {
+                        it.status == FullRollbackStatus.PARTIAL &&
+                            it.satisfiesRolledBackContract &&
+                            !it.firewallClean
+                    } == true
+                )
+
+        /**
+         * Rolled back, but the module could not verify every cleanup step it performed. The
+         * receipt reserves exactly one case for this — a firewall family it could not re-read —
+         * and the mandatory reboot clears it regardless.
+         */
+        val rolledBackWithUnverifiedCleanup: Boolean get() = rolledBack && !success
 
         fun diagnosticText(): String = listOfNotNull(
             error?.takeIf(String::isNotBlank),

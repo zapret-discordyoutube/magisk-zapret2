@@ -1063,6 +1063,118 @@ class ServiceLifecycleControllerTest {
         assertFalse(legacyAmbiguous.report.satisfiesCompleteContract)
     }
 
+    @Test
+    fun partialRollbackThatFinishedEverythingIsRolledBackWithAnUnverifiedCleanupReservation() {
+        val result = fullRollbackResult(
+            outcome = ServiceLifecycleController.FullRollbackOutcome.PARTIAL,
+            status = "partial",
+            overrides = mapOf("Z2_RB_FIREWALL_CLEAN" to "0"),
+        )
+
+        assertFalse(result.success)
+        assertTrue(result.rolledBack)
+        assertTrue(result.rolledBackWithUnverifiedCleanup)
+        assertTrue(result.report?.satisfiesRolledBackContract == true)
+        assertFalse(result.report?.satisfiesCompleteContract == true)
+    }
+
+    @Test
+    fun completeRollbackIsRolledBackWithoutAnyReservation() {
+        val result = fullRollbackResult(
+            outcome = ServiceLifecycleController.FullRollbackOutcome.COMPLETE,
+        )
+
+        assertTrue(result.rolledBack)
+        assertFalse(result.rolledBackWithUnverifiedCleanup)
+    }
+
+    @Test
+    fun partialRollbackIsNotRolledBackWhenAnythingItOwnsIsUnfinished() {
+        val hostsLost = fullRollbackResult(
+            outcome = ServiceLifecycleController.FullRollbackOutcome.PARTIAL,
+            status = "partial",
+            overrides = mapOf(
+                "Z2_RB_FIREWALL_CLEAN" to "0",
+                "Z2_RB_HOSTS_PRESERVED" to "0",
+            ),
+        )
+        val processRetained = fullRollbackResult(
+            outcome = ServiceLifecycleController.FullRollbackOutcome.PARTIAL,
+            status = "partial",
+            overrides = mapOf(
+                "Z2_RB_FIREWALL_CLEAN" to "0",
+                "Z2_RB_PROCESS_CLEAN" to "0",
+            ),
+        )
+        // Every fact asserted, including a verified-clean firewall, yet still partial: the run was
+        // interrupted before it could commit, so the recovery journal is what survived.
+        val interruptedBeforeCommit = fullRollbackResult(
+            outcome = ServiceLifecycleController.FullRollbackOutcome.PARTIAL,
+            status = "partial",
+        )
+        val serviceStillUp = fullRollbackResult(
+            outcome = ServiceLifecycleController.FullRollbackOutcome.PARTIAL,
+            status = "partial",
+            overrides = mapOf("Z2_RB_FIREWALL_CLEAN" to "0"),
+            serviceStatus = ServiceLifecycleController.parseStatusCommandResult(
+                ServiceLifecycleController.CommandResult(
+                    success = true,
+                    stdout = healthyStatusLines(),
+                    exitCode = 0,
+                ),
+            ),
+        )
+        val blockedBeforeAnything = fullRollbackResult(
+            outcome = ServiceLifecycleController.FullRollbackOutcome.BLOCKED,
+            status = "blocked",
+            overrides = mapOf("Z2_RB_FIREWALL_CLEAN" to "0"),
+        )
+
+        listOf(
+            "hostsLost" to hostsLost,
+            "processRetained" to processRetained,
+            "interruptedBeforeCommit" to interruptedBeforeCommit,
+            "serviceStillUp" to serviceStillUp,
+            "blockedBeforeAnything" to blockedBeforeAnything,
+        ).forEach { (name, result) ->
+            assertFalse(name, result.rolledBack)
+            assertFalse(name, result.rolledBackWithUnverifiedCleanup)
+        }
+    }
+
+    @Test
+    fun rollbackWithoutAReportOrStatusIsNeverRolledBack() {
+        val crashed = ServiceLifecycleController.FullRollbackResult(
+            outcome = ServiceLifecycleController.FullRollbackOutcome.ERROR,
+        )
+
+        assertFalse(crashed.rolledBack)
+        assertFalse(crashed.rolledBackWithUnverifiedCleanup)
+    }
+
+    private fun fullRollbackResult(
+        outcome: ServiceLifecycleController.FullRollbackOutcome,
+        status: String = "complete",
+        overrides: Map<String, String> = emptyMap(),
+        serviceStatus: ServiceLifecycleController.ServiceStatus =
+            ServiceLifecycleController.parseStatusCommandResult(
+                ServiceLifecycleController.CommandResult(
+                    success = false,
+                    stdout = stoppedStatusLines(),
+                    exitCode = 1,
+                ),
+            ),
+    ): ServiceLifecycleController.FullRollbackResult {
+        val parsed = ServiceLifecycleController.parseFullRollbackOutput(
+            fullRollbackLines(status = status, overrides = overrides),
+        ) as ServiceLifecycleController.FullRollbackParseResult.Valid
+        return ServiceLifecycleController.FullRollbackResult(
+            outcome = outcome,
+            serviceStatus = serviceStatus,
+            report = parsed.report,
+        )
+    }
+
     private fun fullRollbackLines(
         status: String = "complete",
         overrides: Map<String, String> = emptyMap(),

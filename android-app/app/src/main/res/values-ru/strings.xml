@@ -113,6 +113,7 @@
     <string name="control_full_rollback_progress_body">Остановка процессов, удаление правил брандмауэра и подготовка отката…</string>
     <string name="control_full_rollback_success_title">Полный откат завершён</string>
     <string name="control_full_rollback_success_body">Модуль отключён. Перед повторным использованием Zapret2 вручную включите его в root-менеджере. Стратегии, пресеты и файлы списков хостов сохранены.</string>
+    <string name="control_full_rollback_success_unverified">Один шаг очистки не удалось проверить: правила IPv6 могут оставаться загруженными. Обязательная перезагрузка их снимет.</string>
     <string name="control_full_rollback_failure_title">Полный откат не завершён</string>
     <string name="control_full_rollback_failure_body">Откат не удалось безопасно завершить. Проверьте диагностические данные ниже.</string>
     <string name="control_full_rollback_reboot_required">Требуется перезагрузка.</string>

@@ -151,6 +151,22 @@ P5. **Root-manager canon.** `customize.sh` stages and validates; `service.sh`
   highest protocol version the module answered with instead of re-walking
   v6→v1 on every refresh.
 
+## 4a. Known limitation: one ambiguous full-rollback receipt
+
+A rollback that finishes while unable to re-read the IPv6 ruleset reports
+`Z2_RB_STATUS=partial` with `Z2_RB_FIREWALL_CLEAN=0` and every other field
+affirmative. A rollback interrupted by a signal inside the final commit window
+on the same device reports the identical tuple, so the app cannot tell them
+apart: the first retired its journal, the second did not.
+
+Distinguishing them needs an eleventh field, and the ten-field receipt is
+exactly what a 2.1.x app parses — an extra line makes it reject the whole
+payload. The ambiguity is bounded: in both cases the rollback's effect has
+already happened (module disabled, autostart off, hosts preserved), and a
+surviving journal surfaces on the very next lifecycle observation as
+`RECOVERY_BLOCKED`, which names the remedy. The field is worth adding the
+next time the receipt version is raised for other reasons.
+
 ## 5. Deferred (designed, not shipped in 2.2.0)
 
 - **Single-endpoint preset application.** The app currently performs the

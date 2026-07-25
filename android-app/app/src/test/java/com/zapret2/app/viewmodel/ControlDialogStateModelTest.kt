@@ -126,6 +126,73 @@ class ControlDialogStateModelTest {
         assertEquals(ServiceLifecycleController.FullRollbackOutcome.PARTIAL, rollback.outcome)
         assertEquals(true, rollback.rebootRequired)
         assertEquals("firewall cleanup incomplete", rollback.diagnostic)
+        // A partial receipt claims nothing on its own; only the persisted verdict can.
+        assertFalse(rollback.rolledBack)
+        assertFalse(rollback.unverifiedCleanup)
+    }
+
+    @Test
+    fun rolledBackPartialResultSurvivesRecreationAsDoneWithItsReservation() {
+        val restored = restoreControlUiState(
+            SavedStateHandle(
+                mapOf(
+                    "control_dialog_kind" to ControlDialogKind.FULL_ROLLBACK_RESULT.name,
+                    "control_full_rollback_outcome" to
+                        ServiceLifecycleController.FullRollbackOutcome.PARTIAL.name,
+                    "control_full_rollback_rolled_back" to true,
+                    "control_full_rollback_reboot_required" to true,
+                    "control_full_rollback_diagnostic" to "the IPv6 mangle table could not be read",
+                ),
+            ),
+        )
+
+        val rollback = restored.fullRollback as FullRollbackUiState.Result
+        assertTrue(rollback.rolledBack)
+        assertTrue(rollback.unverifiedCleanup)
+    }
+
+    @Test
+    fun persistedRolledBackFlag_cannotUpgradeAnOutcomeThatNeverRolledBack() {
+        listOf(
+            ServiceLifecycleController.FullRollbackOutcome.ERROR,
+            ServiceLifecycleController.FullRollbackOutcome.BLOCKED,
+            ServiceLifecycleController.FullRollbackOutcome.VERIFICATION_FAILED,
+            ServiceLifecycleController.FullRollbackOutcome.INVALID_PROTOCOL,
+            ServiceLifecycleController.FullRollbackOutcome.COMMAND_FAILED,
+        ).forEach { outcome ->
+            val restored = restoreControlUiState(
+                SavedStateHandle(
+                    mapOf(
+                        "control_dialog_kind" to ControlDialogKind.FULL_ROLLBACK_RESULT.name,
+                        "control_full_rollback_outcome" to outcome.name,
+                        "control_full_rollback_rolled_back" to true,
+                        "control_full_rollback_reboot_required" to true,
+                        "control_full_rollback_diagnostic" to "stale",
+                    ),
+                ),
+            )
+
+            val rollback = restored.fullRollback as FullRollbackUiState.Result
+            assertFalse(outcome.name, rollback.rolledBack)
+            assertFalse(outcome.name, rollback.unverifiedCleanup)
+        }
+    }
+
+    @Test
+    fun rolledBackResultReportsSuccessAndReservesOnlyTheUnverifiedPartialStep() {
+        val partial = FullRollbackUiState.Result(
+            outcome = ServiceLifecycleController.FullRollbackOutcome.PARTIAL,
+            rolledBack = true,
+            rebootRequired = true,
+            diagnostic = "the IPv6 mangle table could not be queried",
+        )
+
+        assertTrue(partial.unverifiedCleanup)
+        assertFalse(
+            partial.copy(outcome = ServiceLifecycleController.FullRollbackOutcome.COMPLETE)
+                .unverifiedCleanup,
+        )
+        assertFalse(partial.copy(rolledBack = false).unverifiedCleanup)
     }
 
     @Test
@@ -134,6 +201,7 @@ class ControlDialogStateModelTest {
             mapOf(
                 "control_dialog_kind" to ControlDialogKind.FULL_ROLLBACK_RESULT.name,
                 "control_full_rollback_outcome" to "corrupt",
+                "control_full_rollback_rolled_back" to true,
                 "control_full_rollback_reboot_required" to true,
                 "control_full_rollback_diagnostic" to "stale",
             ),
@@ -145,6 +213,7 @@ class ControlDialogStateModelTest {
         assertEquals(FullRollbackUiState.Idle, restored.fullRollback)
         assertFalse(savedState.contains("control_dialog_kind"))
         assertFalse(savedState.contains("control_full_rollback_outcome"))
+        assertFalse(savedState.contains("control_full_rollback_rolled_back"))
         assertFalse(savedState.contains("control_full_rollback_reboot_required"))
         assertFalse(savedState.contains("control_full_rollback_diagnostic"))
     }
@@ -294,6 +363,7 @@ class ControlDialogStateModelTest {
                     ServiceLifecycleController.FullRollbackOutcome.PARTIAL.name,
                     savedState["control_full_rollback_outcome"],
                 )
+                assertEquals(false, savedState["control_full_rollback_rolled_back"])
                 assertEquals(true, savedState["control_full_rollback_reboot_required"])
                 assertEquals("cleanup incomplete", savedState["control_full_rollback_diagnostic"])
                 assertEquals(
@@ -332,6 +402,47 @@ class ControlDialogStateModelTest {
 
         assertTrue(terminalObserved)
         assertNull(savedState.get<Boolean>("control_full_rollback_in_progress"))
+    }
+
+    @Test
+    fun rollbackThatOnlyLeftItsFirewallCheckUnverified_isPersistedAndRestoredAsDone() {
+        val savedState = SavedStateHandle(mapOf("control_full_rollback_in_progress" to true))
+        val result = ServiceLifecycleController.FullRollbackResult(
+            outcome = ServiceLifecycleController.FullRollbackOutcome.PARTIAL,
+            serviceStatus = ServiceLifecycleController.ServiceStatus(
+                rootGranted = true,
+                processRunning = false,
+                declaredStatus = "stopped",
+                metadataComplete = true,
+            ),
+            report = ServiceLifecycleController.FullRollbackReport(
+                status = ServiceLifecycleController.FullRollbackStatus.PARTIAL,
+                processClean = true,
+                firewallClean = false,
+                rollbackArmed = true,
+                hostsPreserved = true,
+                rebootRequired = true,
+                userDataPreserved = true,
+                legacyAmbiguous = false,
+                diagnostic = "the IPv6 mangle table could not be queried",
+            ),
+        )
+        assertTrue(result.rolledBack)
+
+        FullRollbackOperationCoordinator(savedState).persistTerminal(
+            result = result,
+            diagnostic = "the IPv6 mangle table could not be queried",
+            lastResult = ControlLastResult.ROLLBACK_COMPLETED,
+        )
+
+        assertEquals(true, savedState["control_full_rollback_rolled_back"])
+        assertEquals(
+            ControlLastResult.ROLLBACK_COMPLETED.name,
+            savedState["control_last_result"],
+        )
+        val restored = restoreControlUiState(savedState).fullRollback as FullRollbackUiState.Result
+        assertTrue(restored.rolledBack)
+        assertTrue(restored.unverifiedCleanup)
     }
 
     @Test

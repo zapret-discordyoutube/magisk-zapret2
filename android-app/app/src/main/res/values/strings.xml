@@ -113,6 +113,7 @@
     <string name="control_full_rollback_progress_body">Stopping owned processes, removing firewall rules, and arming the rollback…</string>
     <string name="control_full_rollback_success_title">Full rollback complete</string>
     <string name="control_full_rollback_success_body">The module is disabled. Re-enable it manually in your root manager before using Zapret2 again. Strategies, presets, and hostlist files were preserved.</string>
+    <string name="control_full_rollback_success_unverified">One cleanup step could not be verified: IPv6 firewall rules may still be loaded. The required reboot removes them.</string>
     <string name="control_full_rollback_failure_title">Full rollback incomplete</string>
     <string name="control_full_rollback_failure_body">The rollback did not complete safely. Review the diagnostic details below.</string>
     <string name="control_full_rollback_reboot_required">A reboot is required.</string>
