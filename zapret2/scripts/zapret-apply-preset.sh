@@ -29,6 +29,16 @@ APPLY_CONFIG_COMMITTED=0
 APPLY_SERVICE_WAS_RUNNING=0
 APPLY_LOCK_TAKEN=0
 APPLY_NONCE=""
+APPLY_SAVE_REQUEST=0
+APPLY_SAVE_CANDIDATE=""
+APPLY_SAVE_CANDIDATE_CONSUMED=0
+APPLY_SAVE_EXPECTED_DIGEST=""
+APPLY_SAVE_MODE=""
+APPLY_SAVE_BACKUP=""
+APPLY_SAVE_TARGET_EXISTED=0
+APPLY_SAVE_SHOULD_APPLY=0
+APPLY_SAVE_SELECTION_CHANGE=0
+APPLY_PRESET_REPLACED=0
 RUNTIME_CANONICAL_TEXT=""
 RUNTIME_NEXT_TEXT=""
 RUNTIME_ACTIVE_PRESET_LINES=0
@@ -69,10 +79,47 @@ apply_release_lock() {
     return 0
 }
 
+# Save-transaction residue never outlives the report: an unconsumed candidate
+# is removed (its name was validated before it was recorded), and the rollback
+# buffer goes with it. The replaced target itself is restored only by the
+# explicit rollback paths, never here.
+apply_save_cleanup() {
+    [ "$APPLY_SAVE_REQUEST" = 1 ] || return 0
+    if [ "$APPLY_SAVE_CANDIDATE_CONSUMED" = 0 ] && [ -n "$APPLY_SAVE_CANDIDATE" ]; then
+        rm -f "$PRESETS_DIR/$APPLY_SAVE_CANDIDATE" 2>/dev/null
+    fi
+    [ -z "$APPLY_SAVE_BACKUP" ] || rm -f "$APPLY_SAVE_BACKUP" 2>/dev/null
+}
+
+# Restores the save target to its pre-transaction content from the buffered
+# backup (or to non-existence for a fresh file). Publication is atomic via a
+# sibling temp file, mirroring how the candidate itself was published.
+restore_saved_preset_target() {
+    local target="$PRESETS_DIR/$APPLY_REQUESTED_PRESET" tmp
+    [ "$APPLY_PRESET_REPLACED" = 1 ] || return 0
+    if [ "$APPLY_SAVE_TARGET_EXISTED" = 1 ]; then
+        [ -n "$APPLY_SAVE_BACKUP" ] && [ -f "$APPLY_SAVE_BACKUP" ] &&
+            [ ! -L "$APPLY_SAVE_BACKUP" ] || return 1
+        tmp="$target.tmp.$$"
+        rm -f "$tmp" 2>/dev/null
+        [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || return 1
+        umask 077
+        cat "$APPLY_SAVE_BACKUP" > "$tmp" || { rm -f "$tmp" 2>/dev/null; return 1; }
+        chmod 0644 "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+        mv -f "$tmp" "$target" || { rm -f "$tmp" 2>/dev/null; return 1; }
+    else
+        rm -f "$target" 2>/dev/null
+        [ ! -e "$target" ] && [ ! -L "$target" ] || return 1
+    fi
+    APPLY_PRESET_REPLACED=0
+    return 0
+}
+
 apply_report_failure() {
     local domain="$1" code="$2" stage="$3" detail="$4" outcome="$5" issue="${6:-NONE}"
     APPLY_OUTCOME="$outcome"
     APPLY_ISSUE="$issue"
+    apply_save_cleanup
     if ! apply_release_lock; then
         detail="$detail; lifecycle ownership release failed"
     fi
@@ -92,6 +139,7 @@ apply_report_failure() {
 apply_report_success() {
     APPLY_OUTCOME="$1"
     APPLY_ISSUE=NONE
+    apply_save_cleanup
     if ! apply_release_lock; then
         z2_error_set LIFECYCLE LIFECYCLE_FAILED APPLY_LOCK_RELEASE \
             "preset application committed but lifecycle ownership release failed" ||
@@ -106,16 +154,21 @@ apply_report_success() {
 }
 
 apply_interrupted() {
-    local signal="$1"
+    local signal="$1" restored=0
     trap '' HUP INT TERM
-    if [ "$APPLY_CONFIG_COMMITTED" = 1 ]; then
-        if rollback_runtime_config; then
+    if [ "$APPLY_CONFIG_COMMITTED" = 1 ] || [ "$APPLY_PRESET_REPLACED" = 1 ]; then
+        restored=1
+        restore_saved_preset_target || restored=0
+        if [ "$APPLY_CONFIG_COMMITTED" = 1 ]; then
+            rollback_runtime_config || restored=0
+        fi
+        if [ "$restored" = 1 ]; then
             apply_report_failure LIFECYCLE LIFECYCLE_FAILED APPLY_SIGNAL \
-                "preset application interrupted by $signal; the previous selection was restored" \
+                "preset application interrupted by $signal; the previous state was restored" \
                 RESTART_FAILED_ROLLED_BACK
         fi
         apply_report_failure LIFECYCLE LIFECYCLE_FAILED APPLY_SIGNAL \
-            "preset application interrupted by $signal and the previous selection could not be restored" \
+            "preset application interrupted by $signal and the previous state could not be restored" \
             ROLLBACK_FAILED
     fi
     apply_report_failure LIFECYCLE LIFECYCLE_FAILED APPLY_SIGNAL \
@@ -276,34 +329,107 @@ rollback_runtime_config() {
     return 0
 }
 
-# The same compatibility qualification the app used to request through
-# command-builder.sh --preflight-preset-machine, run in this process against a
-# disposable artifact. It happens before runtime.ini is touched, so an
-# incompatible preset is refused with the live selection untouched instead of
-# being written, failed and rolled back.
-validate_requested_preset() {
-    local artifact rc=0
-    PRESET_VALIDATION_CODE=OK
-    ensure_state_tmp_dir || {
-        PRESET_VALIDATION_CODE=PRESET_UNREADABLE
-        return 1
-    }
-    artifact="$Z2_STATE_TMP/preset-apply.$$"
-    state_file_target_is_safe "$artifact" || {
-        PRESET_VALIDATION_CODE=PRESET_UNREADABLE
-        return 1
-    }
-    rm -f "$artifact" 2>/dev/null
-    if compile_preset_artifact "$PRESETS_DIR/$APPLY_REQUESTED_PRESET" \
-        "$APPLY_REQUESTED_PRESET" "$artifact" &&
-        run_compiled_artifact "$artifact" dry-run >/dev/null 2>&1; then
-        rm -f "$artifact" 2>/dev/null
-        return 0
+# One validation compile shared by both transaction flavors. binding selects
+# the runtime.ini identity the artifact is bound to: "live" pins the published
+# file, "next" pins the RUNTIME_NEXT_TEXT candidate this transaction is about
+# to commit verbatim. The candidate differs from the loaded configuration only
+# in its active_preset line, so every config scalar the compiler consumes is
+# already loaded; the swapped path only pins the binding identity.
+compile_transaction_artifact() {
+    local preset_path="$1" logical_name="$2" artifact="$3" binding="$4"
+    local staged_runtime="" saved_runtime_config rc=0
+    if [ "$binding" = next ]; then
+        staged_runtime="$Z2_STATE_TMP/runtime-apply.$$"
+        state_file_target_is_safe "$staged_runtime" || return 1
+        rm -f "$staged_runtime" 2>/dev/null
+        umask 077
+        printf '%s' "$RUNTIME_NEXT_TEXT" > "$staged_runtime" || {
+            rm -f "$staged_runtime" 2>/dev/null
+            return 1
+        }
+        saved_runtime_config="$RUNTIME_CONFIG"
+        RUNTIME_CONFIG="$staged_runtime"
     fi
-    rc=1
-    [ "$PRESET_VALIDATION_CODE" != OK ] || PRESET_VALIDATION_CODE=NFQWS_DRY_RUN_FAILED
-    rm -f "$artifact" 2>/dev/null
+    compile_preset_artifact "$preset_path" "$logical_name" "$artifact" &&
+        run_compiled_artifact "$artifact" dry-run >/dev/null 2>&1 || rc=1
+    if [ "$binding" = next ]; then
+        RUNTIME_CONFIG="$saved_runtime_config"
+        rm -f "$staged_runtime" 2>/dev/null
+    fi
     return "$rc"
+}
+
+# The same compatibility qualification the app used to request through
+# command-builder.sh --preflight-preset-machine. It happens before runtime.ini
+# is touched, so an incompatible preset is refused with the live selection
+# untouched instead of being written, failed and rolled back.
+#
+# The artifact is compiled into the canonical slot and bound to the runtime.ini
+# candidate this transaction commits verbatim: the replacement child then finds
+# the binding current and the validation receipt fresh, so the compile and the
+# nfqws2 dry-run below are paid once per transaction instead of being repeated
+# from scratch after the commit. An abandoned artifact is harmless — its
+# binding no longer matches the live runtime.ini, so the next start recompiles.
+validate_requested_preset() {
+    PRESET_VALIDATION_CODE=OK
+    ensure_state_tmp_dir &&
+        state_path_is_managed_file "$COMPILED_ARGV_FILE" || {
+        PRESET_VALIDATION_CODE=PRESET_UNREADABLE
+        return 1
+    }
+    if ! compile_transaction_artifact "$PRESETS_DIR/$APPLY_REQUESTED_PRESET" \
+        "$APPLY_REQUESTED_PRESET" "$COMPILED_ARGV_FILE" next; then
+        rm -f "$COMPILED_ARGV_FILE" 2>/dev/null
+        [ "$PRESET_VALIDATION_CODE" != OK ] || PRESET_VALIDATION_CODE=NFQWS_DRY_RUN_FAILED
+        return 1
+    fi
+    # The receipt is an optimization, never a gate: if it cannot be written,
+    # the replacement child simply re-runs its own dry-run as before.
+    write_compiled_validation_receipt "$COMPILED_ARGV_FILE" ||
+        log_msg "Preset validation receipt could not be written; the replacement will revalidate"
+    return 0
+}
+
+# Candidate names are the app's staging namespace: underscore-prefixed .txt
+# files that the packaged-name policy refuses by construction, so a candidate
+# can never be listed or selected as a real preset.
+is_safe_candidate_preset_name() {
+    local name="$1"
+    [ -n "$name" ] && command_builder_safe_file_name_byte_length "$name" || return 1
+    case "$name" in
+        _*.txt) ;;
+        *) return 1 ;;
+    esac
+    case "$name" in
+        */*|*\\*|*"'"*|*'"'*) return 1 ;;
+    esac
+    case "$name" in *[[:cntrl:]]*) return 1 ;; esac
+    [ "${name# }" = "$name" ] && [ "${name% }" = "$name" ]
+}
+
+# The compare-and-swap identity for preset content: CR stripped from each
+# line, trailing blank lines dropped, single LF between surviving lines and
+# none after the last — byte-identical to the app's canonicalProtectedText,
+# which the app-side digest is computed over. A mid-line lone CR diverges
+# between the two canonicalizations; the divergence fails the swap closed,
+# which is the safe direction for content no supported writer produces.
+preset_canonical_digest() {
+    local path="$1" digest
+    PRESET_CANONICAL_DIGEST=""
+    command -v sha256sum >/dev/null 2>&1 || return 1
+    [ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ] || return 1
+    digest="$(awk '
+        { sub(/\r$/, ""); line[NR] = $0 }
+        END {
+            last = NR
+            while (last > 0 && line[last] == "") last--
+            for (i = 1; i <= last; i++) printf "%s%s", line[i], (i < last ? "\n" : "")
+        }
+    ' "$path" 2>/dev/null | sha256sum 2>/dev/null)" || return 1
+    digest="${digest%% *}"
+    is_lower_sha256 "$digest" || return 1
+    PRESET_CANONICAL_DIGEST="$digest"
+    return 0
 }
 
 # The app's "was the service running" question, answered from the committed
@@ -360,17 +486,231 @@ report_rollback_after_commit() {
         ROLLBACK_FAILED
 }
 
+# The save-transaction analog: the replaced target file is restored first,
+# then the committed selection if there was one; whichever restoration fails
+# escalates the report to ROLLBACK_FAILED.
+report_save_rollback() {
+    local domain="$1" code="$2" stage="$3" detail="$4" outcome="$5" restored=1
+    restore_saved_preset_target || restored=0
+    if [ "$APPLY_CONFIG_COMMITTED" = 1 ]; then
+        rollback_runtime_config || restored=0
+    fi
+    if [ "$restored" = 1 ]; then
+        apply_report_failure "$domain" "$code" "$stage" \
+            "$detail; the previous preset content was restored" "$outcome"
+    fi
+    apply_report_failure "$domain" "$code" "$stage" \
+        "$detail; the previous preset content could not be restored" ROLLBACK_FAILED
+}
+
+# The content-mutation flavor of this transaction: one entry point validates
+# the staged candidate, swaps it in under a content compare-and-swap, commits
+# the selection only when it actually changes, and replaces the daemon only
+# when the saved preset governs a running service. It reports through the
+# same typed envelope and never returns.
+run_save_content_transaction() {
+    local target="$PRESETS_DIR/$APPLY_REQUESTED_PRESET"
+    local candidate="$PRESETS_DIR/$APPLY_SAVE_CANDIDATE"
+    local binding=live disposable
+
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] &&
+        path_uid_is_root "$candidate" && path_nlink_is_one "$candidate" ||
+        apply_report_failure CONFIG PRESET_UNREADABLE APPLY_SAVE_CANDIDATE \
+            "the staged preset candidate is not a safe root-owned regular file" \
+            IO_FAILED
+
+    if [ -e "$target" ] || [ -L "$target" ]; then
+        [ -f "$target" ] && [ ! -L "$target" ] &&
+            path_uid_is_root "$target" && path_nlink_is_one "$target" ||
+            apply_report_failure CONFIG UNSAFE_PRESET_FILE APPLY_SAVE_TARGET \
+                "the save target is not a safe root-owned regular file" \
+                REJECTED PRESET_SYMLINK
+        APPLY_SAVE_TARGET_EXISTED=1
+    fi
+
+    # Content compare-and-swap: the module proves the target still carries the
+    # content generation the app edited, so a save can never silently clobber
+    # an edit that landed from elsewhere after the editor snapshot.
+    if [ "$APPLY_SAVE_EXPECTED_DIGEST" = missing ]; then
+        [ "$APPLY_SAVE_TARGET_EXISTED" = 0 ] ||
+            apply_report_failure CONFIG PRESET_SOURCE_CHANGED APPLY_SAVE_CAS \
+                "the save target appeared after the edit began" SOURCE_CHANGED
+    else
+        [ "$APPLY_SAVE_TARGET_EXISTED" = 1 ] ||
+            apply_report_failure CONFIG PRESET_SOURCE_CHANGED APPLY_SAVE_CAS \
+                "the save target disappeared after the edit began" SOURCE_CHANGED
+        preset_canonical_digest "$target" ||
+            apply_report_failure STATE STATE_UNAVAILABLE APPLY_SAVE_CAS \
+                "the save target content identity could not be computed" IO_FAILED
+        [ "$PRESET_CANONICAL_DIGEST" = "$APPLY_SAVE_EXPECTED_DIGEST" ] ||
+            apply_report_failure CONFIG PRESET_SOURCE_CHANGED APPLY_SAVE_CAS \
+                "the save target changed after the edit began" SOURCE_CHANGED
+    fi
+
+    if [ "$APPLY_SAVE_MODE" = apply ]; then
+        APPLY_SAVE_SHOULD_APPLY=1
+        [ "$ACTIVE_PRESET" = "$APPLY_REQUESTED_PRESET" ] || APPLY_SAVE_SELECTION_CHANGE=1
+    elif [ "$ACTIVE_PRESET" = "$APPLY_REQUESTED_PRESET" ]; then
+        APPLY_SAVE_SHOULD_APPLY=1
+    fi
+
+    # Measured before any mutation, exactly like the selection transaction: a
+    # service the user had stopped must not be started by a content change.
+    if service_process_is_running; then APPLY_SERVICE_WAS_RUNNING=1; fi
+
+    PRESET_VALIDATION_CODE=OK
+    ensure_state_tmp_dir ||
+        apply_report_failure STATE STATE_UNAVAILABLE APPLY_VALIDATE \
+            "insecure or unavailable zapret2 scratch directory" IO_FAILED
+    if [ "$APPLY_SAVE_SHOULD_APPLY" = 1 ]; then
+        [ "$APPLY_SAVE_SELECTION_CHANGE" = 0 ] || binding=next
+        state_path_is_managed_file "$COMPILED_ARGV_FILE" ||
+            apply_report_failure STATE STATE_UNAVAILABLE APPLY_VALIDATE \
+                "the compiled artifact slot is unavailable" IO_FAILED
+        if ! compile_transaction_artifact "$candidate" "$APPLY_REQUESTED_PRESET" \
+            "$COMPILED_ARGV_FILE" "$binding"; then
+            rm -f "$COMPILED_ARGV_FILE" 2>/dev/null
+            [ "$PRESET_VALIDATION_CODE" != OK ] || PRESET_VALIDATION_CODE=NFQWS_DRY_RUN_FAILED
+            apply_report_failure CONFIG "$PRESET_VALIDATION_CODE" APPLY_VALIDATE \
+                "the saved preset content was refused by preset qualification: $PRESET_VALIDATION_CODE" \
+                REJECTED "$PRESET_VALIDATION_CODE"
+        fi
+        write_compiled_validation_receipt "$COMPILED_ARGV_FILE" ||
+            log_msg "Preset validation receipt could not be written; the replacement will revalidate"
+    else
+        disposable="$Z2_STATE_TMP/preset-save.$$"
+        state_file_target_is_safe "$disposable" ||
+            apply_report_failure STATE STATE_UNAVAILABLE APPLY_VALIDATE \
+                "the disposable validation artifact path is unsafe" IO_FAILED
+        rm -f "$disposable" 2>/dev/null
+        if ! compile_transaction_artifact "$candidate" "$APPLY_REQUESTED_PRESET" \
+            "$disposable" live; then
+            rm -f "$disposable" 2>/dev/null
+            [ "$PRESET_VALIDATION_CODE" != OK ] || PRESET_VALIDATION_CODE=NFQWS_DRY_RUN_FAILED
+            apply_report_failure CONFIG "$PRESET_VALIDATION_CODE" APPLY_VALIDATE \
+                "the saved preset content was refused by preset qualification: $PRESET_VALIDATION_CODE" \
+                REJECTED "$PRESET_VALIDATION_CODE"
+        fi
+        rm -f "$disposable" 2>/dev/null
+    fi
+
+    log_msg "Saving preset content $APPLY_REQUESTED_PRESET (mode: $APPLY_SAVE_MODE, apply: $APPLY_SAVE_SHOULD_APPLY, selection change: $APPLY_SAVE_SELECTION_CHANGE, running: $APPLY_SERVICE_WAS_RUNNING)"
+
+    # Buffer the previous content before the swap: the buffer is the only copy
+    # every rollback below restores from.
+    if [ "$APPLY_SAVE_TARGET_EXISTED" = 1 ]; then
+        APPLY_SAVE_BACKUP="$Z2_STATE_TMP/preset-save-backup.$$"
+        state_file_target_is_safe "$APPLY_SAVE_BACKUP" ||
+            apply_report_failure STATE STATE_UNAVAILABLE APPLY_SAVE_BACKUP \
+                "the rollback buffer path is unsafe" IO_FAILED
+        rm -f "$APPLY_SAVE_BACKUP" 2>/dev/null
+        umask 077
+        cat "$target" > "$APPLY_SAVE_BACKUP" ||
+            apply_report_failure STATE STATE_UNAVAILABLE APPLY_SAVE_BACKUP \
+                "the previous preset content could not be buffered for rollback" IO_FAILED
+    fi
+
+    chmod 0644 "$candidate" 2>/dev/null &&
+        mv -f "$candidate" "$target" || {
+        apply_report_failure CONFIG PRESET_WRITE_FAILED APPLY_SAVE_PUBLISH \
+            "the validated candidate could not be published to its target" IO_FAILED
+    }
+    APPLY_SAVE_CANDIDATE_CONSUMED=1
+    APPLY_PRESET_REPLACED=1
+
+    if [ "$APPLY_SAVE_SELECTION_CHANGE" = 1 ]; then
+        if commit_runtime_candidate "$RUNTIME_NEXT_TEXT" "$RUNTIME_PREVIOUS_DIGEST" 1; then
+            APPLY_CONFIG_COMMITTED=1
+        else
+            classify_published_runtime
+            [ "$APPLY_PUBLISHED_GENERATION" = previous ] || APPLY_CONFIG_COMMITTED=1
+            report_save_rollback "$CHILD_ERROR_DOMAIN" "$CHILD_ERROR_CODE" \
+                "$CHILD_ERROR_STAGE" \
+                "the selection commit failed: $CHILD_ERROR_DETAIL" \
+                WRITE_FAILED_ROLLED_BACK
+        fi
+    fi
+
+    if [ "$APPLY_SAVE_SHOULD_APPLY" = 1 ] && [ "$APPLY_SERVICE_WAS_RUNNING" = 1 ]; then
+        if ! run_replace_transaction; then
+            report_save_rollback "$CHILD_ERROR_DOMAIN" "$CHILD_ERROR_CODE" \
+                "$CHILD_ERROR_STAGE" \
+                "the replacement transaction failed: $CHILD_ERROR_DETAIL" \
+                RESTART_FAILED_ROLLED_BACK
+        fi
+    fi
+
+    trap - HUP INT TERM
+    if [ "$APPLY_SAVE_SHOULD_APPLY" = 0 ] || [ "$APPLY_SERVICE_WAS_RUNNING" = 0 ]; then
+        log_msg "Preset content $APPLY_REQUESTED_PRESET saved (no replacement was required)"
+        apply_report_success SAVED
+    fi
+    if [ "$APPLY_SAVE_SELECTION_CHANGE" = 1 ]; then
+        log_msg "Preset content $APPLY_REQUESTED_PRESET saved, selected and applied"
+        apply_report_success SAVED_AND_APPLIED
+    fi
+    log_msg "Preset content $APPLY_REQUESTED_PRESET saved and applied"
+    apply_report_success APPLIED
+}
+
 main() {
     local requested="${1:-}"
 
-    [ "$#" -eq 1 ] || {
+    if [ "$requested" = --save-content ]; then
+        # --save-content CANDIDATE EXPECTED_DIGEST PRESET_FILE_NAME MODE
+        # EXPECTED_DIGEST is the canonical content identity the app edited
+        # (or the literal "missing" for a file that must not exist yet);
+        # MODE is "apply" (make PRESET the selection) or "auto" (replace the
+        # daemon only when PRESET already governs it).
+        [ "$#" -eq 5 ] || {
+            z2_error_set CONFIG INVALID_ARGUMENTS APPLY_SAVE_REQUEST \
+                "usage: zapret-apply-preset.sh --save-content CANDIDATE EXPECTED_DIGEST PRESET_FILE_NAME MODE"
+            APPLY_OUTCOME=IO_FAILED
+            emit_apply_machine
+            exit 2
+        }
+        is_safe_candidate_preset_name "$2" || {
+            z2_error_set CONFIG INVALID_ARGUMENTS APPLY_SAVE_REQUEST \
+                "the staged candidate name is not a safe staging file name"
+            APPLY_OUTCOME=IO_FAILED
+            emit_apply_machine
+            exit 1
+        }
+        case "$3" in
+            missing) ;;
+            *)
+                is_lower_sha256 "$3" || {
+                    z2_error_set CONFIG INVALID_ARGUMENTS APPLY_SAVE_REQUEST \
+                        "the expected content identity is neither a digest nor the missing sentinel"
+                    APPLY_OUTCOME=IO_FAILED
+                    emit_apply_machine
+                    exit 1
+                }
+                ;;
+        esac
+        case "$5" in
+            apply|auto) ;;
+            *)
+                z2_error_set CONFIG INVALID_ARGUMENTS APPLY_SAVE_REQUEST \
+                    "the save mode is not a supported application mode"
+                APPLY_OUTCOME=IO_FAILED
+                emit_apply_machine
+                exit 1
+                ;;
+        esac
+        APPLY_SAVE_REQUEST=1
+        APPLY_SAVE_CANDIDATE="$2"
+        APPLY_SAVE_EXPECTED_DIGEST="$3"
+        requested="$4"
+        APPLY_SAVE_MODE="$5"
+    elif [ "$#" -ne 1 ]; then
         z2_error_set CONFIG INVALID_ARGUMENTS APPLY_REQUEST \
             "usage: zapret-apply-preset.sh PRESET_FILE_NAME"
         APPLY_OUTCOME=REJECTED
         APPLY_ISSUE=UNSAFE_PRESET_NAME
         emit_apply_machine
         exit 2
-    }
+    fi
 
     # The requested name is never echoed back before it passes the packaged
     # name policy: an unsafe request must not put attacker-chosen bytes into a
@@ -444,6 +784,12 @@ main() {
         apply_report_failure CONFIG RUNTIME_READ_FAILED APPLY_CONFIG_READ \
             "the requested runtime.ini generation identity could not be computed" IO_FAILED
     RUNTIME_NEXT_DIGEST="$RUNTIME_CANONICAL_DIGEST"
+
+    if [ "$APPLY_SAVE_REQUEST" = 1 ]; then
+        run_save_content_transaction
+        apply_report_failure LIFECYCLE LIFECYCLE_FAILED APPLY_SAVE \
+            "the save transaction ended without a report" IO_FAILED
+    fi
 
     validate_requested_preset ||
         apply_report_failure CONFIG "$PRESET_VALIDATION_CODE" APPLY_VALIDATE \
