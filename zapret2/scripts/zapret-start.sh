@@ -375,9 +375,18 @@ firewall_is_clean_after_rollback() {
 snapshot_ipv6_publication_recorded() {
     local saved_expected="${CLEANUP_IPV6_OWNERSHIP_EXPECTED:-1}"
     local saved_recorded="${IPV6_PUBLICATION_RECORDED:-0}" recorded
+    local owner_available="${OWNER_STATE_AVAILABLE_FOR_ROLLBACK:-}"
     # Same inputs as the teardown decision, including the owner record: two
-    # callers asking one question about one generation must not disagree.
-    resolve_ipv6_ownership_expectation "${OWNER_STATE_AVAILABLE_FOR_ROLLBACK:-0}"
+    # callers asking one question about one generation must not disagree. A
+    # failure before teardown never set that answer, and the record it would
+    # have read may still describe live rules, so read it here.
+    if [ -z "$owner_available" ]; then
+        owner_available=0
+        if read_owner_state >/dev/null 2>&1 && owner_state_is_current_boot; then
+            owner_available=1
+        fi
+    fi
+    resolve_ipv6_ownership_expectation "$owner_available"
     recorded="$IPV6_PUBLICATION_RECORDED"
     CLEANUP_IPV6_OWNERSHIP_EXPECTED="$saved_expected"
     IPV6_PUBLICATION_RECORDED="$saved_recorded"
