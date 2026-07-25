@@ -39,9 +39,20 @@ object ModulePurgeController {
         val rebootRequired: Boolean,
         val diagnostic: String,
     ) {
+        /**
+         * Every effect the purge itself owns: the service is down, the module directory, its
+         * state tree and every external workspace are gone, the installed APK was never touched,
+         * and the receipt demands the reboot that retires the module for good. A verified-clean
+         * firewall is deliberately not part of it — the module tears the ruleset down either way
+         * and withholds the assertion only when it could not re-read one family afterwards, which
+         * the reboot this same receipt demands clears regardless.
+         */
+        val satisfiesRemovedContract: Boolean
+            get() = processClean && moduleRemoved && stateRemoved && externalRemoved &&
+                !apkTouched && rebootRequired
+
         val satisfiesCompleteContract: Boolean
-            get() = status == Status.COMPLETE && processClean && firewallClean && moduleRemoved &&
-                stateRemoved && externalRemoved && !apkTouched && rebootRequired
+            get() = status == Status.COMPLETE && satisfiesRemovedContract && firewallClean
     }
 
     sealed interface ParseResult<out T> {
@@ -69,23 +80,43 @@ object ModulePurgeController {
         val rebootRequired: Boolean get() = report?.rebootRequired == true
 
         /**
-         * Whether the module itself is gone, which a partial receipt can also state — the module
-         * reports partial when everything it owns was removed but one fact could not be verified,
-         * such as an IPv6 ruleset the reboot clears anyway. APK-private data belongs to a module
-         * that no longer exists in that case too, so clearing it must not wait for a full receipt.
-         * A receipt that admits touching the APK broke the contract outright and proves nothing.
+         * Whether the module itself is gone.
+         *
+         * A receipt never proves that alone. [outcome] is where everything the receipt cannot see
+         * about itself is folded in — the exit status of the command that printed it, a protocol
+         * the parser rejected, a mutation that was refused before it ran — so the two have to
+         * agree before either is honoured. A module that printed a flawless `complete` record and
+         * then had its command fail is classified [Outcome.INVALID_PROTOCOL] precisely because
+         * that receipt cannot be trusted; honouring it anyway would erase APK-private state on the
+         * word of a verdict the app had already rejected. For the same reason a receipt whose
+         * command failed proves nothing under any outcome.
+         *
+         * `complete` is therefore honoured only under [Outcome.COMPLETE] and only with its whole
+         * contract, verified-clean firewall included. `partial` is honoured only under
+         * [Outcome.PARTIAL], and only for the single case the module reserves it for: everything
+         * the purge owns was removed and the one fact left unproven is the firewall family the
+         * pending reboot clears anyway. APK-private data belongs to a module that no longer exists
+         * in that case too, so clearing it must not wait for a full receipt — but a `partial` that
+         * claims a verified-clean firewall contradicts its own status and proves nothing, exactly
+         * like one that admits touching the APK. Every other outcome proves nothing either.
          */
         val moduleFullyRemoved: Boolean
-            get() = report?.let {
-                it.moduleRemoved && it.stateRemoved && it.externalRemoved && !it.apkTouched
-            } == true
+            get() = command?.success != false && when (outcome) {
+                Outcome.COMPLETE -> report?.satisfiesCompleteContract == true
+                Outcome.PARTIAL -> report?.let {
+                    it.status == Status.PARTIAL && it.satisfiesRemovedContract && !it.firewallClean
+                } == true
+                else -> false
+            }
 
         /**
          * The user-visible verdict: the module is gone and the APK-private state that belonged to
          * it went with it. Nothing is left to retry — the purge script was removed along with the
          * module — so an erase that only failed to prove one reboot-cleared fact must be reported
          * as done, with the reservation named beside it, and never as a failure the user could
-         * act on.
+         * act on. Because [moduleFullyRemoved] admits a non-[Outcome.COMPLETE] receipt only when
+         * that receipt withheld [Report.firewallClean], the reservation shown beside an erased
+         * result always names the fact the module actually left unproven.
          */
         val erased: Boolean get() = moduleFullyRemoved && appDataCleared
 
@@ -118,6 +149,11 @@ object ModulePurgeController {
                     withContext(NonCancellable) {
                         val moduleResult = purgeInsideExclusiveTask()
                         if (moduleResult.moduleFullyRemoved && !appDataCleaner.clear()) {
+                            // Read before the downgrade on purpose: this app-side outcome no
+                            // longer agrees with the receipt, so it retires [moduleFullyRemoved]
+                            // with it. Nothing past this point asks about the module alone — the
+                            // only verdict acted on is [Result.erased], which this very failure
+                            // denies through [Result.appDataCleared].
                             moduleResult.copy(
                                 outcome = Outcome.PARTIAL,
                                 error = "Module data was removed, but APK-private state could not be cleared",

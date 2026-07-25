@@ -260,6 +260,113 @@ class ControlDialogStateModelTest {
         assertFalse(partial.copy(erased = false).unverifiedCleanup)
     }
 
+    /**
+     * The purge reservation is the IPv6 sentence on the result dialog, and it must describe the
+     * one fact the module left unproven rather than any outcome that merely is not COMPLETE. The
+     * dialog state carries no firewall field, so the guarantee has to survive the whole path from
+     * receipt to screen: every erase the controller admits under a non-COMPLETE outcome withheld
+     * `firewall_clean`, and no other erase may show the sentence.
+     */
+    @Test
+    fun purgeReservationAppearsForExactlyTheFirewallFactTheReceiptWithheld() {
+        val statuses = ModulePurgeController.Status.entries.map(
+            ModulePurgeController.Status::wireValue,
+        )
+        ModulePurgeController.Outcome.entries.forEach { outcome ->
+            statuses.forEach { status ->
+                listOf(true, false).forEach { firewallClean ->
+                    val result = purgeControllerResult(outcome, status, firewallClean)
+                    val dialog = ModulePurgeUiState.Result(
+                        outcome = result.outcome,
+                        erased = result.erased,
+                        rebootRequired = result.rebootRequired,
+                        diagnostic = "",
+                    )
+                    val label = "$outcome/$status/firewallClean=$firewallClean"
+
+                    assertEquals(label, result.erased && !firewallClean, dialog.unverifiedCleanup)
+                }
+            }
+        }
+    }
+
+    /**
+     * The same guarantee for the rollback the purge is modelled on: its reservation is reachable
+     * only through a receipt that withheld `firewall_clean`, and the one outcome that skips the
+     * receipt fields — COMPLETE — is minted only for a receipt that proved the firewall clean.
+     */
+    @Test
+    fun rollbackReservationAppearsForExactlyTheFirewallFactTheReceiptWithheld() {
+        ServiceLifecycleController.FullRollbackStatus.entries.forEach { status ->
+            listOf(true, false).forEach { firewallClean ->
+                val report = rollbackReport(status, firewallClean)
+                assertEquals(
+                    "$status/firewallClean=$firewallClean",
+                    status == ServiceLifecycleController.FullRollbackStatus.COMPLETE &&
+                        firewallClean,
+                    report.satisfiesCompleteContract,
+                )
+                ServiceLifecycleController.FullRollbackOutcome.entries.forEach { outcome ->
+                    val result = ServiceLifecycleController.FullRollbackResult(
+                        outcome = outcome,
+                        report = report,
+                    )
+                    val dialog = FullRollbackUiState.Result(
+                        outcome = result.outcome,
+                        rolledBack = result.rolledBack,
+                        rebootRequired = result.rebootRequired,
+                        diagnostic = "",
+                    )
+                    val label = "$outcome/$status/firewallClean=$firewallClean"
+
+                    if (dialog.unverifiedCleanup) assertFalse(label, firewallClean)
+                }
+            }
+        }
+    }
+
+    private fun rollbackReport(
+        status: ServiceLifecycleController.FullRollbackStatus,
+        firewallClean: Boolean,
+    ) = ServiceLifecycleController.FullRollbackReport(
+        status = status,
+        processClean = true,
+        firewallClean = firewallClean,
+        rollbackArmed = true,
+        hostsPreserved = true,
+        rebootRequired = true,
+        userDataPreserved = true,
+        legacyAmbiguous = false,
+        diagnostic = "",
+    )
+
+    private fun purgeControllerResult(
+        outcome: ModulePurgeController.Outcome,
+        status: String,
+        firewallClean: Boolean,
+    ): ModulePurgeController.Result {
+        val lines = listOf(
+            "Z2_PURGE_VERSION=1",
+            "Z2_PURGE_STATUS=$status",
+            "Z2_PURGE_PROCESS_CLEAN=1",
+            "Z2_PURGE_FIREWALL_CLEAN=${if (firewallClean) 1 else 0}",
+            "Z2_PURGE_MODULE_REMOVED=1",
+            "Z2_PURGE_STATE_REMOVED=1",
+            "Z2_PURGE_EXTERNAL_REMOVED=1",
+            "Z2_PURGE_APK_TOUCHED=0",
+            "Z2_PURGE_REBOOT_REQUIRED=1",
+            "Z2_PURGE_DIAGNOSTIC=receipt",
+            "Z2_PURGE_COMPLETE=1",
+        )
+        val parsed = ModulePurgeController.parseReportOutput(lines)
+            as ModulePurgeController.ParseResult.Valid
+        return ModulePurgeController.Result(
+            outcome = outcome,
+            report = parsed.value,
+            command = ServiceLifecycleController.CommandResult(success = true, exitCode = 0),
+        )
+    }
+
     @Test
     fun persistedModulePurgeProgressRestoresWithoutConfirmationAndWinsNoRollbackState() {
         val restored = restoreControlUiState(

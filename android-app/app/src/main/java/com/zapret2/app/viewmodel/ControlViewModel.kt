@@ -335,7 +335,14 @@ sealed interface ModulePurgeUiState {
         val rebootRequired: Boolean,
         val diagnostic: String,
     ) : ModulePurgeUiState {
-        /** Erased, with one cleanup step the module could not verify and the reboot clears. */
+        /**
+         * Erased, with one cleanup step the module could not verify and the reboot clears.
+         *
+         * A non-[ModulePurgeController.Outcome.COMPLETE] outcome names that step exactly, the way
+         * it does for the rollback: [ModulePurgeController.Result.erased] holds under any other
+         * outcome only for a `partial` receipt that withheld `firewall_clean`, so this reservation
+         * can never appear beside a firewall the module did verify.
+         */
         val unverifiedCleanup: Boolean
             get() = erased && outcome != ModulePurgeController.Outcome.COMPLETE
     }
