@@ -18,13 +18,47 @@ internal data class RootCommandBudget(
     }
 }
 
+/**
+ * The two isolated root transports the app owns.
+ *
+ * Every lane serializes its own commands, but lanes never wait on each other. The split exists
+ * because the two kinds of work have incompatible occupancy: privileged transactions (lifecycle
+ * scripts, package installs) legitimately hold their shell for minutes, while observations are
+ * bounded read-only requests that screens block on. On one shared queue, any long transaction
+ * starved every screen load into QUEUE_BUSY within seconds.
+ *
+ * Running an observation concurrently with a privileged transaction is safe by the project's
+ * publication discipline, which already assumes writers the app process cannot see: the module's
+ * own scripts mutate the same state from boot and shell contexts. Mutable state is published by
+ * atomic rename, observation readers re-check file identity (and, where required, digests) around
+ * every read and return nothing rather than torn bytes, and the module-side lifecycle lock
+ * serializes mutators — not observers.
+ */
+internal enum class RootTransportLane {
+    OBSERVATION,
+    PRIVILEGED,
+}
+
 internal enum class RootCommandPolicy(
     val budget: RootCommandBudget,
+    val lane: RootTransportLane,
 ) {
-    OBSERVATION(RootCommandBudget(commandTimeoutSeconds = 20, transportTimeoutMillis = 25_000)),
-    MUTATION(RootCommandBudget(commandTimeoutSeconds = 60, transportTimeoutMillis = 65_000)),
-    LIFECYCLE(RootCommandBudget(commandTimeoutSeconds = 420, transportTimeoutMillis = 425_000)),
-    PACKAGE_INSTALL(RootCommandBudget(commandTimeoutSeconds = 300, transportTimeoutMillis = 305_000)),
+    OBSERVATION(
+        RootCommandBudget(commandTimeoutSeconds = 20, transportTimeoutMillis = 25_000),
+        RootTransportLane.OBSERVATION,
+    ),
+    MUTATION(
+        RootCommandBudget(commandTimeoutSeconds = 60, transportTimeoutMillis = 65_000),
+        RootTransportLane.PRIVILEGED,
+    ),
+    LIFECYCLE(
+        RootCommandBudget(commandTimeoutSeconds = 420, transportTimeoutMillis = 425_000),
+        RootTransportLane.PRIVILEGED,
+    ),
+    PACKAGE_INSTALL(
+        RootCommandBudget(commandTimeoutSeconds = 300, transportTimeoutMillis = 305_000),
+        RootTransportLane.PRIVILEGED,
+    ),
 }
 
 internal enum class RootCommandFailure {
@@ -246,21 +280,69 @@ private class LibsuRootCommandSession(
         )
 }
 
+/**
+ * One shell configuration for every root transport the app opens.
+ *
+ * The main libsu shell and each additional lane shell must be interchangeable — same mount
+ * namespace, same startup budget — or the same command would behave differently depending on
+ * which lane ran it.
+ */
+internal object RootShellSpec {
+    private const val SHELL_STARTUP_TIMEOUT_SECONDS = 30L
+
+    fun configuredBuilder(): Shell.Builder = Shell.Builder.create()
+        .setFlags(Shell.FLAG_MOUNT_MASTER)
+        .setTimeout(SHELL_STARTUP_TIMEOUT_SECONDS)
+}
+
+/** Routes each command to its policy's lane; lanes fail and recover independently. */
+internal class RootCommandDispatcher(
+    private val lanes: Map<RootTransportLane, BoundedRootCommandExecutor>,
+) {
+    init {
+        require(RootTransportLane.entries.all(lanes::containsKey))
+    }
+
+    fun execute(command: String, policy: RootCommandPolicy): RootCommandResult =
+        lanes.getValue(policy.lane).execute(command, policy.budget)
+}
+
 /** The only production entry point for app-process root commands. */
 internal object RootCommandExecutor {
-    private val delegate = BoundedRootCommandExecutor(
-        sessionFactory = RootCommandSessionFactory {
-            val shell = Shell.getShell()
-            if (!shell.isAlive || !shell.isRoot) {
-                runCatching { shell.close() }
-                error("libsu did not provide a live uid-0 shell")
-            }
-            LibsuRootCommandSession(shell)
-        },
+
+    /**
+     * An observation may queue behind one full worst-case occupancy of its own lane (transport
+     * budget of the command ahead of it) and still deserves its turn: everything in this lane is
+     * short by contract, so waiting is productive. The privileged lane keeps the short 5s default
+     * — its occupants run for minutes, and a caller that lost that race is better told "busy" than
+     * silently parked.
+     */
+    private const val OBSERVATION_QUEUE_TIMEOUT_MILLIS = 25_000L
+
+    private val dispatcher = RootCommandDispatcher(
+        mapOf(
+            RootTransportLane.PRIVILEGED to BoundedRootCommandExecutor(
+                sessionFactory = RootCommandSessionFactory { liveRootSession(Shell.getShell()) },
+            ),
+            RootTransportLane.OBSERVATION to BoundedRootCommandExecutor(
+                sessionFactory = RootCommandSessionFactory {
+                    liveRootSession(RootShellSpec.configuredBuilder().build())
+                },
+                queueTimeoutMillis = OBSERVATION_QUEUE_TIMEOUT_MILLIS,
+            ),
+        ),
     )
 
     fun execute(
         command: String,
         policy: RootCommandPolicy = RootCommandPolicy.OBSERVATION,
-    ): RootCommandResult = delegate.execute(command, policy.budget)
+    ): RootCommandResult = dispatcher.execute(command, policy)
+
+    private fun liveRootSession(shell: Shell): RootCommandSession {
+        if (!shell.isAlive || !shell.isRoot) {
+            runCatching { shell.close() }
+            error("libsu did not provide a live uid-0 shell")
+        }
+        return LibsuRootCommandSession(shell)
+    }
 }

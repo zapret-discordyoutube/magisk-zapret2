@@ -2,6 +2,7 @@ package com.zapret2.app
 
 import android.app.Application
 import com.topjohnwu.superuser.Shell
+import com.zapret2.app.data.RootShellSpec
 import dagger.hilt.android.HiltAndroidApp
 
 @HiltAndroidApp
@@ -24,11 +25,7 @@ class ZapretApp : Application() {
             if (shellInitialized) return
 
             try {
-                Shell.setDefaultBuilder(
-                    Shell.Builder.create()
-                        .setFlags(Shell.FLAG_MOUNT_MASTER)
-                        .setTimeout(30)
-                )
+                Shell.setDefaultBuilder(RootShellSpec.configuredBuilder())
                 shellInitialized = true
             } catch (_: Exception) {
                 AppDebugLog.error(TAG, "Failed to configure the root shell")
