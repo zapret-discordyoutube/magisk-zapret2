@@ -1,5 +1,6 @@
 package com.zapret2.app.data
 
+import java.security.MessageDigest
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -302,6 +303,291 @@ class PresetRepositoryTest {
         )
     }
 
+    @Test
+    fun saveProtocol_projectsEveryContentOutcomeOntoItsExactResult() {
+        assertEquals(
+            PresetApplyTransaction.Reported(PresetMutationOutcome.Saved),
+            PresetMachineProtocol.parseSave(
+                applyPayload(outcome = "SAVED", committed = "0", wasRunning = "1"),
+                "good.txt",
+            ),
+        )
+        // The same success also describes an apply-mode save on a service the user had stopped.
+        assertEquals(
+            PresetApplyTransaction.Reported(PresetMutationOutcome.Saved),
+            PresetMachineProtocol.parseSave(
+                applyPayload(outcome = "SAVED", committed = "1", wasRunning = "0"),
+                "good.txt",
+            ),
+        )
+        assertEquals(
+            PresetApplyTransaction.Reported(PresetMutationOutcome.Applied),
+            PresetMachineProtocol.parseSave(
+                applyPayload(outcome = "APPLIED", committed = "0", wasRunning = "1"),
+                "good.txt",
+            ),
+        )
+        assertEquals(
+            PresetApplyTransaction.Reported(PresetMutationOutcome.SavedAndApplied),
+            PresetMachineProtocol.parseSave(
+                applyPayload(outcome = "SAVED_AND_APPLIED", committed = "1", wasRunning = "1"),
+                "good.txt",
+            ),
+        )
+        assertEquals(
+            PresetApplyTransaction.Reported(PresetMutationOutcome.SourceChanged),
+            PresetMachineProtocol.parseSave(sourceChangedPayload(), "good.txt"),
+        )
+        assertEquals(
+            PresetApplyTransaction.Reported(
+                PresetMutationOutcome.Rejected(PresetIssue.NFQWS_DRY_RUN_FAILED),
+            ),
+            PresetMachineProtocol.parseSave(
+                applyPayload(
+                    outcome = "REJECTED",
+                    issue = "NFQWS_DRY_RUN_FAILED",
+                    committed = "0",
+                    wasRunning = "0",
+                    error = failedApplyEnvelope("CONFIG", "NFQWS_DRY_RUN_FAILED", "APPLY_VALIDATE"),
+                ),
+                "good.txt",
+            ),
+        )
+        assertEquals(
+            PresetApplyTransaction.Reported(
+                PresetMutationOutcome.Rejected(PresetIssue.PRESET_SYMLINK),
+            ),
+            PresetMachineProtocol.parseSave(
+                applyPayload(
+                    outcome = "REJECTED",
+                    issue = "PRESET_SYMLINK",
+                    committed = "0",
+                    wasRunning = "0",
+                    error = failedApplyEnvelope("CONFIG", "UNSAFE_PRESET_FILE", "APPLY_SAVE_TARGET"),
+                ),
+                "good.txt",
+            ),
+        )
+        listOf(
+            "WRITE_FAILED_ROLLED_BACK" to PresetMutationOutcome.WriteFailedRolledBack,
+            "RESTART_FAILED_ROLLED_BACK" to PresetMutationOutcome.RestartFailedRolledBack,
+            "ROLLBACK_FAILED" to PresetMutationOutcome.RollbackFailed,
+            "IO_FAILED" to PresetMutationOutcome.IoFailed,
+            "BLOCKED" to PresetMutationOutcome.Blocked,
+        ).forEach { (wire, outcome) ->
+            assertEquals(
+                PresetApplyTransaction.Reported(outcome),
+                PresetMachineProtocol.parseSave(
+                    applyPayload(
+                        outcome = wire,
+                        committed = "0",
+                        error = failedApplyEnvelope("LIFECYCLE", "LIFECYCLE_FAILED", "APPLY_SAVE"),
+                    ),
+                    "good.txt",
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun saveProtocol_reportsAModuleWithoutTheSaveEntryPointAsUnsupported() {
+        assertEquals(
+            PresetApplyTransaction.Unsupported,
+            PresetMachineProtocol.parseSave(listOf("Z2_APPLY_UNSUPPORTED=1"), "good.txt"),
+        )
+        // A generation that predates --save-content refuses the argument count with a complete,
+        // valid envelope. The app proved the name before the round trip, so that refusal cannot be
+        // about the name and can only mean the entry point is missing.
+        assertEquals(
+            PresetApplyTransaction.Unsupported,
+            PresetMachineProtocol.parseSave(olderModuleRefusal(), "good.txt"),
+        )
+        // The same refusal from a stage this app does own is still a refusal, not a fallback.
+        assertEquals(
+            PresetApplyTransaction.Reported(
+                PresetMutationOutcome.Rejected(PresetIssue.UNSAFE_PRESET_NAME),
+            ),
+            PresetMachineProtocol.parseSave(
+                applyPayload(
+                    outcome = "REJECTED",
+                    issue = "UNSAFE_PRESET_NAME",
+                    preset = "good.txt",
+                    committed = "0",
+                    wasRunning = "0",
+                    error = failedApplyEnvelope("CONFIG", "UNSAFE_PRESET_NAME", "APPLY_REQUEST"),
+                ),
+                "good.txt",
+            ),
+        )
+    }
+
+    @Test
+    fun saveProtocol_failsClosedOnTruncatedInconsistentOrForeignPayloads() {
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseSave(
+                applyPayload(outcome = "SAVED", committed = "0").dropLast(1),
+                "good.txt",
+            ),
+        )
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseSave(
+                applyPayload(outcome = "SAVED", schema = "2", committed = "0"),
+                "good.txt",
+            ),
+        )
+        // A saved-and-applied content change must have replaced a running daemon.
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseSave(
+                applyPayload(outcome = "SAVED_AND_APPLIED", committed = "1", wasRunning = "0"),
+                "good.txt",
+            ),
+        )
+        // ... and must say the selection moved; an unchanged selection is a plain apply.
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseSave(
+                applyPayload(outcome = "SAVED_AND_APPLIED", committed = "0", wasRunning = "1"),
+                "good.txt",
+            ),
+        )
+        // An applied content change never moved the selection.
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseSave(
+                applyPayload(outcome = "APPLIED", committed = "1", wasRunning = "1"),
+                "good.txt",
+            ),
+        )
+        // A success may never travel with a failure envelope.
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseSave(
+                applyPayload(
+                    outcome = "SAVED",
+                    committed = "0",
+                    error = failedApplyEnvelope("LIFECYCLE", "LIFECYCLE_FAILED", "APPLY_SAVE"),
+                ),
+                "good.txt",
+            ),
+        )
+        // A refused source is a failure that committed nothing and carries no typed issue.
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseSave(
+                applyPayload(outcome = "SOURCE_CHANGED", committed = "0", wasRunning = "0"),
+                "good.txt",
+            ),
+        )
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseSave(sourceChangedPayload(committed = "1"), "good.txt"),
+        )
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseSave(
+                sourceChangedPayload(issue = "PRESET_SOURCE_CHANGED"),
+                "good.txt",
+            ),
+        )
+        // A refusal must still name why it refused.
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseSave(
+                applyPayload(
+                    outcome = "REJECTED",
+                    committed = "0",
+                    wasRunning = "0",
+                    error = failedApplyEnvelope("CONFIG", "PRESET_UNREADABLE", "APPLY_VALIDATE"),
+                ),
+                "good.txt",
+            ),
+        )
+        // The answer must be about the preset that was requested.
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseSave(
+                applyPayload(outcome = "SAVED", committed = "0"),
+                "other.txt",
+            ),
+        )
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseSave(
+                applyPayload(outcome = "SAVED", preset = "", committed = "0"),
+                "good.txt",
+            ),
+        )
+        // An outcome only a newer module knows is never guessed at.
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseSave(
+                applyPayload(outcome = "PARTIALLY_SAVED", committed = "0"),
+                "good.txt",
+            ),
+        )
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseSave(emptyList(), "good.txt"),
+        )
+    }
+
+    @Test
+    fun saveProtocol_reportsItsOwnArgumentDefectWithoutRequiringTheEchoedName() {
+        assertEquals(
+            PresetApplyTransaction.Reported(PresetMutationOutcome.IoFailed),
+            PresetMachineProtocol.parseSave(
+                applyPayload(
+                    outcome = "IO_FAILED",
+                    preset = "",
+                    previous = "",
+                    committed = "0",
+                    wasRunning = "0",
+                    error = failedApplyEnvelope("CONFIG", "INVALID_ARGUMENTS", "APPLY_SAVE_REQUEST"),
+                ),
+                "good.txt",
+            ),
+        )
+        // Every other failure must still name the preset it acted on.
+        assertEquals(
+            PresetApplyTransaction.Indeterminate,
+            PresetMachineProtocol.parseSave(
+                applyPayload(
+                    outcome = "IO_FAILED",
+                    preset = "",
+                    previous = "",
+                    committed = "0",
+                    wasRunning = "0",
+                    error = failedApplyEnvelope("STATE", "STATE_UNAVAILABLE", "APPLY_SAVE_BACKUP"),
+                ),
+                "good.txt",
+            ),
+        )
+    }
+
+    private fun sourceChangedPayload(
+        issue: String = "NONE",
+        committed: String = "0",
+    ): List<String> = applyPayload(
+        outcome = "SOURCE_CHANGED",
+        issue = issue,
+        committed = committed,
+        wasRunning = "0",
+        error = failedApplyEnvelope("CONFIG", "PRESET_SOURCE_CHANGED", "APPLY_SAVE_CAS"),
+    )
+
+    private fun olderModuleRefusal(): List<String> = applyPayload(
+        outcome = "REJECTED",
+        issue = "UNSAFE_PRESET_NAME",
+        preset = "",
+        previous = "",
+        committed = "0",
+        wasRunning = "0",
+        error = failedApplyEnvelope("CONFIG", "INVALID_ARGUMENTS", "APPLY_REQUEST"),
+    )
+
     private fun applyPayload(
         schema: String = "1",
         outcome: String = "APPLIED",
@@ -381,7 +667,19 @@ class PresetRepositoryTest {
         assertEquals("old", runner.files["custom.txt"])
         assertEquals(0, runner.replaceCalls)
         assertEquals(0, runner.configWrites)
-        assertEquals(listOf("snapshot-file", "snapshot-config", "write-candidate", "validate", "remove"), runner.events)
+        assertEquals(
+            listOf(
+                "write-candidate",
+                "save-transaction",
+                "remove",
+                "snapshot-file",
+                "snapshot-config",
+                "write-candidate",
+                "validate",
+                "remove",
+            ),
+            runner.events,
+        )
     }
 
     @Test
@@ -738,6 +1036,250 @@ class PresetRepositoryTest {
         assertTrue(runner.events.isEmpty())
     }
 
+    @Test
+    fun save_usesOneModuleTransactionAndProjectsItsOutcomeWithoutRebuildingTheSteps() = runBlocking {
+        val runner = FakePresetRunner(
+            validation = PresetValidation.Compatible,
+            saveTransaction = PresetApplyTransaction.Reported(PresetMutationOutcome.SavedAndApplied),
+        )
+        runner.files["custom.txt"] = "old content"
+        val gate = RecordingGate()
+        val repository = TransactionalPresetRepository(runner, gate)
+
+        val result = repository.save("custom.txt", "old content", "new content", applyAfterSave = true)
+
+        assertEquals(PresetMutationOutcome.SavedAndApplied, result)
+        assertEquals(1, gate.calls)
+        assertEquals(listOf("write-candidate", "save-transaction"), runner.events)
+        assertEquals(0, runner.validationCalls)
+        assertEquals(0, runner.replaceCalls)
+        assertEquals(0, runner.configWrites)
+        assertEquals(0, runner.restartCalls)
+        val request = runner.saveTransactionRequests.single()
+        assertEquals("custom.txt", request.fileName)
+        assertTrue(request.candidateFileName.startsWith("_custom.candidate."))
+        assertTrue(request.applyAfterSave)
+        assertEquals(sha256Hex("old content"), request.expectedDigest)
+    }
+
+    @Test
+    fun save_statesTheContentIdentityCanonicallyAndSignalsAnAbsentTargetAsMissing() = runBlocking {
+        val digested = FakePresetRunner(
+            validation = PresetValidation.Compatible,
+            saveTransaction = PresetApplyTransaction.Reported(PresetMutationOutcome.Saved),
+        )
+        val created = FakePresetRunner(
+            validation = PresetValidation.Compatible,
+            saveTransaction = PresetApplyTransaction.Reported(PresetMutationOutcome.Saved),
+        )
+
+        TransactionalPresetRepository(digested, RecordingGate())
+            .save("custom.txt", "old content\r\n\r\n", "new content", applyAfterSave = false)
+        TransactionalPresetRepository(created, RecordingGate())
+            .save("new.txt", null, "fresh content", applyAfterSave = false)
+
+        // Trailing blank lines and CRLF are the same content generation on both sides of the wire.
+        assertEquals(sha256Hex("old content"), digested.saveTransactionRequests.single().expectedDigest)
+        assertNull(created.saveTransactionRequests.single().expectedDigest)
+        assertFalse(created.saveTransactionRequests.single().applyAfterSave)
+    }
+
+    @Test
+    fun save_projectsEveryRefusalAndRollbackOutcomeWithoutSofteningIt() = runBlocking {
+        val projected = listOf(
+            PresetMutationOutcome.Saved,
+            PresetMutationOutcome.Applied,
+            PresetMutationOutcome.SavedAndApplied,
+            PresetMutationOutcome.SourceChanged,
+            PresetMutationOutcome.Rejected(PresetIssue.PRESET_SYMLINK),
+            PresetMutationOutcome.WriteFailedRolledBack,
+            PresetMutationOutcome.RestartFailedRolledBack,
+            PresetMutationOutcome.RollbackFailed,
+            PresetMutationOutcome.Blocked,
+            PresetMutationOutcome.IoFailed,
+        )
+
+        projected.forEach { outcome ->
+            val runner = FakePresetRunner(
+                validation = PresetValidation.Compatible,
+                saveTransaction = PresetApplyTransaction.Reported(outcome),
+            )
+            runner.files["custom.txt"] = "old content"
+            val repository = TransactionalPresetRepository(runner, RecordingGate())
+
+            val result = repository.save("custom.txt", "old content", "new", applyAfterSave = true)
+
+            assertEquals(outcome, result)
+            assertEquals(listOf("write-candidate", "save-transaction"), runner.events)
+            assertEquals("old content", runner.files["custom.txt"])
+        }
+    }
+
+    @Test
+    fun olderModuleWithoutTheSaveTransactionStillSavesThroughTheStepwiseFallback() = runBlocking {
+        val runner = FakePresetRunner(validation = PresetValidation.Compatible)
+        runner.config = ActivePresetConfig("old.txt")
+        runner.files["custom.txt"] = "old content"
+        val repository = TransactionalPresetRepository(runner, RecordingGate())
+
+        val result = repository.save("custom.txt", "old content", "new content", applyAfterSave = false)
+
+        assertEquals(PresetMutationOutcome.Saved, result)
+        assertEquals("new content\n", runner.files["custom.txt"])
+        assertEquals(1, runner.saveTransactionCalls)
+        assertEquals(
+            listOf(
+                "write-candidate",
+                "save-transaction",
+                "remove",
+                "snapshot-file",
+                "snapshot-config",
+                "write-candidate",
+                "validate",
+                "replace",
+                "snapshot-file",
+            ),
+            runner.events,
+        )
+        assertFalse(runner.files.keys.any { it.startsWith("_") })
+    }
+
+    @Test
+    fun save_resolvesAnUnprovenTransactionFromThePublishedContentAndSelection() = runBlocking {
+        // The target still carries the generation the editor started from: nothing was published.
+        val untouched = indeterminateSaveRunner(target = "old content")
+        assertEquals(
+            PresetMutationOutcome.IoFailed,
+            TransactionalPresetRepository(untouched, RecordingGate())
+                .save("custom.txt", "old content", "new content", applyAfterSave = true),
+        )
+        assertEquals(0, untouched.configWrites)
+        assertEquals(0, untouched.restartCalls)
+
+        // The target carries content neither side asked for.
+        val foreign = indeterminateSaveRunner(target = "somebody else's edit")
+        assertEquals(
+            PresetMutationOutcome.RollbackFailed,
+            TransactionalPresetRepository(foreign, RecordingGate())
+                .save("custom.txt", "old content", "new content", applyAfterSave = true),
+        )
+
+        // The content landed on a preset that governs nothing, and auto mode owed nothing more.
+        val unselected = indeterminateSaveRunner(target = "new content")
+        assertEquals(
+            PresetMutationOutcome.Saved,
+            TransactionalPresetRepository(unselected, RecordingGate())
+                .save("custom.txt", "old content", "new content", applyAfterSave = false),
+        )
+
+        // The same state under an explicit apply is a selection commit that did not land.
+        val uncommitted = indeterminateSaveRunner(target = "new content")
+        assertEquals(
+            PresetMutationOutcome.RollbackFailed,
+            TransactionalPresetRepository(uncommitted, RecordingGate())
+                .save("custom.txt", "old content", "new content", applyAfterSave = true),
+        )
+        assertEquals(0, uncommitted.configWrites)
+    }
+
+    @Test
+    fun save_acceptsALostAnswerOnlyWhenTheLiveGenerationIsTheOneThisLeaseStamped() = runBlocking {
+        val unproven = indeterminateSaveRunner(target = "new content", selected = true)
+        assertEquals(
+            PresetMutationOutcome.RollbackFailed,
+            TransactionalPresetRepository(unproven, RecordingGate())
+                .save("custom.txt", "old content", "new content", applyAfterSave = true),
+        )
+
+        val applied = indeterminateSaveRunner(target = "new content", selected = true, proven = true)
+        assertEquals(
+            PresetMutationOutcome.SavedAndApplied,
+            TransactionalPresetRepository(applied, RecordingGate())
+                .save("custom.txt", "old content", "new content", applyAfterSave = true),
+        )
+        assertEquals(
+            listOf(
+                "write-candidate",
+                "save-transaction",
+                "remove",
+                "snapshot-file",
+                "snapshot-config",
+                "prove-commit",
+            ),
+            applied.events,
+        )
+        assertEquals(0, applied.configWrites)
+        assertEquals(0, applied.restartCalls)
+        // A staging file from a lost attempt is never left behind in the privileged directory.
+        assertFalse(applied.files.keys.any { it.startsWith("_") })
+
+        // Auto mode never moves the selection, so the same proof describes a plain application.
+        val autoApplied = indeterminateSaveRunner(target = "new content", selected = true, proven = true)
+        assertEquals(
+            PresetMutationOutcome.Applied,
+            TransactionalPresetRepository(autoApplied, RecordingGate())
+                .save("custom.txt", "old content", "new content", applyAfterSave = false),
+        )
+    }
+
+    @Test
+    fun save_neverReplaysALostTransactionAsAFreshAttempt() = runBlocking {
+        val runner = FakePresetRunner(
+            validation = PresetValidation.Compatible,
+            saveTransactionFailure = IllegalStateException("root transport died"),
+        )
+        runner.files["custom.txt"] = "old content"
+        val repository = TransactionalPresetRepository(runner, RecordingGate())
+
+        val result = repository.save("custom.txt", "old content", "new content", applyAfterSave = true)
+
+        assertEquals(PresetMutationOutcome.IoFailed, result)
+        assertEquals(1, runner.saveTransactionCalls)
+        assertEquals(0, runner.replaceCalls)
+        assertEquals(0, runner.configWrites)
+        assertEquals(0, runner.restartCalls)
+        assertEquals(0, runner.validationCalls)
+    }
+
+    @Test
+    fun save_rejectsAnUnsafeNameBeforeStagingAnythingForTheModule() = runBlocking {
+        val runner = FakePresetRunner(validation = PresetValidation.Compatible)
+        val repository = TransactionalPresetRepository(runner, RecordingGate())
+
+        val result = repository.save("../escape.txt", null, "content", applyAfterSave = false)
+
+        assertEquals(PresetMutationOutcome.Rejected(PresetIssue.UNSAFE_PRESET_NAME), result)
+        assertEquals(0, runner.saveTransactionCalls)
+        assertTrue(runner.events.isEmpty())
+    }
+
+    private fun indeterminateSaveRunner(
+        target: String,
+        selected: Boolean = false,
+        proven: Boolean = false,
+    ): FakePresetRunner {
+        val runner = FakePresetRunner(
+            validation = PresetValidation.Compatible,
+            saveTransaction = PresetApplyTransaction.Indeterminate,
+            applyIsProven = proven,
+        )
+        runner.config = ActivePresetConfig(if (selected) "custom.txt" else "old.txt")
+        runner.files["custom.txt"] = target
+        return runner
+    }
+
+    private fun sha256Hex(content: String): String =
+        MessageDigest.getInstance("SHA-256")
+            .digest(content.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+
+    private data class SaveRequest(
+        val fileName: String,
+        val candidateFileName: String,
+        val expectedDigest: String?,
+        val applyAfterSave: Boolean,
+    )
+
     private class RecordingGate : PresetMutationGate {
         var calls = 0
         override suspend fun <T> mutate(block: suspend () -> T): T {
@@ -753,7 +1295,9 @@ class PresetRepositoryTest {
          * expectation in this file keeps exercising the stepwise fallback that generation needs.
          */
         var applyTransaction: PresetApplyTransaction = PresetApplyTransaction.Unsupported,
+        var saveTransaction: PresetApplyTransaction = PresetApplyTransaction.Unsupported,
         private val applyTransactionFailure: Exception? = null,
+        private val saveTransactionFailure: Exception? = null,
         private val applyIsProven: Boolean = false,
         private val restartSucceeds: Boolean = true,
         private val restartFailure: Exception? = null,
@@ -774,6 +1318,8 @@ class PresetRepositoryTest {
         var replaceCalls = 0
         var snapshotFileCalls = 0
         var applyTransactionCalls = 0
+        var saveTransactionCalls = 0
+        val saveTransactionRequests = mutableListOf<SaveRequest>()
 
         override suspend fun listPresets(): List<String>? = null
 
@@ -782,6 +1328,19 @@ class PresetRepositoryTest {
             applyTransactionCalls++
             applyTransactionFailure?.let { throw it }
             return applyTransaction
+        }
+
+        override suspend fun savePresetTransaction(
+            fileName: String,
+            candidateFileName: String,
+            expectedDigest: String?,
+            applyAfterSave: Boolean,
+        ): PresetApplyTransaction {
+            events += "save-transaction"
+            saveTransactionCalls++
+            saveTransactionRequests += SaveRequest(fileName, candidateFileName, expectedDigest, applyAfterSave)
+            saveTransactionFailure?.let { throw it }
+            return saveTransaction
         }
 
         override suspend fun validatePreset(candidateFileName: String, logicalFileName: String): PresetValidation {

@@ -7,6 +7,7 @@ import dagger.hilt.components.SingletonComponent
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.security.MessageDigest
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -59,6 +60,10 @@ internal object PresetMachineProtocol {
     private const val COMMAND_SUMMARY = "Z2_COMMAND_SUMMARY"
 
     const val APPLY_UNSUPPORTED = "Z2_APPLY_UNSUPPORTED=1"
+
+    /** Wire sentinel for "the save target must not exist yet". */
+    const val SAVE_MISSING_DIGEST = "missing"
+
     private const val APPLY_SCHEMA = "Z2_APPLY_SCHEMA"
     private const val APPLY_SCHEMA_VERSION = "1"
     private const val APPLY_OUTCOME = "Z2_APPLY_OUTCOME"
@@ -69,6 +74,10 @@ internal object PresetMachineProtocol {
     private const val APPLY_SERVICE_WAS_RUNNING = "Z2_APPLY_SERVICE_WAS_RUNNING"
     private const val APPLY_COMPLETE = "Z2_APPLY_COMPLETE"
     private const val APPLY_ISSUE_NONE = "NONE"
+    private const val INVALID_ARGUMENTS = "INVALID_ARGUMENTS"
+    private const val STAGE_APPLY_REQUEST = "APPLY_REQUEST"
+    private const val STAGE_SAVE_REQUEST = "APPLY_SAVE_REQUEST"
+    private const val UNSAFE_PRESET_NAME = "UNSAFE_PRESET_NAME"
 
     private val applyOwnFields = setOf(
         APPLY_SCHEMA,
@@ -95,28 +104,11 @@ internal object PresetMachineProtocol {
     fun parseApply(lines: List<String>, expectedFileName: String): PresetApplyTransaction {
         val records = lines.filter(String::isNotBlank)
         if (records.singleOrNull() == APPLY_UNSUPPORTED) return PresetApplyTransaction.Unsupported
-        if (records.lastOrNull() != "$APPLY_COMPLETE=1") return PresetApplyTransaction.Indeterminate
-        val pairs = records.map { record ->
-            val separator = record.indexOf('=')
-            if (separator <= 0) return PresetApplyTransaction.Indeterminate
-            record.substring(0, separator) to record.substring(separator + 1)
-        }
-        val counts = pairs.groupingBy { it.first }.eachCount()
-        if (counts.keys != applyFields || applyFields.any { counts[it] != 1 }) {
-            return PresetApplyTransaction.Indeterminate
-        }
-        val values = pairs.toMap()
-        if (values[APPLY_SCHEMA] != APPLY_SCHEMA_VERSION) return PresetApplyTransaction.Indeterminate
-        val error = LifecycleErrorContract.parseValues(values) ?: return PresetApplyTransaction.Indeterminate
-        val committed = values.getValue(APPLY_CONFIG_COMMITTED).takeIf { it == "0" || it == "1" }
-            ?: return PresetApplyTransaction.Indeterminate
-        val wasRunning = values.getValue(APPLY_SERVICE_WAS_RUNNING).takeIf { it == "0" || it == "1" }
-            ?: return PresetApplyTransaction.Indeterminate
-        val issueCode = values.getValue(APPLY_ISSUE)
-        val outcome = when (values.getValue(APPLY_OUTCOME)) {
+        val payload = decodeApplyPayload(records) ?: return PresetApplyTransaction.Indeterminate
+        val outcome = when (payload.outcome) {
             "APPLIED" -> PresetMutationOutcome.Applied
             "SAVED" -> PresetMutationOutcome.Saved
-            "REJECTED" -> PresetMutationOutcome.Rejected(PresetIssue.fromWireCode(issueCode))
+            "REJECTED" -> PresetMutationOutcome.Rejected(PresetIssue.fromWireCode(payload.issue))
             "WRITE_FAILED", "IO_FAILED" -> PresetMutationOutcome.IoFailed
             "WRITE_FAILED_ROLLED_BACK" -> PresetMutationOutcome.WriteFailedRolledBack
             "RESTART_FAILED_ROLLED_BACK" -> PresetMutationOutcome.RestartFailedRolledBack
@@ -124,29 +116,142 @@ internal object PresetMachineProtocol {
             "BLOCKED" -> PresetMutationOutcome.Blocked
             else -> return PresetApplyTransaction.Indeterminate
         }
-        val rejectedName = outcome is PresetMutationOutcome.Rejected &&
-            PresetIssue.fromWireCode(issueCode) == PresetIssue.UNSAFE_PRESET_NAME
         // An unsafe request is never echoed back, so only that refusal may omit the name.
-        if (!rejectedName && values.getValue(APPLY_PRESET) != expectedFileName) {
-            return PresetApplyTransaction.Indeterminate
-        }
-        if (rejectedName && values.getValue(APPLY_PRESET).isNotEmpty()) {
-            return PresetApplyTransaction.Indeterminate
-        }
-        if (values.getValue(APPLY_PREVIOUS_PRESET).let { it.isNotEmpty() && !PresetNamePolicy.isValid(it) }) {
+        val rejectedName = outcome is PresetMutationOutcome.Rejected &&
+            PresetIssue.fromWireCode(payload.issue) == PresetIssue.UNSAFE_PRESET_NAME
+        if (!payload.namesTheRequest(expectedFileName, mayOmitName = rejectedName)) {
             return PresetApplyTransaction.Indeterminate
         }
         val consistent = when (outcome) {
             PresetMutationOutcome.Applied ->
-                error.isNone && committed == "1" && wasRunning == "1" && issueCode == APPLY_ISSUE_NONE
+                payload.isClean && payload.committed && payload.wasRunning
             PresetMutationOutcome.Saved ->
-                error.isNone && committed == "1" && wasRunning == "0" && issueCode == APPLY_ISSUE_NONE
-            is PresetMutationOutcome.Rejected ->
-                !error.isNone && committed == "0" && issueCode != APPLY_ISSUE_NONE
-            else -> !error.isNone && issueCode == APPLY_ISSUE_NONE
+                payload.isClean && payload.committed && !payload.wasRunning
+            is PresetMutationOutcome.Rejected -> payload.isTypedRefusal
+            else -> payload.isUntypedFailure
         }
         if (!consistent) return PresetApplyTransaction.Indeterminate
         return PresetApplyTransaction.Reported(outcome)
+    }
+
+    /**
+     * Projects the module's single content-save payload onto one existing mutation outcome.
+     *
+     * It shares the apply envelope and its fail-closed decoding, and differs only in the wider
+     * result set a content mutation can reach: the preset may be saved without governing the
+     * daemon, saved and selected, or refused by the content compare-and-swap that proves the app
+     * edited the generation still on disk.
+     */
+    fun parseSave(lines: List<String>, expectedFileName: String): PresetApplyTransaction {
+        val records = lines.filter(String::isNotBlank)
+        if (records.singleOrNull() == APPLY_UNSUPPORTED) return PresetApplyTransaction.Unsupported
+        val payload = decodeApplyPayload(records) ?: return PresetApplyTransaction.Indeterminate
+        // A generation without this entry point reads the flag as the one preset name it accepts
+        // and refuses the argument count before touching anything. The app proves the name against
+        // its own policy before the round trip, so this exact refusal can only mean the entry point
+        // is missing — which is what lets the caller fall back instead of reporting a failure.
+        if (payload.outcome == "REJECTED" && payload.issue == UNSAFE_PRESET_NAME &&
+            payload.preset.isEmpty() && payload.error.code == INVALID_ARGUMENTS &&
+            payload.error.stage == STAGE_APPLY_REQUEST
+        ) {
+            return PresetApplyTransaction.Unsupported
+        }
+        val outcome = when (payload.outcome) {
+            "SAVED" -> PresetMutationOutcome.Saved
+            "APPLIED" -> PresetMutationOutcome.Applied
+            "SAVED_AND_APPLIED" -> PresetMutationOutcome.SavedAndApplied
+            "SOURCE_CHANGED" -> PresetMutationOutcome.SourceChanged
+            "REJECTED" -> PresetMutationOutcome.Rejected(PresetIssue.fromWireCode(payload.issue))
+            "IO_FAILED" -> PresetMutationOutcome.IoFailed
+            "WRITE_FAILED_ROLLED_BACK" -> PresetMutationOutcome.WriteFailedRolledBack
+            "RESTART_FAILED_ROLLED_BACK" -> PresetMutationOutcome.RestartFailedRolledBack
+            "ROLLBACK_FAILED" -> PresetMutationOutcome.RollbackFailed
+            "BLOCKED" -> PresetMutationOutcome.Blocked
+            else -> return PresetApplyTransaction.Indeterminate
+        }
+        // Save-mode argument refusals are emitted before the request is echoed back, exactly like
+        // the unsafe-name refusal on the selection transaction. The app assembles those arguments
+        // itself, so reaching this is a defect on this side, reported as the I/O failure it is.
+        val unnamedRefusal = outcome == PresetMutationOutcome.IoFailed &&
+            payload.error.code == INVALID_ARGUMENTS && payload.error.stage == STAGE_SAVE_REQUEST
+        if (!payload.namesTheRequest(expectedFileName, mayOmitName = unnamedRefusal)) {
+            return PresetApplyTransaction.Indeterminate
+        }
+        val consistent = when (outcome) {
+            // A save that governs nothing commits nothing and replaces nothing, so neither flag is
+            // pinned: the module reports it for a stopped service and for an unselected preset.
+            PresetMutationOutcome.Saved -> payload.isClean
+            PresetMutationOutcome.Applied ->
+                payload.isClean && payload.wasRunning && !payload.committed
+            PresetMutationOutcome.SavedAndApplied ->
+                payload.isClean && payload.wasRunning && payload.committed
+            PresetMutationOutcome.SourceChanged ->
+                payload.isUntypedFailure && !payload.committed
+            is PresetMutationOutcome.Rejected -> payload.isTypedRefusal
+            else -> payload.isUntypedFailure
+        }
+        if (!consistent) return PresetApplyTransaction.Indeterminate
+        return PresetApplyTransaction.Reported(outcome)
+    }
+
+    /**
+     * Decodes the transaction envelope both entry points share, or nothing at all.
+     *
+     * Acceptance is structural only: the payload must be complete, terminated by its own sentinel,
+     * carry each field exactly once at the schema this app knows, and name a previous preset this
+     * app would itself consider safe.
+     */
+    private fun decodeApplyPayload(records: List<String>): ApplyPayload? {
+        if (records.lastOrNull() != "$APPLY_COMPLETE=1") return null
+        val pairs = records.map { record ->
+            val separator = record.indexOf('=')
+            if (separator <= 0) return null
+            record.substring(0, separator) to record.substring(separator + 1)
+        }
+        val counts = pairs.groupingBy { it.first }.eachCount()
+        if (counts.keys != applyFields || applyFields.any { counts[it] != 1 }) return null
+        val values = pairs.toMap()
+        if (values[APPLY_SCHEMA] != APPLY_SCHEMA_VERSION) return null
+        val error = LifecycleErrorContract.parseValues(values) ?: return null
+        val committed = values.getValue(APPLY_CONFIG_COMMITTED).toFlag() ?: return null
+        val wasRunning = values.getValue(APPLY_SERVICE_WAS_RUNNING).toFlag() ?: return null
+        val previous = values.getValue(APPLY_PREVIOUS_PRESET)
+        if (previous.isNotEmpty() && !PresetNamePolicy.isValid(previous)) return null
+        return ApplyPayload(
+            outcome = values.getValue(APPLY_OUTCOME),
+            issue = values.getValue(APPLY_ISSUE),
+            preset = values.getValue(APPLY_PRESET),
+            committed = committed,
+            wasRunning = wasRunning,
+            error = error,
+        )
+    }
+
+    private fun String.toFlag(): Boolean? = when (this) {
+        "0" -> false
+        "1" -> true
+        else -> null
+    }
+
+    private data class ApplyPayload(
+        val outcome: String,
+        val issue: String,
+        val preset: String,
+        val committed: Boolean,
+        val wasRunning: Boolean,
+        val error: LifecycleError,
+    ) {
+        /** A committed outcome may never travel with a failure envelope or a typed issue. */
+        val isClean: Boolean get() = error.isNone && issue == APPLY_ISSUE_NONE
+
+        /** A refusal must name why it refused and must have committed nothing. */
+        val isTypedRefusal: Boolean get() = !error.isNone && !committed && issue != APPLY_ISSUE_NONE
+
+        /** Every other failure is described by the error envelope alone. */
+        val isUntypedFailure: Boolean get() = !error.isNone && issue == APPLY_ISSUE_NONE
+
+        fun namesTheRequest(expected: String, mayOmitName: Boolean): Boolean =
+            if (mayOmitName) preset.isEmpty() else preset == expected
     }
 
     fun parseDiscovery(lines: List<String>): PresetDiscovery? {
@@ -302,6 +407,12 @@ internal interface PresetMutationGate {
 internal interface PresetRunner {
     suspend fun listPresets(): List<String>?
     suspend fun applyPresetTransaction(fileName: String): PresetApplyTransaction
+    suspend fun savePresetTransaction(
+        fileName: String,
+        candidateFileName: String,
+        expectedDigest: String?,
+        applyAfterSave: Boolean,
+    ): PresetApplyTransaction
     suspend fun validatePreset(candidateFileName: String, logicalFileName: String): PresetValidation
     suspend fun previewPreset(candidateFileName: String, logicalFileName: String): PresetPreviewOutcome
     suspend fun loadSelection(): PresetSelection?
@@ -382,6 +493,51 @@ internal class RootPresetRunner @Inject constructor() : PresetRunner {
                 RootFileIo.shellQuote(logicalFileName),
         )
         return PresetMachineProtocol.parseValidation(result.stdout, logicalFileName)
+    }
+
+    /**
+     * One privileged round trip for the whole preset content mutation.
+     *
+     * The staged candidate is handed to the module by name, together with the content identity the
+     * editor started from: the module owns the compare-and-swap against that identity, the
+     * qualification, the publication, the selection commit and every rollback, and consumes or
+     * discards the candidate itself. [expectedDigest] is null exactly when the target must not
+     * exist yet, which travels as the module's own missing sentinel rather than as an absent
+     * argument. A generation installed before this entry point exists answers from the same round
+     * trip with either the unsupported sentinel or its argument-count refusal, both of which let
+     * the caller fall back instead of failing.
+     */
+    override suspend fun savePresetTransaction(
+        fileName: String,
+        candidateFileName: String,
+        expectedDigest: String?,
+        applyAfterSave: Boolean,
+    ): PresetApplyTransaction {
+        if (!PresetNamePolicy.isValid(fileName) || !isSafeName(candidateFileName)) {
+            return PresetApplyTransaction.Reported(
+                PresetMutationOutcome.Rejected(PresetIssue.UNSAFE_PRESET_NAME),
+            )
+        }
+        val digest = expectedDigest ?: PresetMachineProtocol.SAVE_MISSING_DIGEST
+        if (expectedDigest != null && !SHA256_HEX.matches(expectedDigest)) {
+            return PresetApplyTransaction.Reported(PresetMutationOutcome.IoFailed)
+        }
+        val script = RootFileIo.shellQuote(applyPresetScript)
+        val mode = if (applyAfterSave) SAVE_MODE_APPLY else SAVE_MODE_AUTO
+        val invocation = ModuleMutationCoordinator.inheritLifecycleLock(
+            "sh $script --save-content ${RootFileIo.shellQuote(candidateFileName)} " +
+                "${RootFileIo.shellQuote(digest)} ${RootFileIo.shellQuote(fileName)} " +
+                RootFileIo.shellQuote(mode),
+        )
+        val command = """
+            if [ -f $script ] && [ ! -L $script ]; then
+                $invocation
+            else
+                echo ${PresetMachineProtocol.APPLY_UNSUPPORTED}
+            fi
+        """.trimIndent()
+        val result = ServiceLifecycleController.executeRoot(command, RootCommandPolicy.LIFECYCLE)
+        return PresetMachineProtocol.parseSave(result.stdout, fileName)
     }
 
     override suspend fun previewPreset(
@@ -528,6 +684,9 @@ internal class RootPresetRunner @Inject constructor() : PresetRunner {
 
     private companion object {
         const val MAX_PRESET_BYTES = PresetContentPolicy.MAX_BYTES
+        const val SAVE_MODE_APPLY = "apply"
+        const val SAVE_MODE_AUTO = "auto"
+        val SHA256_HEX = Regex("[0-9a-f]{64}")
     }
 }
 
@@ -667,6 +826,16 @@ internal class TransactionalPresetRepository @Inject constructor(
         else PresetMutationOutcome.RollbackFailed
     }
 
+    /**
+     * One logical content mutation, one module transaction.
+     *
+     * The app stages the candidate and states the content identity the editor started from; the
+     * module owns the compare-and-swap against that identity, the qualification, the publication,
+     * the selection commit, the replacement and every rollback, and answers with one typed payload
+     * this repository only projects. The stepwise flow below survives for the same reason the
+     * selection transaction keeps one: a module generation installed before that entry point
+     * existed cannot grow it, and an edit must still be savable on it.
+     */
     override suspend fun save(
         fileName: String,
         expectedContent: String?,
@@ -680,9 +849,117 @@ internal class TransactionalPresetRepository @Inject constructor(
         if (!PresetContentPolicy.isAllowed(normalized)) {
             return@safelyMutate PresetMutationOutcome.Rejected(PresetIssue.PRESET_TOO_LARGE)
         }
+        val candidate = candidateName(fileName)
+        if (!booleanResult { runner.writeCandidate(candidate, normalized) }) {
+            return@safelyMutate cleanupCandidate(candidate, PresetMutationOutcome.IoFailed)
+        }
+        val transaction = saveTransaction(
+            fileName = fileName,
+            candidateFileName = candidate,
+            expectedDigest = expectedContent?.let(::canonicalContentDigest),
+            applyAfterSave = applyAfterSave,
+        )
+        when (transaction) {
+            // The module consumed or discarded the candidate itself; nothing here may clean up
+            // after a transaction that already reported what it left behind.
+            is PresetApplyTransaction.Reported -> transaction.outcome
+            PresetApplyTransaction.Unsupported -> if (removeOrFalse(candidate)) {
+                saveStepwise(fileName, expectedContent, normalized, applyAfterSave)
+            } else {
+                PresetMutationOutcome.RollbackFailed
+            }
+            PresetApplyTransaction.Indeterminate -> {
+                // The candidate name belongs to this attempt alone, so discarding it can never
+                // touch what the module published. Whether it is still there says nothing about
+                // the transaction, so the resolution below is read from the target instead.
+                removeOrFalse(candidate)
+                resolveIndeterminateSave(fileName, expectedContent, normalized, applyAfterSave)
+            }
+        }
+    }
+
+    private suspend fun saveTransaction(
+        fileName: String,
+        candidateFileName: String,
+        expectedDigest: String?,
+        applyAfterSave: Boolean,
+    ): PresetApplyTransaction = try {
+        runner.savePresetTransaction(fileName, candidateFileName, expectedDigest, applyAfterSave)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        PresetApplyTransaction.Indeterminate
+    }
+
+    /**
+     * The module ran but did not prove what it left behind. Read published facts instead of
+     * guessing.
+     *
+     * The target still carrying the content the editor started from means nothing was published,
+     * which is the one direction that cannot have mutated anything. The target carrying the new
+     * content is a completed save only where the module owed nothing further — an unselected
+     * preset in auto mode — or where the selection now names it and the live generation is the one
+     * this lease stamped. Everything else stays unproven, because a half-finished replacement and
+     * a finished one are indistinguishable from the published state alone.
+     */
+    private suspend fun resolveIndeterminateSave(
+        fileName: String,
+        expectedContent: String?,
+        normalized: String,
+        applyAfterSave: Boolean,
+    ): PresetMutationOutcome {
+        val published = snapshotFileOrNull(fileName) ?: return PresetMutationOutcome.RollbackFailed
+        val publishedContent = (published as? PresetFileSnapshot.Present)?.content
+        if (publishedContent != null &&
+            canonicalProtectedText(publishedContent) == canonicalProtectedText(normalized)
+        ) {
+            val selection = try {
+                runner.snapshotActiveConfig()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                null
+            } ?: return PresetMutationOutcome.RollbackFailed
+            if (selection.presetFile != fileName) {
+                // A preset that governs nothing is never selected or replaced in auto mode, so the
+                // published content is the entire transaction. Under an explicit apply the missing
+                // selection is instead a commit that demonstrably did not land.
+                return if (applyAfterSave) {
+                    PresetMutationOutcome.RollbackFailed
+                } else {
+                    PresetMutationOutcome.Saved
+                }
+            }
+            if (!booleanResult { runner.committedApplyIsProven() }) {
+                return PresetMutationOutcome.RollbackFailed
+            }
+            // Whether the selection moved cannot be recovered once the answer is lost, so the
+            // request decides: only an explicit apply could have committed one.
+            return if (applyAfterSave) {
+                PresetMutationOutcome.SavedAndApplied
+            } else {
+                PresetMutationOutcome.Applied
+            }
+        }
+        val sourceUnchanged = when (published) {
+            PresetFileSnapshot.Missing -> expectedContent == null
+            is PresetFileSnapshot.Present -> expectedContent != null &&
+                canonicalProtectedText(published.content) == canonicalProtectedText(expectedContent)
+            PresetFileSnapshot.Unsafe -> false
+        }
+        return if (sourceUnchanged) PresetMutationOutcome.IoFailed else PresetMutationOutcome.RollbackFailed
+    }
+
+    /** Preserved only for module generations without the transactional entry point. */
+    private suspend fun saveStepwise(
+        fileName: String,
+        expectedContent: String?,
+        normalized: String,
+        applyAfterSave: Boolean,
+    ): PresetMutationOutcome {
         val oldFile = runner.snapshotFile(fileName)
         if (oldFile == PresetFileSnapshot.Unsafe) {
-            return@safelyMutate PresetMutationOutcome.Rejected(PresetIssue.PRESET_SYMLINK)
+            return PresetMutationOutcome.Rejected(PresetIssue.PRESET_SYMLINK)
         }
         val sourceMatches = when (oldFile) {
             PresetFileSnapshot.Missing -> expectedContent == null
@@ -690,38 +967,38 @@ internal class TransactionalPresetRepository @Inject constructor(
                 canonicalProtectedText(oldFile.content) == canonicalProtectedText(expectedContent)
             PresetFileSnapshot.Unsafe -> false
         }
-        if (!sourceMatches) return@safelyMutate PresetMutationOutcome.SourceChanged
-        val oldConfig = runner.snapshotActiveConfig() ?: return@safelyMutate PresetMutationOutcome.IoFailed
+        if (!sourceMatches) return PresetMutationOutcome.SourceChanged
+        val oldConfig = runner.snapshotActiveConfig() ?: return PresetMutationOutcome.IoFailed
         val shouldApply = applyAfterSave || oldConfig.presetFile == fileName
-        val wasRunning = if (shouldApply) runner.isServiceRunning() ?: return@safelyMutate PresetMutationOutcome.IoFailed else false
+        val wasRunning = if (shouldApply) runner.isServiceRunning() ?: return PresetMutationOutcome.IoFailed else false
 
         val candidate = candidateName(fileName)
         if (!booleanResult { runner.writeCandidate(candidate, normalized) }) {
-            return@safelyMutate cleanupCandidate(candidate, PresetMutationOutcome.IoFailed)
+            return cleanupCandidate(candidate, PresetMutationOutcome.IoFailed)
         }
         val candidateValidation = try {
             runner.validatePreset(candidate, fileName)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            return@safelyMutate cleanupCandidate(candidate, PresetMutationOutcome.IoFailed)
+            return cleanupCandidate(candidate, PresetMutationOutcome.IoFailed)
         }
         when (candidateValidation) {
             PresetValidation.Compatible -> Unit
             is PresetValidation.Quarantined -> {
-                return@safelyMutate cleanupCandidate(
+                return cleanupCandidate(
                     candidate,
                     PresetMutationOutcome.Rejected(candidateValidation.issue),
                 )
             }
             PresetValidation.ProtocolFailure -> {
-                return@safelyMutate cleanupCandidate(candidate, PresetMutationOutcome.IoFailed)
+                return cleanupCandidate(candidate, PresetMutationOutcome.IoFailed)
             }
         }
         if (!booleanResult { runner.replaceCandidate(candidate, fileName) }) {
             val candidateRemoved = removeOrFalse(candidate)
             val targetUnchanged = snapshotFileOrNull(fileName) == oldFile
-            return@safelyMutate when {
+            return when {
                 targetUnchanged && candidateRemoved -> PresetMutationOutcome.IoFailed
                 restoreFileOrFalse(fileName, oldFile) && candidateRemoved ->
                     PresetMutationOutcome.WriteFailedRolledBack
@@ -732,18 +1009,18 @@ internal class TransactionalPresetRepository @Inject constructor(
         val persistedMatches = persistedFile is PresetFileSnapshot.Present &&
             canonicalProtectedText(persistedFile.content) == canonicalProtectedText(normalized)
         if (!persistedMatches) {
-            return@safelyMutate if (restoreFileOrFalse(fileName, oldFile)) {
+            return if (restoreFileOrFalse(fileName, oldFile)) {
                 PresetMutationOutcome.WriteFailedRolledBack
             } else {
                 PresetMutationOutcome.RollbackFailed
             }
         }
-        if (!shouldApply) return@safelyMutate PresetMutationOutcome.Saved
+        if (!shouldApply) return PresetMutationOutcome.Saved
 
         val requestedConfig = ActivePresetConfig(fileName)
         when (writeConfigResult(requestedConfig)) {
             true -> Unit
-            false -> return@safelyMutate if (restoreFileOrFalse(fileName, oldFile)) {
+            false -> return if (restoreFileOrFalse(fileName, oldFile)) {
                 PresetMutationOutcome.WriteFailedRolledBack
             } else {
                 PresetMutationOutcome.RollbackFailed
@@ -751,20 +1028,23 @@ internal class TransactionalPresetRepository @Inject constructor(
             null -> {
                 val configRestored = writeConfigOrFalse(oldConfig)
                 val fileRestored = restoreFileOrFalse(fileName, oldFile)
-                return@safelyMutate if (configRestored && fileRestored) {
+                return if (configRestored && fileRestored) {
                     PresetMutationOutcome.WriteFailedRolledBack
                 } else {
                     PresetMutationOutcome.RollbackFailed
                 }
             }
         }
-        if (!wasRunning) return@safelyMutate PresetMutationOutcome.Saved
-        if (restartOrFalse()) return@safelyMutate PresetMutationOutcome.SavedAndApplied
+        if (!wasRunning) return PresetMutationOutcome.Saved
+        if (restartOrFalse()) return PresetMutationOutcome.SavedAndApplied
 
         val configRestored = writeConfigOrFalse(oldConfig)
         val fileRestored = restoreFileOrFalse(fileName, oldFile)
-        if (configRestored && fileRestored) PresetMutationOutcome.RestartFailedRolledBack
-        else PresetMutationOutcome.RollbackFailed
+        return if (configRestored && fileRestored) {
+            PresetMutationOutcome.RestartFailedRolledBack
+        } else {
+            PresetMutationOutcome.RollbackFailed
+        }
     }
 
     private suspend fun cleanupCandidate(
@@ -830,6 +1110,17 @@ internal class TransactionalPresetRepository @Inject constructor(
     } catch (_: Exception) {
         PresetMutationOutcome.IoFailed
     }
+
+    /**
+     * The content identity the module compares its save target against.
+     *
+     * It is taken over the same canonical projection both sides already agree on for equality, so
+     * a trailing-newline or line-ending difference can never read as somebody else's edit.
+     */
+    private fun canonicalContentDigest(content: String): String =
+        MessageDigest.getInstance("SHA-256")
+            .digest(canonicalProtectedText(content).toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
 
     private fun candidateName(fileName: String): String =
         "_${fileName.removeSuffix(".txt").take(180)}.candidate.${System.nanoTime()}.txt"
