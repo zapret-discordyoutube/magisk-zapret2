@@ -349,7 +349,10 @@ install -m 0600 "$KEYSTORE_FILE" "$APP_SOURCE/android-app/keystore.jks"
 POLICY_LOG="$WORK_ROOT/android-policy.log"
 if ! (
     cd "$APP_SOURCE/android-app"
-    ./gradlew testDebugUnitTest lintRelease \
+    # Several policy tests read repository files directly rather than through
+    # declared task inputs, so a cached UP-TO-DATE run would report green
+    # without ever re-checking them. Qualification must not depend on that.
+    ./gradlew testDebugUnitTest lintRelease --rerun-tasks \
         --dependency-verification=strict --no-daemon --stacktrace --console=plain
 ) >"$POLICY_LOG" 2>&1; then
     show_failure_log "$POLICY_LOG"

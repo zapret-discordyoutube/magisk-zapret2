@@ -192,6 +192,8 @@ runtime-dependency-immutable|0644|zapret2/lua/zapret-obfs.lua
 runtime-dependency-immutable|0644|zapret2/lua/zapret-pcap.lua
 runtime-dependency-immutable|0644|zapret2/lua/zapret-tests.lua
 runtime-dependency-immutable|0644|zapret2/lua/zapret-multishake.lua
+runtime-dependency-immutable|0644|zapret2/lua/zapret-16kb.lua
+runtime-dependency-immutable|0644|zapret2/lua/zapret-wgobfs.lua
 preset-compatible|0644|zapret2/presets/ALL TCP & UDP YTDisBystro_3_4_v1.txt
 preset-compatible|0644|zapret2/presets/ALL TCP & UDP discord_urgent_sni.txt
 preset-compatible|0644|zapret2/presets/ALL TCP & UDP fake_tls_auto_11.txt

@@ -1,5 +1,11 @@
 # Material 3 Expressive source completion audit
 
+> **Историческая справка (актуально по состоянию на 2.0.9).**
+> Документ описывает состав приложения на момент релиза 2.0.9 и с тех пор не
+> обновлялся: часть перечисленных ниже классов и тестов в дереве больше не
+> существует. Актуальное описание архитектуры — [`ARCHITECTURE_2_2.md`](ARCHITECTURE_2_2.md);
+> проверять состав следует по дереву и `./gradlew test`, а не по этому файлу.
+
 This file is the authoritative source-level traceability record for the Android app
 and its privileged module boundary. It records what the current tree implements; it
 does not replace compilation, test execution, rendered visual review, signed artifact

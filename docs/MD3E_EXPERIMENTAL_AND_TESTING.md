@@ -1,5 +1,11 @@
 # Material 3 Expressive stability and UI-test boundary
 
+> **Историческая справка (актуально по состоянию на 2.0.9).**
+> Документ описывает состав приложения на момент релиза 2.0.9 и с тех пор не
+> обновлялся: часть перечисленных ниже классов и тестов в дереве больше не
+> существует. Актуальное описание архитектуры — [`ARCHITECTURE_2_2.md`](ARCHITECTURE_2_2.md);
+> проверять состав следует по дереву и `./gradlew test`, а не по этому файлу.
+
 The app currently pins `androidx.compose.material3:material3:1.5.0-alpha24`. This is
 an alpha dependency and the project does not describe it as stable. The local
 `ExperimentalMaterial3Api` and `ExperimentalMaterial3ExpressiveApi` opt-ins cover the
