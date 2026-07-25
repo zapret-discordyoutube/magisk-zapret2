@@ -109,4 +109,76 @@ chmod 0600 "$STATE/status.snapshot"
 run_status
 grep -Fxq 'Z2_STATUS=ok' "$OUTPUT" && fail "an unbound legacy snapshot was accepted"
 
+# A teardown that could not read one firewall family commits a stopped receipt
+# that deliberately withholds its verification claim. By then nothing of ours
+# is owned, so the projection takes its "nothing is owned" branch — and that
+# branch asserted a proof this device cannot produce, laundering the single
+# reservation the module kept on the only channel that still carries it.
+MOCK="$CASE/bin"
+mkdir -p "$MOCK"
+cat > "$MOCK/iptables" <<'EOF'
+#!/bin/sh
+case " $* " in
+    *' -t mangle -L OUTPUT -n '*) exit 0 ;;
+    *' -t mangle -S ZAPRET2_OUT '*|*' -t mangle -S ZAPRET2_IN '*) exit 1 ;;
+    ' -t mangle -S ') exit 0 ;;
+esac
+exit 1
+EOF
+cp "$MOCK/iptables" "$MOCK/ip6tables"
+chmod 0755 "$MOCK/iptables" "$MOCK/ip6tables"
+
+write_stopped_snapshot() {
+    cat > "$STATE/status.snapshot" <<EOF
+status=stopped
+boot_id=$(cat /proc/sys/kernel/random/boot_id)
+rules_total=0
+rules_expected=0
+qnum=200
+ipv4_active=0
+ipv6_active=$2
+ipv4_rules=0
+ipv6_rules=0
+chains=0
+anchors=0
+nfqueue_supported=1
+queue_bypass_supported=1
+connbytes_supported=0
+multiport_supported=1
+mark_supported=1
+ruleset_verified=$1
+owner_metadata_verified=0
+error_schema=1
+error_status=OK
+error_domain=NONE
+error_code=NONE
+error_stage=NONE
+error_detail=
+EOF
+    chmod 0600 "$STATE/status.snapshot"
+}
+
+run_unowned_status() {
+    rc=0
+    PATH="$MOCK:$PATH" STATE_DIR="$STATE" MODDIR="$CASE" ZAPRET_DIR="$MODULE" \
+        sh "$ROOT/zapret2/scripts/zapret-status.sh" --machine-v6 > "$OUTPUT" 2>&1 || rc=$?
+    grep -Fxq 'Z2_OWNED=0' "$OUTPUT" ||
+        fail "the reservation case never reached the unowned projection"
+}
+
+# This is the exact shape a reserved teardown commits: it never claims an
+# active IPv6 family, it only declines to certify the ruleset.
+rm -f "$STATE/nfqws2.pid"
+write_stopped_snapshot 0 0
+run_unowned_status
+grep -Fxq 'Z2_RULESET_VERIFIED=0' "$OUTPUT" ||
+    fail "a stopped receipt that withheld its verification claim was reported as verified"
+
+# The ordinary stopped receipt still projects a verified ruleset, so the branch
+# above narrows the claim rather than abandoning it.
+write_stopped_snapshot 1 0
+run_unowned_status
+grep -Fxq 'Z2_RULESET_VERIFIED=1' "$OUTPUT" ||
+    fail "a fully verified stopped receipt lost its verification claim"
+
 echo "Status snapshot fast-path tests passed"

@@ -2461,6 +2461,7 @@ audit_owned_firewall_for_cleanup() {
     # captured cannot be torn down from an audit, so a second wait would only
     # walk into a guaranteed failure.
     FIREWALL_IPV6_UNQUERYABLE=0
+    FIREWALL_IPV6_AUDITED_EMPTY=0
     if command -v ip6tables >/dev/null 2>&1; then
         if z2_fw_tool_available ip6tables ||
            ! firewall_family_persistently_unavailable ip6tables; then
@@ -2468,6 +2469,13 @@ audit_owned_firewall_for_cleanup() {
                 FIREWALL_CLEANUP_PREFLIGHT_ERROR="IPv6 stable namespace has a foreign reference"
                 return 1
             fi
+            # A read that found nothing of ours is a proof, not an absence of
+            # one. If the frontend goes busy before teardown, that proof is
+            # what separates "we could not look" from "we looked and there was
+            # nothing" — and only the former deserves a reservation. Nothing
+            # can appear in between: teardown publishes no rules and the
+            # lifecycle lock is held across both steps.
+            [ "${Z2_FW_AUDIT_IP6TABLES:-}" != "0 0 0 0" ] || FIREWALL_IPV6_AUDITED_EMPTY=1
         else
             FIREWALL_IPV6_UNQUERYABLE=1
         fi
@@ -2540,6 +2548,7 @@ firewall_family_persistently_unavailable() {
 
 FIREWALL_IPV6_SKIPPED_UNPROVEN=0
 FIREWALL_IPV6_UNQUERYABLE=0
+FIREWALL_IPV6_AUDITED_EMPTY=0
 cleanup_owned_firewall() {
     local baseline_mode="${1:-owned}" rc=0 result
     case "$baseline_mode" in owned|audited) ;; *) return 1;; esac
@@ -2566,8 +2575,14 @@ cleanup_owned_firewall() {
             # claim, and the reboot clears whatever survived.
             #
             # No reservation is needed when our own record already proves this
-            # generation published nothing there.
-            [ "${CLEANUP_IPV6_OWNERSHIP_EXPECTED:-1}" = 0 ] || FIREWALL_IPV6_SKIPPED_UNPROVEN=1
+            # generation published nothing there, or when this run's own
+            # preflight read the family and found nothing of ours in it. The
+            # preflight proof counts only for the mode that produced it.
+            if [ "${CLEANUP_IPV6_OWNERSHIP_EXPECTED:-1}" != 0 ] &&
+               { [ "$baseline_mode" != audited ] ||
+                 [ "${FIREWALL_IPV6_AUDITED_EMPTY:-0}" != 1 ]; }; then
+                FIREWALL_IPV6_SKIPPED_UNPROVEN=1
+            fi
         fi
     fi
     return "$rc"

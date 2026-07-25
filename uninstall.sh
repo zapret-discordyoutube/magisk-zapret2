@@ -254,8 +254,10 @@ firewall_is_clean() {
     if command -v ip6tables >/dev/null 2>&1; then
         if ! ip6tables -t mangle -S OUTPUT >/dev/null 2>&1; then
             # A single failed probe is usually a busy xtables lock. Only a
-            # condition that persists may be accepted, and then the pending
-            # reboot — which uninstall requires anyway — clears the family.
+            # condition that persists may be accepted: refusing forever would
+            # fence uninstall on every device whose kernel lacks the IPv6
+            # mangle backend. What clears the family is the next reboot, which
+            # this path does not schedule — so the caller is told, not assured.
             if ! firewall_family_persistently_unavailable ip6tables; then
                 AUDIT_ERROR="unable to verify IPv6 firewall state"
                 return 1
@@ -804,9 +806,13 @@ fi
 
 if [ "${UNINSTALL_IPV6_UNVERIFIED:-0}" = 1 ]; then
     # The uninstall did everything it owns, but one family could not be
-    # re-read. Saying "verified clean" here would claim a proof this run does
-    # not have; the reboot uninstall already requires clears that family.
-    echo "Zapret2 stopped and uninstalled; the IPv6 ruleset could not be re-verified and is cleared by the reboot"
+    # re-read. Saying "verified clean" would claim a proof this run does not
+    # have. The manager path exits above, so this is a direct invocation: no
+    # removal marker exists, nothing schedules the reboot that would clear the
+    # family, and the state that could identify leftover rules is now gone.
+    # Name the one action that ends the ambiguity instead of implying it is
+    # already under way.
+    echo "Zapret2 stopped and uninstalled; the IPv6 mangle backend stayed unavailable, so owned IPv6 rules could not be re-verified. Reboot to clear any that remain"
 else
     echo "Zapret2 stopped, verified clean, and uninstalled"
 fi

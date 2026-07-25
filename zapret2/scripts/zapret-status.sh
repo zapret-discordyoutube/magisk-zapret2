@@ -226,7 +226,16 @@ if [ "$Z2_OWNER_METADATA_VERIFIED" = 1 ] && [ "$Z2_RULESET_VERIFIED" = 1 ] &&
 elif [ "$Z2_OWNED" = 0 ]; then
     Z2_STATUS=stopped
     Z2_EXPECTED_RULES=0
-    Z2_RULESET_VERIFIED=1
+    # Nothing of ours is owned, so there is no ruleset left to disprove — with
+    # one exception: a committed teardown from this boot that recorded it could
+    # not read one family. Overwriting that would launder the one reservation
+    # the module deliberately kept, on the only channel that still carries it.
+    if [ "$STATUS_SNAPSHOT_VALID" = 1 ] && [ "$STATUS_FILE_STATUS" = stopped ] &&
+       [ "$STATUS_FILE_RULESET_VERIFIED" = 0 ]; then
+        Z2_RULESET_VERIFIED=0
+    else
+        Z2_RULESET_VERIFIED=1
+    fi
 else
     Z2_NFQUEUE="$STATUS_FILE_NFQUEUE_SUPPORTED"
     Z2_QUEUE_BYPASS="$STATUS_FILE_QUEUE_BYPASS_SUPPORTED"

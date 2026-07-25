@@ -167,6 +167,83 @@ chmod 0755 "$MOCK/ip6tables"
     [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" = 1 ] ||
         fail "the skipped family was not reported"
 )
+# A frontend that answers now and goes busy later. In clean mode it delegates
+# to the IPv4 mock, so the preflight sees a real, readable, empty family.
+cat > "$MOCK/ip6tables" <<'EOF'
+#!/bin/sh
+mode=fail
+[ ! -f "$Z2_IP6_MODE_FILE" ] || IFS= read -r mode < "$Z2_IP6_MODE_FILE"
+[ "$mode" != fail ] || exit 42
+Z2_QUERY_MODE="$mode" exec iptables "$@"
+EOF
+chmod 0755 "$MOCK/ip6tables"
+
+# A preflight read that found nothing of ours is positive knowledge. If the
+# frontend goes busy before teardown, discarding it turns "we looked and it was
+# empty" into "we could not look" and raises a reservation the run can prove is
+# unnecessary — a false alarm on the one channel that is meant to carry real
+# uncertainty to the user.
+(
+    Z2_QUERY_MODE=clean; export Z2_QUERY_MODE
+    Z2_IP6_MODE_FILE="$CASE/ip6mode"; export Z2_IP6_MODE_FILE
+    z2_fw_cleanup_family() { return 0; }
+
+    printf 'clean\n' > "$Z2_IP6_MODE_FILE"
+    FIREWALL_PROBE_ATTEMPTS=1
+    audit_owned_firewall_for_cleanup || fail "a readable empty IPv6 family failed the preflight"
+    [ "${FIREWALL_IPV6_UNQUERYABLE:-1}" = 0 ] ||
+        fail "a family the preflight actually read was recorded as unreadable"
+    [ "${FIREWALL_IPV6_AUDITED_EMPTY:-0}" = 1 ] ||
+        fail "the preflight did not record that it proved the family empty"
+
+    printf 'fail\n' > "$Z2_IP6_MODE_FILE"
+    CLEANUP_IPV6_OWNERSHIP_EXPECTED=1
+    cleanup_owned_firewall audited ||
+        fail "a family proven empty by the preflight fenced the teardown"
+    [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" = 0 ] ||
+        fail "a family the preflight proved empty still produced a reservation"
+
+    # The same window, but the preflight found owned rules. Losing the frontend
+    # now is real uncertainty and must be reported.
+    printf 'present\n' > "$Z2_IP6_MODE_FILE"
+    audit_owned_firewall_for_cleanup || fail "a readable populated IPv6 family failed the preflight"
+    [ "${FIREWALL_IPV6_AUDITED_EMPTY:-1}" = 0 ] ||
+        fail "a family holding owned rules was recorded as proven empty"
+    printf 'fail\n' > "$Z2_IP6_MODE_FILE"
+    cleanup_owned_firewall audited ||
+        fail "an unreadable populated family fenced the teardown"
+    [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" = 1 ] ||
+        fail "a family that held owned rules was skipped without reporting it"
+)
+
+# An owned teardown captures its own baseline, so it never inherits the
+# preflight's proof — including a stale one left by an earlier audited run in
+# the same process.
+(
+    Z2_QUERY_MODE=clean; export Z2_QUERY_MODE
+    Z2_IP6_MODE_FILE="$CASE/ip6mode.owned"; export Z2_IP6_MODE_FILE
+    FIREWALL_PROBE_ATTEMPTS=1
+
+    printf 'clean\n' > "$Z2_IP6_MODE_FILE"
+    ipv6_torn_down=0
+    z2_fw_cleanup_family() { [ "$1" != ip6tables ] || ipv6_torn_down=1; return 0; }
+    CLEANUP_IPV6_OWNERSHIP_EXPECTED=1
+    cleanup_owned_firewall owned || fail "an owned teardown failed on a readable family"
+    [ "$ipv6_torn_down" = 1 ] ||
+        fail "an owned teardown skipped a family it could read and own a baseline for"
+    [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" = 0 ] ||
+        fail "a family the owned teardown actually removed was reported as skipped"
+
+    printf 'fail\n' > "$Z2_IP6_MODE_FILE"
+    FIREWALL_IPV6_AUDITED_EMPTY=1
+    z2_fw_cleanup_family() {
+        [ "$1" != ip6tables ] || fail "an owned teardown ran against an unreachable frontend"
+        return 0
+    }
+    cleanup_owned_firewall owned || fail "an unreadable family fenced an owned teardown"
+    [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" = 1 ] ||
+        fail "an owned teardown reused another mode's proof to suppress a reservation"
+)
 rm -f "$MOCK/ip6tables"
 
 Z2_QUERY_MODE=foreign; export Z2_QUERY_MODE

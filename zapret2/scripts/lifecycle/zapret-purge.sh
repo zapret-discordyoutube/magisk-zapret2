@@ -165,6 +165,7 @@ publish_remove_marker() {
 
 commit_purge() {
     local source="$1" token="$2" uninstall_output uninstall_rc=0 cleanup_rc=0 firewall_clean=1
+    local external_removed=1 module_removed=0 state_removed=0 residue=""
     case "$source" in app|manager|cli) ;; *) purge_report error 0 0 0 0 0 0 "invalid purge source"; return 1 ;; esac
     z2_purge_is_safe_token "$token" || { purge_report error 0 0 0 0 0 0 "invalid purge token"; return 1; }
     [ "$(id -u 2>/dev/null)" = 0 ] || { purge_report blocked 0 0 0 0 0 0 "root access is required"; return 1; }
@@ -191,7 +192,7 @@ commit_purge() {
     fi
 
     z2_purge_remove_managed_tree "$Z2_PURGE_CANONICAL_PENDING_DIR" || cleanup_rc=1
-    z2_purge_remove_external_workspaces || cleanup_rc=1
+    z2_purge_remove_external_workspaces || { cleanup_rc=1; external_removed=0; }
     z2_purge_remove_legacy_files || cleanup_rc=1
     z2_purge_remove_managed_tree "$Z2_PURGE_CANONICAL_MODULE_DIR" || cleanup_rc=1
     z2_purge_remove_managed_tree "$Z2_PURGE_CANONICAL_STATE_DIR" || cleanup_rc=1
@@ -204,13 +205,28 @@ commit_purge() {
     case "$uninstall_output" in
         *Z2_FIREWALL_IPV6_UNVERIFIED*) firewall_clean=0 ;;
     esac
-    if [ "$cleanup_rc" -ne 0 ] || [ -e "$Z2_PURGE_CANONICAL_MODULE_DIR" ] ||
-       [ -L "$Z2_PURGE_CANONICAL_MODULE_DIR" ] || [ -e "$Z2_PURGE_CANONICAL_STATE_DIR" ] ||
-       [ -L "$Z2_PURGE_CANONICAL_STATE_DIR" ]; then
-        if [ "$firewall_clean" = 0 ]; then
-            purge_report partial 1 0 0 0 0 1 "one or more module artifacts remain, and the IPv6 ruleset could not be verified"
+    # Any failure above lands here, including ones that left both managed trees
+    # gone — an unremovable external staging workspace is enough. Reporting a
+    # blanket "nothing was removed" would deny a removal that did happen, on
+    # the same receipt the app reads to decide what the device still holds. So
+    # each fact is measured, and the diagnostic names what actually survived.
+    { [ -e "$Z2_PURGE_CANONICAL_MODULE_DIR" ] || [ -L "$Z2_PURGE_CANONICAL_MODULE_DIR" ]; } || module_removed=1
+    { [ -e "$Z2_PURGE_CANONICAL_STATE_DIR" ] || [ -L "$Z2_PURGE_CANONICAL_STATE_DIR" ]; } || state_removed=1
+    if [ "$cleanup_rc" -ne 0 ] || [ "$module_removed" = 0 ] || [ "$state_removed" = 0 ]; then
+        [ "$module_removed" = 1 ] || residue="module directory"
+        [ "$state_removed" = 1 ] || residue="${residue:+$residue, }private state"
+        [ "$external_removed" = 1 ] || residue="${residue:+$residue, }external staging workspace"
+        if [ -n "$residue" ]; then
+            residue="these remain now: $residue"
         else
-            purge_report partial 1 1 0 0 0 1 "service and firewall are clean, but one or more module artifacts remain"
+            residue="an unidentified cleanup step failed"
+        fi
+        if [ "$firewall_clean" = 0 ]; then
+            purge_report partial 1 0 "$module_removed" "$state_removed" "$external_removed" 1 \
+                "the module stays scheduled for removal at the next reboot, but $residue; the IPv6 ruleset could not be verified"
+        else
+            purge_report partial 1 1 "$module_removed" "$state_removed" "$external_removed" 1 \
+                "service and firewall are clean and the module stays scheduled for removal at the next reboot, but $residue"
         fi
         return 1
     fi

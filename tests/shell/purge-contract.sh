@@ -83,11 +83,45 @@ awk '
     END { exit bad ? 1 : 0 }
 ' "$PURGE" || fail "a complete purge receipt reports a fact it did not verify"
 
-# The unverifiable-IPv6 hand-off between uninstall and purge must stay wired:
-# uninstall names the condition, purge downgrades the receipt because of it.
-grep -Fq 'Z2_FIREWALL_IPV6_UNVERIFIED' "$ROOT/uninstall.sh" ||
-    fail "uninstall no longer names an unverifiable IPv6 ruleset"
-grep -Fq 'Z2_FIREWALL_IPV6_UNVERIFIED' "$PURGE" ||
-    fail "purge no longer reacts to an unverifiable IPv6 ruleset"
+# The unverifiable-IPv6 hand-off between uninstall and purge is a string match
+# across a process boundary: uninstall prints a warning, purge pattern-matches
+# its captured output. Grepping each side for the token separately passes even
+# when the pattern cannot match what the other side actually prints, so take
+# the real emitted message and the real case pattern and run one against the
+# other.
+ipv6_warning="$(sed -n 's/.*report_warning "\(Z2_FIREWALL_IPV6_UNVERIFIED[^"]*\)".*/\1/p' \
+    "$ROOT/uninstall.sh" | head -n 1)"
+[ -n "$ipv6_warning" ] || fail "uninstall no longer emits an unverifiable-IPv6 warning"
+ipv6_pattern="$(sed -n 's/^[[:space:]]*\(\*Z2_FIREWALL_IPV6_UNVERIFIED\*\)).*/\1/p' \
+    "$PURGE" | head -n 1)"
+[ -n "$ipv6_pattern" ] || fail "purge no longer pattern-matches an unverifiable IPv6 ruleset"
+ipv6_matched=0
+eval "case \"\$ipv6_warning\" in $ipv6_pattern) ipv6_matched=1 ;; esac"
+[ "$ipv6_matched" = 1 ] || fail "purge cannot recognize the warning uninstall actually emits"
+
+# A partial receipt reports what survived. Denying a removal that did happen
+# is as wrong as claiming one that did not: an unremovable external workspace
+# must not report the module directory and private state as still present.
+if grep -Eq 'purge_report partial 1 [01] 0 0 0 1' "$PURGE"; then
+    fail "a partial purge receipt hardcodes removal facts it did not measure"
+fi
+grep -Fq 'purge_report partial 1 0 "$module_removed" "$state_removed" "$external_removed" 1' "$PURGE" ||
+    fail "the unverified-firewall partial receipt no longer reports measured removal facts"
+grep -Fq 'purge_report partial 1 1 "$module_removed" "$state_removed" "$external_removed" 1' "$PURGE" ||
+    fail "the clean-firewall partial receipt no longer reports measured removal facts"
+
+# Every receipt that survives an actually-completed removal must still tell
+# callers a reboot is owed, and the one partial receipt that returns success
+# is the removal-succeeded/IPv6-unproven case — the app reads it as "the
+# module is gone", so its removal fields must all be affirmative.
+awk '
+    /purge_report partial/ {
+        for (i = 1; i <= NF; i++) if ($i == "partial") break
+        if ($(i + 6) != 1) { print NR ": " $0; bad = 1 }
+    }
+    END { exit bad ? 1 : 0 }
+' "$PURGE" || fail "a partial purge receipt does not require the pending reboot"
+grep -Fq 'purge_report partial 1 0 1 1 1 1' "$PURGE" ||
+    fail "the removal-succeeded/IPv6-unproven receipt no longer reports the module as removed"
 
 echo "Purge contract shell tests passed"

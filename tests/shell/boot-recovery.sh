@@ -115,7 +115,13 @@ prepare_case() {
     state="$CASE/$mode/state"
     mkdir -p "$module/zapret2/scripts" "$state"
     chmod 0700 "$state"
-    cp "$ROOT/service.sh" "$module/service.sh"
+    # The fixture host has no Android /system tree, and the autostart branch
+    # is the only one that spawns the start script through it. Rewrite the
+    # interpreter in the copy rather than planting a symlink in the host's
+    # /system: the branch under test is the recovery retry, and the production
+    # interpreter is asserted statically by purge-contract.sh. The shebang is
+    # left alone — the fixture invokes the script through an explicit shell.
+    sed '1!s|/system/bin/sh|sh|g' "$ROOT/service.sh" > "$module/service.sh"
     cp "$ROOT/zapret2/scripts/common.sh" "$ROOT/zapret2/scripts/firewall-reconciler.sh" \
         "$ROOT/zapret2/scripts/zapret-start.sh" "$module/zapret2/scripts/"
     if [ "$Z2_TEST_BOOT_OVERRIDE" = 1 ]; then
@@ -126,7 +132,14 @@ EOF
     cp "$ROOT/zapret2/runtime.ini" "$module/zapret2/runtime.ini"
     printf '%s\n' '#!/bin/sh' 'printf started >> "${Z2_BOOT_MUTATION_LOG}.daemon"' > "$module/zapret2/nfqws2"
     chmod 0755 "$module/service.sh" "$module/zapret2/scripts/"*.sh "$module/zapret2/nfqws2"
-    sed 's/^autostart=.*/autostart=0/' "$module/zapret2/runtime.ini" > "$module/zapret2/runtime.ini.tmp"
+    # Boot recovery has two entries. With autostart off it runs standalone;
+    # with autostart on it runs only because a start refused on recovery
+    # state. Forcing autostart off everywhere would leave the second entry —
+    # the retry, the error-token match, its logging — with no coverage at all.
+    autostart_value=0
+    [ "$mode" != recovery-blocked ] || autostart_value=1
+    sed "s/^autostart=.*/autostart=$autostart_value/" "$module/zapret2/runtime.ini" \
+        > "$module/zapret2/runtime.ini.tmp"
     mv "$module/zapret2/runtime.ini.tmp" "$module/zapret2/runtime.ini"
     cat > "$module/zapret2/install-generation.meta" <<EOF
 version=1
@@ -136,6 +149,25 @@ archive_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 EOF
     chmod 0600 "$module/zapret2/install-generation.meta"
     if [ "$mode" = disabled ]; then : > "$module/disable"; chmod 0600 "$module/disable"; fi
+    if [ "$mode" = recovery-blocked ]; then
+        # Refuse exactly once, with the token service.sh matches on, then
+        # succeed. A start that is never retried leaves the counter at 1.
+        rm -f "$CASE/$mode/start-invocations"
+        cat > "$module/zapret2/scripts/zapret-start.sh" <<'EOF'
+#!/bin/sh
+n=0
+[ ! -f "$Z2_START_STUB_COUNT" ] || IFS= read -r n < "$Z2_START_STUB_COUNT"
+n=$((n + 1))
+printf '%s\n' "$n" > "$Z2_START_STUB_COUNT"
+if [ "$n" = 1 ]; then
+    echo "Z2_ERROR_DOMAIN=lifecycle"
+    echo "Z2_ERROR_CODE=RECOVERY_BLOCKED"
+    exit 1
+fi
+exit 0
+EOF
+        chmod 0755 "$module/zapret2/scripts/zapret-start.sh"
+    fi
 
     (
         STATE_DIR="$state"
@@ -173,6 +205,7 @@ run_case() {
     state="$CASE/$mode/state"
     prepare_case "$mode"
     Z2_BOOT_MUTATION_LOG="$MUTATION_LOG" STATE_DIR="$state" PATH="$MOCK:$PATH" \
+        Z2_START_STUB_COUNT="$CASE/$mode/start-invocations" \
         sh "$module/service.sh" > "$CASE/$mode/service.out" 2>&1 ||
         fail "$mode boot service rejected clean cross-boot recovery"
     [ ! -e "$state/owner.meta" ] && [ ! -L "$state/owner.meta" ] || fail "$mode retained stale owner"
@@ -194,10 +227,22 @@ run_case() {
         grep -Fq 'Incompatible boot-local state was discarded' "$state/nfqws2.log" ||
             fail "$mode did not report incompatible state retirement"
     fi
+    if [ "$mode" = recovery-blocked ]; then
+        grep -Fq 'Lifecycle entry was refused by recovery state; running previous-boot recovery' \
+            "$state/nfqws2.log" || fail "$mode did not run recovery from the start refusal"
+        invocations=0
+        [ ! -f "$CASE/$mode/start-invocations" ] ||
+            IFS= read -r invocations < "$CASE/$mode/start-invocations"
+        [ "$invocations" = 2 ] ||
+            fail "$mode ran the start script $invocations times instead of refusing once and retrying"
+        grep -Fq 'Autostart command completed successfully' "$state/nfqws2.log" ||
+            fail "$mode did not report the retried start as successful"
+    fi
 }
 
 run_case disabled
 run_case autostart-off
 run_case incompatible
+run_case recovery-blocked
 
 echo "Boot recovery shell tests passed"
