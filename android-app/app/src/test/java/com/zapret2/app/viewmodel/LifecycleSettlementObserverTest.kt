@@ -85,7 +85,7 @@ class LifecycleSettlementObserverTest {
         val source = productionFile("ControlViewModel.kt").readText()
         val transientBranch = source.sourceRegion(
             after = "if (lifecycleMutationState != ModuleMutationState.IDLE)",
-            before = "val netStats =",
+            before = "val networkType = networkStatsManager.getNetworkType()",
         )
         val screenStop = source.sourceRegion(
             after = "fun onScreenStopped()",

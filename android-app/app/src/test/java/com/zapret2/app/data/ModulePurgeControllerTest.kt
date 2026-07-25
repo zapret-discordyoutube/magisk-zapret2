@@ -1,5 +1,7 @@
 package com.zapret2.app.data
 
+import com.zapret2.app.repositorySourceFile
+import com.zapret2.app.sourceRegion
 import com.zapret2.app.viewmodel.ModulePurgeUiState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -58,6 +60,87 @@ class ModulePurgeControllerTest {
                 parsed.value.refusalError,
             )
         }
+    }
+
+    /**
+     * A refusal is a refusal whatever token it happens to carry.
+     *
+     * [ModulePurgeController.PrepareReport.armed] is the whole barrier between a record the module
+     * refused and a `--commit` that irreversibly erases the module, and it is a conjunction: the
+     * status must be `armed` *and* the token must be usable. Only the first conjunct decides this
+     * case, and nothing else in the suite reaches it — every refusal
+     * `prepare_purge` prints today pairs its `blocked`/`error` status with an empty token, so the
+     * fixture that walks all eight diagnostics is satisfied by either conjunct alone and cannot
+     * tell a status check from a token check.
+     *
+     * The token is not the app's own value: it arrives on the same stdout the module writes, and
+     * the app hands it straight back on the commit command line. A record that says `blocked`
+     * while carrying the exact token shape an `armed` record carries must still not arm anything.
+     */
+    @Test
+    fun aRefusedPrepareNeverArmsTheCommitEvenWhenItCarriesAUsableToken() {
+        val usableToken = "app.1234.token"
+        // The token the armed fixture uses, byte for byte, and it satisfies the token conjunct.
+        assertEquals(usableToken, armedPrepareReport().token)
+        assertTrue(armedPrepareReport().armed)
+        assertTrue(usableToken.matches(Regex("[A-Za-z0-9._-]{1,128}")))
+
+        listOf(
+            ModulePurgeController.PrepareStatus.BLOCKED,
+            ModulePurgeController.PrepareStatus.ERROR,
+        ).forEach { refused ->
+            val parsed = ModulePurgeController.parsePrepareOutput(
+                prepareRecord(
+                    overrides = mapOf(
+                        "Z2_PURGE_PREPARE_STATUS" to refused.wireValue,
+                        "Z2_PURGE_PREPARE_TOKEN" to usableToken,
+                        "Z2_PURGE_PREPARE_DIAGNOSTIC" to "root access is required",
+                    ),
+                ),
+            )
+
+            assertTrue(refused.wireValue, parsed is ModulePurgeController.ParseResult.Valid)
+            val report = (parsed as ModulePurgeController.ParseResult.Valid).value
+            assertEquals(refused.wireValue, refused, report.status)
+            assertEquals(refused.wireValue, usableToken, report.token)
+            assertFalse(
+                "a ${refused.wireValue} record must never arm the commit",
+                report.armed,
+            )
+            // And the reason the user is shown is the module's refusal, not a protocol complaint.
+            assertEquals(
+                refused.wireValue,
+                "Module purge was refused before anything was removed",
+                report.refusalError,
+            )
+        }
+    }
+
+    /**
+     * The wiring, not a hand-built `Result`.
+     *
+     * [prepareRefusalCarriesTheModulesOwnReasonToTheUser] constructs the
+     * [ModulePurgeController.Result] itself, so it proves what the dialog does with a refused
+     * record and nothing about whether the controller ever attaches one. Dropping
+     * `prepareReport = prepareReport` from `purgeInsideExclusiveTask` restores the original defect
+     * verbatim — the module's own sentence never reaches [ModulePurgeController.Result] and the
+     * user is left with the app's generic refusal line — while every assertion in this file still
+     * holds. This is the only test that reads the branch itself.
+     */
+    @Test
+    fun theRefusedPrepareRecordIsAttachedByTheControllerNotOnlyByTestFixtures() {
+        val refusalBranch = controllerSource().sourceRegion(
+            after = "if (!prepareReport.armed) {",
+            before = "val token = prepareReport.token",
+        )
+
+        assertTrue(
+            "purgeInsideExclusiveTask must carry the refused prepare record into the Result " +
+                "the dialog renders, otherwise the module's own diagnostic is dropped: " +
+                refusalBranch,
+            refusalBranch.contains("prepareReport = prepareReport,"),
+        )
+        assertTrue(refusalBranch.contains("error = prepareReport.refusalError,"))
     }
 
     /**
@@ -267,6 +350,85 @@ class ModulePurgeControllerTest {
     }
 
     /**
+     * The outcome filter in [ModulePurgeController.Result.moduleDirectoryRemoved], on its own.
+     *
+     * The predicate reads a receipt field, `module_removed`, and gates it on the outcome. The gate
+     * is load-bearing and nothing else in the suite reaches it: `classifyReport` grades a flawless
+     * `complete` receipt whose command failed as [ModulePurgeController.Outcome.INVALID_PROTOCOL]
+     * — a verdict the app has already refused to honour — and that same receipt carries
+     * `module_removed=1`. Reading the field without the gate would let a rejected receipt reset
+     * the screen to MISSING and arm the terminal reboot gate on evidence the app just threw away.
+     * The same holds for the `blocked` and `error` statuses: the module happens to pass a literal
+     * `0` there today, which is a property of `zapret-purge.sh` and not of the app.
+     *
+     * The exhaustive dialog sweep in `ControlDialogStateModelTest` compares the screen against
+     * this very predicate, so it stays green under any rewrite of it. These expectations are
+     * spelled out instead.
+     */
+    @Test
+    fun aReceiptTheAppRejectedNeverReportsTheDirectoryGoneHoweverItMeasuredItself() {
+        val rejectedComplete = gradedPurgeResult(
+            status = "complete",
+            commandSucceeded = false,
+        )
+
+        assertEquals(
+            ModulePurgeController.Outcome.INVALID_PROTOCOL,
+            rejectedComplete.outcome,
+        )
+        assertTrue(checkNotNull(rejectedComplete.report).moduleRemoved)
+        assertFalse(
+            "a receipt whose own command failed cannot reset the screen",
+            rejectedComplete.moduleDirectoryRemoved,
+        )
+        assertFalse(rejectedComplete.moduleFullyRemoved)
+
+        // A refusal that nonetheless claims the directory is gone: the app and the receipt
+        // disagree, and a disagreement is not evidence.
+        mapOf(
+            "blocked" to ModulePurgeController.Outcome.BLOCKED,
+            "error" to ModulePurgeController.Outcome.ERROR,
+        ).forEach { (status, expectedOutcome) ->
+            val refused = gradedPurgeResult(
+                status = status,
+                overrides = mapOf("Z2_PURGE_MODULE_REMOVED" to "1"),
+                commandSucceeded = true,
+            )
+
+            assertEquals(status, expectedOutcome, refused.outcome)
+            assertTrue(status, checkNotNull(refused.report).moduleRemoved)
+            assertFalse(
+                "a $status receipt must not reset the screen on its own word",
+                refused.moduleDirectoryRemoved,
+            )
+        }
+
+        // The two verdicts the gate does admit still read the field, so the gate is a filter and
+        // not a blanket refusal.
+        assertTrue(
+            gradedPurgeResult(status = "complete", commandSucceeded = true)
+                .moduleDirectoryRemoved,
+        )
+        assertTrue(
+            gradedPurgeResult(
+                status = "partial",
+                overrides = mapOf("Z2_PURGE_FIREWALL_CLEAN" to "0"),
+                commandSucceeded = true,
+            ).moduleDirectoryRemoved,
+        )
+        assertFalse(
+            gradedPurgeResult(
+                status = "partial",
+                overrides = mapOf(
+                    "Z2_PURGE_FIREWALL_CLEAN" to "0",
+                    "Z2_PURGE_MODULE_REMOVED" to "0",
+                ),
+                commandSucceeded = true,
+            ).moduleDirectoryRemoved,
+        )
+    }
+
+    /**
      * A `partial` that asserts a verified-clean firewall contradicts its own status: the module
      * reserves `partial` for the run that removed everything and could not re-read one family.
      * Honouring it would put the IPv6 reservation on screen for a firewall the module verified.
@@ -371,6 +533,16 @@ class ModulePurgeControllerTest {
             )
         }
     }
+
+    private fun controllerSource(): String = repositorySourceFile(
+        "android-app/app/src/main/java/com/zapret2/app/data/ModulePurgeController.kt",
+    ).readText()
+
+    private fun armedPrepareReport(): ModulePurgeController.PrepareReport =
+        (
+            ModulePurgeController.parsePrepareOutput(prepareRecord())
+                as ModulePurgeController.ParseResult.Valid
+            ).value
 
     private fun commandResult(success: Boolean) = ServiceLifecycleController.CommandResult(
         success = success,

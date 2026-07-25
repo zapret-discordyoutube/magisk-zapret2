@@ -161,6 +161,7 @@
     <string name="control_module_state_ready">Ready</string>
     <string name="control_module_state_disabled">Disabled in root manager</string>
     <string name="control_module_state_removal_pending">Removal pending</string>
+    <string name="control_module_removal_pending_body">The module is marked for removal and the next reboot deletes it. Until then it refuses settings changes, a full rollback and starting the service. Erasing the module is still available.</string>
     <string name="control_module_state_lifecycle_blocked">Lifecycle state requires recovery</string>
     <string name="control_module_state_installed_reboot">Installed; reboot required</string>
     <string name="control_module_state_update_reboot">Update installed; reboot required</string>
@@ -476,13 +477,15 @@
     <string name="term_nfqueue" translatable="false">NFQUEUE</string>
     <string name="term_iptables" translatable="false">iptables</string>
     <string name="term_pid" translatable="false">PID</string>
-    <string name="term_cpu" translatable="false">CPU</string>
     <string name="update_percent">%1$d%%</string>
     <string name="profiles_title">Profiles</string>
     <string name="profiles_active_unavailable">Active preset is unavailable</string>
     <string name="profiles_refresh">Refresh</string>
     <string name="profiles_read_failed">Could not read the active preset</string>
     <string name="profiles_saving">Validating and saving preset…</string>
+    <string name="profiles_loading">Loading profiles…</string>
+    <string name="profiles_loading_strategies">Loading strategy catalog…</string>
+    <string name="profiles_loading_lists">Loading hostlists…</string>
     <string name="profiles_choose_strategy">Choose strategy</string>
     <string name="profiles_move_up">Move up</string>
     <string name="profiles_move_down">Move down</string>

@@ -4,7 +4,6 @@ import com.zapret2.app.data.ModuleEnvironmentSnapshot
 import com.zapret2.app.data.ModuleInstallState
 import com.zapret2.app.data.ModuleMutationState
 import com.zapret2.app.data.ModulePurgeController
-import com.zapret2.app.data.NetworkStatsManager
 import com.zapret2.app.data.PendingModuleState
 import com.zapret2.app.data.ServiceLifecycleController
 import com.zapret2.app.sourceRegion
@@ -302,7 +301,8 @@ class ModulePurgeTerminalSessionTest {
         // Guard: a fixture that never had these cannot prove they were cleared.
         assertNotEquals("", installed.uptime)
         assertNotEquals(ProcessStats(), installed.processStats)
-        assertNotEquals(NetworkStatsManager.IptablesDetail(), installed.iptablesDetail)
+        assertTrue(installed.iptablesActive)
+        assertNotEquals(0, installed.nfqueueRulesCount)
         assertNotNull(installed.moduleDiagnostic)
 
         val reset = installed.afterModulePurge(
@@ -312,7 +312,8 @@ class ModulePurgeTerminalSessionTest {
         assertEquals(ControlStatus.NOT_INSTALLED, reset.status)
         assertEquals("", reset.uptime)
         assertEquals(ProcessStats(), reset.processStats)
-        assertEquals(NetworkStatsManager.IptablesDetail(), reset.iptablesDetail)
+        assertFalse(reset.iptablesActive)
+        assertEquals(0, reset.nfqueueRulesCount)
         assertNull(reset.moduleDiagnostic)
         assertEquals(ModuleInstallState.MISSING, reset.moduleInstallState)
         assertEquals(PendingModuleState.NONE, reset.pendingModuleState)
@@ -327,8 +328,9 @@ class ModulePurgeTerminalSessionTest {
      * iptables target tables), so it answers the same with or without a module. Publishing `false`
      * from the purge rendered the NFQUEUE badge red with "unavailable" for TalkBack, and because
      * the same reset arms the terminal gate nothing could correct it before a process restart —
-     * after which the identical device, still without the module, reported the badge green. The
-     * module's own `Z2_NFQUEUE` lives in `iptablesDetail`, which the reset does retire.
+     * after which the identical device, still without the module, reported the badge green. What
+     * the module itself measured about the firewall lives in `iptablesActive` and
+     * `nfqueueRulesCount`, and the reset does retire those.
      *
      * The parity claim is checked field by field, not on the status alone: the reset is compared
      * against the whole projection `refreshStatus()` publishes for a module it cannot query, with
@@ -364,11 +366,12 @@ class ModulePurgeTerminalSessionTest {
             uptime = "",
             iptablesActive = false,
             nfqueueRulesCount = 0,
-            iptablesDetail = NetworkStatsManager.IptablesDetail(),
             processStats = ProcessStats(),
             moduleInstallState = erasedEnvironment.activeState,
             pendingModuleState = erasedEnvironment.pendingState,
             moduleMutationState = ModuleMutationState.IDLE,
+            moduleRemovalPending =
+                erasedEnvironment.activeState == ModuleInstallState.REMOVAL_PENDING,
             moduleVersion = erasedEnvironment.displayedVersion,
             nfqueueSupported = erasedEnvironment.nfqueueSupported,
             hasAuthoritativeRuntimeSettings = false,
@@ -529,12 +532,6 @@ class ModulePurgeTerminalSessionTest {
             memory = "8192 KB",
             threads = "3",
             uptime = "3:12:44",
-        ),
-        iptablesDetail = NetworkStatsManager.IptablesDetail(
-            rulesOk = 2,
-            rulesTotal = 2,
-            ipv4Active = true,
-            rulesetVerified = true,
         ),
         moduleDiagnostic = "FIREWALL/POSTCONDITION_FAILED: stale diagnostic from the erased module",
         hasRootAccess = true,

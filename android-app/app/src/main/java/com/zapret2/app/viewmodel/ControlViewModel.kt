@@ -112,6 +112,17 @@ internal val ModuleInstallState.labelRes: Int
         ModuleInstallState.UNREADABLE -> R.string.control_module_state_unreadable
     }
 
+/**
+ * What the environment card prints for the module row.
+ *
+ * [ControlUiState.moduleRemovalPending] outranks every installation fact below it because it is
+ * the only one that describes the *next* boot: the module directory carries a removal mark, or the
+ * uninstall tombstone is up, and either way the root manager deletes the module. A `READY` label
+ * over that state is not merely incomplete, it is the opposite of what happens next, and the
+ * module refuses every write the label implies is available. It ranks below the two mutation
+ * states only because those describe a transaction running *right now*, which the user has to wait
+ * out before the removal matters at all.
+ */
 @get:StringRes
 internal val ControlUiState.moduleStateLabelRes: Int
     get() = when {
@@ -119,6 +130,7 @@ internal val ControlUiState.moduleStateLabelRes: Int
             R.string.control_service_lifecycle_busy
         moduleMutationState == ModuleMutationState.BLOCKED ->
             R.string.control_module_state_lifecycle_blocked
+        moduleRemovalPending -> R.string.control_module_state_removal_pending
         pendingModuleState == PendingModuleState.READY &&
             moduleInstallState == ModuleInstallState.MISSING ->
             R.string.control_module_state_installed_reboot
@@ -436,9 +448,9 @@ sealed interface ModulePurgeUiState {
  * module it cannot query (`ModuleServiceAccess.NOT_INSTALLED`), and it has to be: the reset also
  * arms [ControlUiState.modulePurgeCompleted], so no later status read is allowed to correct it.
  * Every field that described the runtime of the erased module — the status label, the uptime, the
- * process card, the firewall detail, the module's own diagnostic — is retired here, or it would
- * stay on screen forever, sourced from a process and a module that are both gone.
- * See [withModuleStatusPublication].
+ * process card, the firewall counters, the pending removal, the module's own diagnostic — is
+ * retired here, or it would stay on screen forever, sourced from a process and a module that are
+ * both gone. See [withModuleStatusPublication].
  *
  * Three fields deliberately diverge from that projection, and only these three:
  *  - `moduleDiagnostic = null` and `autostart = false` are module-scoped facts the status path has
@@ -448,12 +460,15 @@ sealed interface ModulePurgeUiState {
  *  - [ControlUiState.modulePurgeCompleted] is the terminal gate itself, which only a purge arms.
  *
  * [ControlUiState.nfqueueSupported] is explicitly *not* among them. It is not a module fact: the
- * app measures it itself with `Zapret2ModuleRepository.buildProbeCommand()`, which asks the kernel
- * (`/proc/net/netfilter/nf_queue`, `iptables -j NFQUEUE`) and answers the same whether or not the
- * module is installed. Publishing `false` here invented a kernel verdict the app never took, and
- * because the gate blocks every later publication it could not be corrected before a process
- * restart — after which the very same device reported the badge green again. The module's own
- * `Z2_NFQUEUE` is a different field, [ControlUiState.iptablesDetail], and that one is retired.
+ * app measures it itself with `Zapret2ModuleRepository.buildProbeCommand()`, whose only NFQUEUE
+ * question is `[ -f /proc/net/netfilter/nf_queue ]` or a `grep` for `NFQUEUE` in
+ * `/proc/net/ip_tables_targets` and `/proc/net/ip6_tables_targets` — it never runs `iptables`, and
+ * it answers the same whether or not the module is installed. Publishing `false` here invented a
+ * kernel verdict the app never took, and because the gate blocks every later publication it could
+ * not be corrected before a process restart — after which the very same device reported the badge
+ * green again. The module's own `Z2_NFQUEUE` is a different measurement, taken from the status
+ * payload, and the app keeps none of it beyond [ControlUiState.nfqueueRulesCount] and
+ * [ControlUiState.iptablesActive], both of which are retired here.
  */
 internal fun ControlUiState.afterModulePurge(result: ModulePurgeController.Result): ControlUiState =
     if (!result.moduleDirectoryRemoved) {
@@ -466,11 +481,11 @@ internal fun ControlUiState.afterModulePurge(result: ModulePurgeController.Resul
             status = ControlStatus.NOT_INSTALLED,
             uptime = "",
             processStats = ProcessStats(),
-            iptablesDetail = NetworkStatsManager.IptablesDetail(),
             moduleDiagnostic = null,
             moduleInstallState = ModuleInstallState.MISSING,
             pendingModuleState = PendingModuleState.NONE,
             moduleMutationState = ModuleMutationState.IDLE,
+            moduleRemovalPending = false,
             moduleVersion = "",
             hasAuthoritativeRuntimeSettings = false,
             iptablesActive = false,
@@ -579,12 +594,26 @@ data class ControlUiState(
     val isToggling: Boolean = false,
     val canStopService: Boolean = false,
     val showQuicBanner: Boolean = false,
-    val iptablesDetail: NetworkStatsManager.IptablesDetail = NetworkStatsManager.IptablesDetail(),
     val hasRootAccess: Boolean = false,
     val rootAccessState: ServiceLifecycleController.RootAccessState? = null,
     val moduleInstallState: ModuleInstallState = ModuleInstallState.UNKNOWN,
     val pendingModuleState: PendingModuleState = PendingModuleState.NONE,
     val moduleMutationState: ModuleMutationState = ModuleMutationState.IDLE,
+    /**
+     * The module reports that it will be deleted on the next boot (`Z2_UNINSTALL_TOMBSTONE=1`).
+     *
+     * The module raises this for either of two facts it deliberately does not distinguish: an
+     * uninstall tombstone in its own state directory, or a root-manager removal mark in the module
+     * directory. The app cannot tell them apart from the status payload, and does not need to —
+     * both end in the same place, and both make `zapret-full-rollback.sh`, `zapret-start.sh` and
+     * every `ModuleMutationCoordinator.withMutation` write refuse.
+     *
+     * It is a live measurement, not an installation fact: the environment is reconciled once per
+     * process, so when the user marks the module for removal in Magisk/KernelSU while the screen is
+     * open, [moduleInstallState] stays `READY` for the lifetime of the ViewModel and this flag —
+     * republished by every status read — is the only thing that can correct the screen.
+     */
+    val moduleRemovalPending: Boolean = false,
     val nfqueueSupported: Boolean = false,
     val isCheckingForUpdates: Boolean = false,
     val isUpdating: Boolean = false,
@@ -609,9 +638,29 @@ data class ControlUiState(
     val lastResult: ControlLastResult? = null,
     val message: UiText? = null,
 ) {
+    /**
+     * Whether the installed module can still be asked to do anything for the user.
+     *
+     * A module marked for removal is not operational however healthy its runtime looks: the
+     * readiness badge, the autostart switch and the start action all rest on this, and all three
+     * are refused by the module while the removal mark or the tombstone is up.
+     */
     val isModuleOperational: Boolean
         get() = moduleInstallState.isOperational &&
-            moduleMutationState == ModuleMutationState.IDLE
+            moduleMutationState == ModuleMutationState.IDLE &&
+            !moduleRemovalPending
+
+    /**
+     * Whether starting the service is worth offering.
+     *
+     * Stopping is deliberately *not* gated on [moduleRemovalPending]. `zapret-start.sh` refuses on
+     * either fact behind the flag, but `zapret-stop.sh` refuses only on a live uninstall tombstone,
+     * not on a root-manager removal mark — and the status payload merges the two, so the app cannot
+     * prove a stop will fail. Withholding it would strand a running service the user can still
+     * legitimately want to shut down before the reboot that removes the module.
+     */
+    val canStartService: Boolean
+        get() = hasRootAccess && isModuleOperational && nfqueueSupported
     val isFullRollbackInProgress: Boolean get() = fullRollback is FullRollbackUiState.InProgress
     val isModulePurgeInProgress: Boolean get() = modulePurge is ModulePurgeUiState.InProgress
     val canEditSettings: Boolean get() = status in setOf(
@@ -622,8 +671,16 @@ data class ControlUiState(
         hasAuthoritativeRuntimeSettings &&
         !isToggling && !isCheckingForUpdates && !isUpdating &&
         !isSavingSettings && !isFullRollbackInProgress && !isModulePurgeInProgress
+    /**
+     * `zapret-full-rollback.sh` refuses on both facts [moduleRemovalPending] carries — the
+     * uninstall tombstone and the root-manager removal mark are two consecutive `blocked` gates
+     * ahead of every other precondition — so offering the action can only produce a failure dialog.
+     * Erasing the module is not gated the same way: `zapret-purge.sh` is written to run with the
+     * removal mark already published, and it is the one way out of this state.
+     */
     val canFullRollback: Boolean
         get() = moduleMutationState == ModuleMutationState.IDLE &&
+            !moduleRemovalPending &&
             FullRollbackAvailabilityPolicy.isAvailable(
                 status = status,
                 hasRootAccess = hasRootAccess,
@@ -643,10 +700,16 @@ data class ControlUiState(
         !isFullRollbackInProgress && !isModulePurgeInProgress
 }
 
+/**
+ * What `Zapret2ModuleRepository.readProcessMetrics` can prove about the module's own process.
+ *
+ * There is deliberately no CPU field: the repository reads `/proc/<pid>` for memory, thread count
+ * and uptime and nothing else, so a `cpu` slot could only ever be empty, and the process card row
+ * it fed was unreachable for every device.
+ */
 data class ProcessStats(
     val pid: String = "",
     val memory: String = "",
-    val cpu: String = "",
     val threads: String = "",
     val uptime: String = ""
 )
@@ -1654,13 +1717,16 @@ class ControlViewModel @Inject constructor(
                             uptime = "",
                             iptablesActive = false,
                             nfqueueRulesCount = 0,
-                            iptablesDetail = NetworkStatsManager.IptablesDetail(),
                             processStats = ProcessStats(),
                             hasRootAccess = cachedEnvironment.hasRootAccess,
                             rootAccessState = cachedEnvironment.rootAccessState,
                             moduleInstallState = environment.activeState,
                             pendingModuleState = environment.pendingState,
                             moduleMutationState = ModuleMutationState.IDLE,
+                            // No status script answered, so the installation authority is the only
+                            // evidence of a pending removal there is.
+                            moduleRemovalPending =
+                                environment.activeState == ModuleInstallState.REMOVAL_PENDING,
                             moduleVersion = environment.displayedVersion,
                             nfqueueSupported = environment.nfqueueSupported,
                             hasAuthoritativeRuntimeSettings = false,
@@ -1696,6 +1762,7 @@ class ControlViewModel @Inject constructor(
                             moduleInstallState = environment.activeState,
                             pendingModuleState = environment.pendingState,
                             moduleMutationState = lifecycleMutationState,
+                            moduleRemovalPending = serviceStatus.uninstallTombstone,
                             moduleVersion = environment.displayedVersion,
                             nfqueueSupported = environment.nfqueueSupported,
                             hasAuthoritativeRuntimeSettings = false,
@@ -1718,8 +1785,7 @@ class ControlViewModel @Inject constructor(
                 moduleMutationState = lifecycleMutationState,
             )
         }
-        val netStats = networkStatsManager.getNetworkStats(serviceStatus)
-        val detail = netStats.iptablesDetail
+        val networkType = networkStatsManager.getNetworkType()
         val isRunning = confirmedRunning(serviceStatus)
         val effectiveRulesCount = serviceStatus.nfqueueRulesCount
         val canStopService = serviceStatus.hasOwnedState
@@ -1750,16 +1816,16 @@ class ControlViewModel @Inject constructor(
                         canStopService = canStopService,
                         status = status,
                         uptime = processStats.uptime,
-                        networkType = UiText.Resource(netStats.networkType.labelRes),
+                        networkType = UiText.Resource(networkType.labelRes),
                         iptablesActive = serviceStatus.iptablesActive,
                         nfqueueRulesCount = effectiveRulesCount,
-                        iptablesDetail = detail,
                         processStats = processStats,
                         hasRootAccess = serviceStatus.rootGranted,
                         rootAccessState = serviceStatus.rootAccessState,
                         moduleInstallState = environment.activeState,
                         pendingModuleState = environment.pendingState,
                         moduleMutationState = lifecycleMutationState,
+                        moduleRemovalPending = serviceStatus.uninstallTombstone,
                         moduleVersion = environment.displayedVersion,
                         nfqueueSupported = environment.nfqueueSupported,
                         hasAuthoritativeRuntimeSettings = current.hasAuthoritativeRuntimeSettings &&

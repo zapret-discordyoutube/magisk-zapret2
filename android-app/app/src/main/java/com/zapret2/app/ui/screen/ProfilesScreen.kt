@@ -46,6 +46,7 @@ import com.zapret2.app.data.ProfileListEntry
 import com.zapret2.app.data.StrategyCatalogEntry
 import com.zapret2.app.ui.components.AppSnackbarEffect
 import com.zapret2.app.ui.components.LoadingOverlay
+import com.zapret2.app.ui.resolve
 import com.zapret2.app.ui.theme.SpacingTokens
 import com.zapret2.app.viewmodel.ProfilesUiState
 import com.zapret2.app.viewmodel.ProfilesViewModel
@@ -150,7 +151,10 @@ fun ProfilesScreen(
                 }
             }
         }
-        LoadingOverlay(text = stringResource(com.zapret2.app.R.string.profiles_saving), visible = state.isLoading)
+        LoadingOverlay(
+            text = state.loadingText?.resolve().orEmpty(),
+            visible = state.isLoading,
+        )
     }
 }
 

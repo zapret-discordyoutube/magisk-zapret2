@@ -1171,9 +1171,13 @@ object ServiceLifecycleController {
             // running service on a module the user just marked for removal in the root manager
             // publishes `ok` with the flag set, byte for byte. Rejecting that graded the whole
             // 33-field record `unknown`, which surfaced as UNAVAILABLE and switched off
-            // `canPurgeModule`/`canFullRollback` precisely when they are the way out. The service
-            // really is `ok`; the pending removal is a separate fact the app already carries in
-            // [ServiceStatus.uninstallTombstone].
+            // `canPurgeModule` — erasing the module — precisely when it is the way out. The
+            // service really is `ok`; the pending removal is a separate fact, and this parser is
+            // only half of carrying it. [ServiceStatus.uninstallTombstone] must reach the screen
+            // as `ControlUiState.moduleRemovalPending`, or an `ok` payload with the flag set
+            // renders as a fully healthy module that silently refuses every write; see
+            // `ControlViewModel.refreshStatus`, which republishes it on every read because the
+            // installation state behind it is reconciled only once per process.
             "ok" -> owned && process && active && pidVerified && ownerVerified &&
                 qnum != null && ipv4 && flag("Z2_NFQUEUE") && flag("Z2_QUEUE_BYPASS") &&
                 rulesVerified && expected > 0 && ipv4Rules > 0 && rules == expected &&

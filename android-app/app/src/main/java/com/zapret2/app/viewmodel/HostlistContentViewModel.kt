@@ -162,11 +162,28 @@ class HostlistContentViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Starts the one read this destination owes its restored state.
+     *
+     * A session rebuilt from saved state carries the user's draft but no editor baseline — the
+     * baseline it was persisted against cannot be trusted to still match the file — so
+     * `canEditContent` is false and every write path is shut. Nothing else revalidates it: the
+     * browse loader is deliberately skipped while editing, the screen's recovery branch only
+     * renders on [HostlistContentLoadState.ERROR], and [retryLoad] is reachable only from that
+     * branch. Without this the restored editor was a read-only dead end whose single exit discarded
+     * the draft.
+     *
+     * [revalidateEditorSource] is therefore the loader for a restored editing session, exactly as
+     * [loadInitial] is for a restored browse session. It re-reads the file, keeps the draft over
+     * the fresh baseline, and on failure publishes the ERROR state that puts the retry back within
+     * reach — so the draft survives both outcomes.
+     */
     fun ensureLoaded() {
-        if (initialLoadRequested.compareAndSet(false, true) &&
-            isAllowedHostlistPath() &&
-            !restoredEditing
-        ) {
+        if (!initialLoadRequested.compareAndSet(false, true)) return
+        if (!isAllowedHostlistPath()) return
+        if (restoredEditing) {
+            revalidateEditorSource()
+        } else {
             loadInitial(restoredQuery)
         }
     }

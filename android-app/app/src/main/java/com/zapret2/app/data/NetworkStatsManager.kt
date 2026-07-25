@@ -6,39 +6,15 @@ import android.net.NetworkCapabilities
 import com.zapret2.app.AppDebugLog
 import java.lang.ref.WeakReference
 
-internal fun projectIptablesDetail(
-    status: ServiceLifecycleController.ServiceStatus,
-): NetworkStatsManager.IptablesDetail = NetworkStatsManager.IptablesDetail(
-    rulesOk = if (status.rulesetVerified) status.nfqueueRulesCount else 0,
-    rulesFail = (status.expectedRulesCount - status.nfqueueRulesCount).coerceAtLeast(0),
-    rulesTotal = status.nfqueueRulesCount,
-    status = status.declaredStatus,
-    ownPid = status.pid,
-    pidVerified = status.pidVerified,
-    ownPidStarttime = status.pidStarttime,
-    ownerGeneration = status.ownerGeneration,
-    qnum = status.qnum,
-    ipv4Active = status.ipv4Active,
-    ipv6Active = status.ipv6Active,
-    chains = status.chainsCount,
-    anchors = status.anchorsCount,
-    nfqueueSupported = status.nfqueueSupported,
-    queueBypassSupported = status.queueBypassSupported,
-    rulesExpected = status.expectedRulesCount,
-    ipv4Rules = status.ipv4RulesCount,
-    ipv6Rules = status.ipv6RulesCount,
-    rulesetVerified = status.rulesetVerified,
-    ownerMetadataVerified = status.ownerMetadataVerified,
-    metadataComplete = status.metadataComplete,
-)
-
 /**
- * Projects the module's typed status contract into UI-facing network details.
+ * Reports the active transport of the device to the control screen.
  *
- * Firewall ownership and topology are interpreted only by the module lifecycle
- * boundary. The app deliberately does not read privileged owner metadata or parse firewall rules a
- * second time: doing so creates a competing contract and can reject a topology
- * that the module has already verified and published.
+ * Firewall ownership and topology are interpreted only by the module lifecycle boundary. The app
+ * deliberately does not read privileged owner metadata or parse firewall rules a second time: doing
+ * so creates a competing contract and can reject a topology that the module has already verified
+ * and published. What the screen shows of the module's own firewall record — whether the ruleset is
+ * active and how many NFQUEUE rules it counted — is taken straight from the typed status snapshot
+ * in `ControlViewModel`, so there is no second projection of it here to drift out of date.
  */
 class NetworkStatsManager(context: Context) {
 
@@ -60,35 +36,6 @@ class NetworkStatsManager(context: Context) {
         NONE,
     }
 
-    data class IptablesDetail(
-        val rulesOk: Int = 0,
-        val rulesFail: Int = 0,
-        val rulesTotal: Int = 0,
-        val status: String = "unknown",
-        val ownPid: String = "",
-        val pidVerified: Boolean = false,
-        val ownPidStarttime: String = "",
-        val ownerGeneration: String = "",
-        val qnum: Int? = null,
-        val ipv4Active: Boolean = false,
-        val ipv6Active: Boolean = false,
-        val chains: Int = 0,
-        val anchors: Int = 0,
-        val nfqueueSupported: Boolean = false,
-        val queueBypassSupported: Boolean = false,
-        val rulesExpected: Int = 0,
-        val ipv4Rules: Int = 0,
-        val ipv6Rules: Int = 0,
-        val rulesetVerified: Boolean = false,
-        val ownerMetadataVerified: Boolean = false,
-        val metadataComplete: Boolean = false,
-    )
-
-    data class NetworkStats(
-        val networkType: NetworkType,
-        val iptablesDetail: IptablesDetail,
-    )
-
     fun getNetworkType(): NetworkType {
         val cm = connectivityManager ?: return NetworkType.NONE
 
@@ -108,16 +55,4 @@ class NetworkStatsManager(context: Context) {
             NetworkType.NONE
         }
     }
-
-    /** Pure projection of the single authoritative module status payload. */
-    internal fun getIptablesDetail(
-        status: ServiceLifecycleController.ServiceStatus,
-    ): IptablesDetail = projectIptablesDetail(status)
-
-    fun getNetworkStats(
-        status: ServiceLifecycleController.ServiceStatus,
-    ): NetworkStats = NetworkStats(
-        networkType = getNetworkType(),
-        iptablesDetail = getIptablesDetail(status),
-    )
 }

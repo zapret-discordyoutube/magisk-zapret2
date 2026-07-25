@@ -84,6 +84,61 @@ class ReleaseArtifactIntegrityTest {
         ).forEach { assertFalse(it, isTrustedReleaseAssetUrl(it)) }
     }
 
+    /**
+     * The authority checks, on the branch where they are the only thing left.
+     *
+     * `isTrustedReleaseAssetUrl` rejects a userInfo, a fragment and any port but 443 on top of the
+     * host and path rules. On the `github.com` branch those three are redundant against a release
+     * path — the sweep above spells them with `/app.apk`, which the
+     * `/youtubediscord/magisk-zapret2/releases/download/` prefix already refuses, so it proves the
+     * prefix rule three more times and never reaches them.
+     *
+     * The CDN branch is where they carry the whole load. Every redirect the downloader follows is
+     * re-checked with `allowCdnRedirects = true`, and on that branch *any* path on a
+     * `*.githubusercontent.com` host is accepted, because release assets are served from opaque
+     * generated paths. `https://attacker@objects.githubusercontent.com/x` and
+     * `https://objects.githubusercontent.com:8443/x` are then well-formed trusted-host URLs whose
+     * only defect is the authority — an embedded credential the app would send upstream, or a
+     * port that is not the TLS service the host name vouches for. A `Location:` header is exactly
+     * where such a URL arrives from.
+     */
+    @Test
+    fun releaseAssetUrl_rejectsCredentialsPortsAndFragmentsOnTheRedirectBranch() {
+        val cdnHosts = listOf(
+            "objects.githubusercontent.com",
+            "release-assets.githubusercontent.com",
+            "github-releases.githubusercontent.com",
+        )
+
+        cdnHosts.forEach { host ->
+            // The path is opaque on this branch, so nothing else can refuse these.
+            assertTrue(host, isTrustedReleaseAssetUrl("https://$host/github-production/asset"))
+            assertTrue(host, isTrustedReleaseAssetUrl("https://$host:443/github-production/asset"))
+
+            listOf(
+                "https://attacker@$host/github-production/asset",
+                "https://attacker:secret@$host/github-production/asset",
+                "https://$host:8443/github-production/asset",
+                "https://$host:80/github-production/asset",
+                "https://$host/github-production/asset#fragment",
+            ).forEach { assertFalse(it, isTrustedReleaseAssetUrl(it)) }
+        }
+
+        // Same three defects on a genuine release path, so the release branch is proven too
+        // rather than being refused by its path prefix a fourth time.
+        val releaseAsset =
+            "https://github.com/youtubediscord/magisk-zapret2/releases/download/v1/module.zip"
+        assertTrue(isTrustedReleaseAssetUrl(releaseAsset, allowCdnRedirects = false))
+        listOf(
+            releaseAsset.replace("https://", "https://attacker@"),
+            releaseAsset.replace("github.com", "github.com:8443"),
+            "$releaseAsset#fragment",
+        ).forEach {
+            assertFalse(it, isTrustedReleaseAssetUrl(it))
+            assertFalse(it, isTrustedReleaseAssetUrl(it, allowCdnRedirects = false))
+        }
+    }
+
     @Test
     fun digestMetadata_requiresExactSha256AndRejectsMissingOrMalformedValues() {
         assertTrue(ReleaseArtifactIntegrity.parseSha256Digest(null).isFailure)

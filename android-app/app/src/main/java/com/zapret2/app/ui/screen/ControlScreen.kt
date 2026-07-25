@@ -290,6 +290,17 @@ fun ControlScreen(
                                 stringResource(R.string.control_not_available)
                             },
                         )
+                        if (state.moduleRemovalPending) {
+                            Spacer(Modifier.height(SpacingTokens.Small))
+                            Text(
+                                text = stringResource(R.string.control_module_removal_pending_body),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.extendedColors.warning.color,
+                                modifier = Modifier.semantics {
+                                    liveRegion = LiveRegionMode.Polite
+                                },
+                            )
+                        }
                         state.moduleDiagnostic?.let { diagnostic ->
                             Spacer(Modifier.height(SpacingTokens.Small))
                             Text(
@@ -346,10 +357,6 @@ fun ControlScreen(
                             state.processStats.memory.takeIf { it.isNotEmpty() }?.let {
                                 Spacer(Modifier.height(SpacingTokens.Small))
                                 SettingRow(title = stringResource(R.string.control_memory), value = it)
-                            }
-                            state.processStats.cpu.takeIf { it.isNotEmpty() }?.let {
-                                Spacer(Modifier.height(SpacingTokens.Small))
-                                SettingRow(title = stringResource(R.string.term_cpu), value = it)
                             }
                             state.processStats.threads.takeIf { it.isNotEmpty() }?.let {
                                 Spacer(Modifier.height(SpacingTokens.Small))
@@ -548,9 +555,7 @@ private fun ServiceStatusCard(
                 !state.isFullRollbackInProgress &&
                 !checking &&
                 !lifecycleBusy &&
-                (state.canStopService || (
-                    state.hasRootAccess && state.isModuleOperational && state.nfqueueSupported
-                )),
+                (state.canStopService || state.canStartService),
             shape = MaterialTheme.shapes.extraLarge,
             colors = ButtonDefaults.buttonColors(
                 containerColor = buttonContainer,

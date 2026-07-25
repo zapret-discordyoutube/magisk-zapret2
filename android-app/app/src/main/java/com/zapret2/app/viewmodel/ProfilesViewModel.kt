@@ -1,5 +1,6 @@
 package com.zapret2.app.viewmodel
 
+import androidx.annotation.StringRes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.zapret2.app.data.PresetDurableOutcome
@@ -28,9 +29,24 @@ data class ProfileSelectorTarget(
     val selectorIndex: Int,
 )
 
+/**
+ * What the screen is waiting for, and therefore what its modal overlay is allowed to claim.
+ *
+ * Three of the four are pure reads. Announcing "validating and saving" for any of them told the
+ * user — and, through the overlay's polite live region, TalkBack — that a privileged write to the
+ * module was in flight when nothing had been written at all; entering the screen did it every time,
+ * because [LOAD] runs on first composition.
+ */
+enum class ProfilesOperation(@param:StringRes val loadingTextRes: Int) {
+    LOAD(R.string.profiles_loading),
+    STRATEGY_CATALOG(R.string.profiles_loading_strategies),
+    SELECTOR_LISTS(R.string.profiles_loading_lists),
+    SAVE(R.string.profiles_saving),
+}
+
 data class ProfilesUiState(
     val document: PresetProfileDocument? = null,
-    val isLoading: Boolean = false,
+    val operation: ProfilesOperation? = null,
     val error: Boolean = false,
     val message: UiText? = null,
     val strategyProfileIndex: Int? = null,
@@ -39,7 +55,12 @@ data class ProfilesUiState(
     val renameDraft: String = "",
     val selectorTarget: ProfileSelectorTarget? = null,
     val listEntries: List<ProfileListEntry> = emptyList(),
-)
+) {
+    val isLoading: Boolean
+        get() = operation != null
+    val loadingText: UiText?
+        get() = operation?.let { UiText.resource(it.loadingTextRes) }
+}
 
 @HiltViewModel
 class ProfilesViewModel @Inject constructor(
@@ -57,17 +78,17 @@ class ProfilesViewModel @Inject constructor(
 
     fun load() {
         if (!busy.compareAndSet(false, true)) return
-        _uiState.update { it.copy(isLoading = true, error = false) }
+        _uiState.update { it.copy(operation = ProfilesOperation.LOAD, error = false) }
         viewModelScope.launch {
             try {
                 val document = repository.loadActive()
                 _uiState.update {
-                    it.copy(document = document, isLoading = false, error = document == null)
+                    it.copy(document = document, operation = null, error = document == null)
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                _uiState.update { it.copy(isLoading = false, error = true) }
+                _uiState.update { it.copy(operation = null, error = true) }
             } finally {
                 busy.set(false)
             }
@@ -116,13 +137,13 @@ class ProfilesViewModel @Inject constructor(
             return
         }
         if (!busy.compareAndSet(false, true)) return
-        _uiState.update { it.copy(isLoading = true) }
+        _uiState.update { it.copy(operation = ProfilesOperation.STRATEGY_CATALOG) }
         viewModelScope.launch {
             try {
                 val items = repository.loadStrategies(scope, _uiState.value.document?.declaredBlobs.orEmpty())
                 _uiState.update {
                     it.copy(
-                        isLoading = false,
+                        operation = null,
                         strategyProfileIndex = profileIndex.takeIf { items != null },
                         strategies = items.orEmpty(),
                         message = if (items == null) UiText.resource(R.string.profiles_catalog_unavailable) else null,
@@ -133,7 +154,7 @@ class ProfilesViewModel @Inject constructor(
             } catch (_: Exception) {
                 _uiState.update {
                     it.copy(
-                        isLoading = false,
+                        operation = null,
                         strategyProfileIndex = null,
                         strategies = emptyList(),
                         message = UiText.resource(R.string.profiles_catalog_unavailable),
@@ -149,13 +170,13 @@ class ProfilesViewModel @Inject constructor(
         val profile = _uiState.value.document?.profiles?.getOrNull(profileIndex) ?: return
         val selector = profile.selectors.getOrNull(selectorIndex) ?: return
         if (!busy.compareAndSet(false, true)) return
-        _uiState.update { it.copy(isLoading = true) }
+        _uiState.update { it.copy(operation = ProfilesOperation.SELECTOR_LISTS) }
         viewModelScope.launch {
             try {
                 val items = repository.loadListEntries(selector)
                 _uiState.update {
                     it.copy(
-                        isLoading = false,
+                        operation = null,
                         selectorTarget = ProfileSelectorTarget(profileIndex, selectorIndex).takeIf { items != null },
                         listEntries = items.orEmpty(),
                         message = if (items == null) UiText.resource(R.string.profiles_lists_unavailable) else null,
@@ -166,7 +187,7 @@ class ProfilesViewModel @Inject constructor(
             } catch (_: Exception) {
                 _uiState.update {
                     it.copy(
-                        isLoading = false,
+                        operation = null,
                         selectorTarget = null,
                         listEntries = emptyList(),
                         message = UiText.resource(R.string.profiles_lists_unavailable),
@@ -212,7 +233,7 @@ class ProfilesViewModel @Inject constructor(
     private fun mutate(block: suspend (PresetProfileDocument) -> ProfileMutationResult) {
         val document = _uiState.value.document ?: return
         if (!busy.compareAndSet(false, true)) return
-        _uiState.update { it.copy(isLoading = true, message = null) }
+        _uiState.update { it.copy(operation = ProfilesOperation.SAVE, message = null) }
         viewModelScope.launch {
             try {
                 val result = block(document)
@@ -228,7 +249,7 @@ class ProfilesViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(
                         document = refreshed,
-                        isLoading = false,
+                        operation = null,
                         error = refreshed == null,
                         message = outcomeMessage(outcome),
                     )
@@ -236,7 +257,9 @@ class ProfilesViewModel @Inject constructor(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                _uiState.update { it.copy(isLoading = false, message = UiText.resource(R.string.profiles_save_failed)) }
+                _uiState.update {
+                    it.copy(operation = null, message = UiText.resource(R.string.profiles_save_failed))
+                }
             } finally {
                 busy.set(false)
             }

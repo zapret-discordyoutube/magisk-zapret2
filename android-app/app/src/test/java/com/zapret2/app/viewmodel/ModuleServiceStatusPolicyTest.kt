@@ -12,6 +12,7 @@ import com.zapret2.app.data.tombstoneOwnedQuietStatusLines
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -227,16 +228,22 @@ class ModuleServiceStatusPolicyTest {
     ) { "the module's own stop receipt must parse" }
 
     /**
-     * The recovery actions must survive the module being marked for removal.
+     * The one recovery action the module still honours must survive being marked for removal.
      *
-     * `canPurgeModule` and `canFullRollback` both require the projected status to be one of
-     * RUNNING/DEGRADED/STOPPED. Rejecting either payload the module prints in that state graded it
-     * `unknown`, which carried "Invalid or incomplete Zapret2 machine status output" into
-     * `ServiceStatus.error`, which `projectedControlStatus` turns into UNAVAILABLE — switching both
-     * actions off in the exact state where erasing or rolling back is the way out.
+     * `canPurgeModule` requires the projected status to be one of RUNNING/DEGRADED/STOPPED.
+     * Rejecting either payload the module prints in that state graded it `unknown`, which carried
+     * "Invalid or incomplete Zapret2 machine status output" into `ServiceStatus.error`, which
+     * `projectedControlStatus` turns into UNAVAILABLE — switching the erase off in the exact state
+     * where erasing is the way out.
+     *
+     * A full rollback is deliberately *not* in the same class. `zapret-full-rollback.sh` refuses on
+     * both facts behind `Z2_UNINSTALL_TOMBSTONE` — the tombstone and the root-manager removal mark
+     * are two consecutive `blocked` gates — so it can only ever produce a failure dialog once the
+     * flag is projected onto the screen. `zapret-purge.sh` is written to run with the removal mark
+     * already published and is not gated on it.
      */
     @Test
-    fun moduleMarkedForRemoval_keepsEraseAndRollbackReachableInBothPayloadsItPrints() {
+    fun moduleMarkedForRemoval_keepsTheEraseReachableAndWithholdsTheRollbackTheModuleRefuses() {
         mapOf(
             "running service" to runningMarkedForRemovalStatusLines(),
             "quiet teardown owned only by the removal mark" to tombstoneOwnedQuietStatusLines(),
@@ -256,11 +263,71 @@ class ModuleServiceStatusPolicyTest {
                 canStopService = serviceStatus.provesLiveRuntime,
                 moduleInstallState = ModuleInstallState.READY,
                 moduleMutationState = ModuleMutationState.IDLE,
+                moduleRemovalPending = serviceStatus.uninstallTombstone,
             )
 
             assertNotEquals(label, ControlStatus.UNAVAILABLE, state.status)
             assertTrue("$label must keep the erase action reachable", state.canPurgeModule)
-            assertTrue("$label must keep the rollback action reachable", state.canFullRollback)
+            assertFalse(
+                "$label must not offer the rollback the module refuses",
+                state.canFullRollback,
+            )
+        }
+    }
+
+    /**
+     * The other half of the same rule, and the reason it is a rule rather than a convenience.
+     *
+     * [moduleMarkedForRemoval_keepsEraseAndRollbackReachableInBothPayloadsItPrints] proves the app
+     * must not switch the recovery actions off over a payload it *can* grade. What keeps that from
+     * becoming "never switch them off" is a single clause in `projectedControlStatus`:
+     * `serviceStatus.error != null -> UNAVAILABLE`. `parseStatusOutput` puts every payload it
+     * refused behind that one field — the grade collapses to `unknown` and the error text is the
+     * only thing left saying so — and nothing else in the projection reads it. Drop the clause and
+     * a truncated, contradictory or fabricated record falls through to the `canStopService`
+     * fallback, lands on DEGRADED or STOPPED, and re-arms `canPurgeModule`/`canFullRollback`:
+     * irreversible module erase and a full rollback offered on the strength of bytes the app just
+     * rejected.
+     *
+     * Both payloads below are refusals `parseStatusOutput` really produces, and both are checked
+     * with the stop control on and off, because that fallback is what would otherwise answer.
+     */
+    @Test
+    fun aPayloadTheParserRefusedNeverArmsEraseOrRollback() {
+        val ruleCountsDisagree = runningMarkedForRemovalStatusLines().map { line ->
+            if (line.startsWith("Z2_IPV4_RULES=")) "Z2_IPV4_RULES=3" else line
+        }
+        val truncated = runningMarkedForRemovalStatusLines().filterNot {
+            it.startsWith("Z2_COMPLETE=")
+        }
+
+        mapOf(
+            "rule totals that contradict each other" to ruleCountsDisagree,
+            "a record cut short before its terminator" to truncated,
+        ).forEach { (label, lines) ->
+            val serviceStatus = ServiceLifecycleController.parseStatusOutput(lines)
+
+            assertFalse(label, serviceStatus.metadataComplete)
+            assertEquals(label, "unknown", serviceStatus.declaredStatus)
+            assertNotNull("$label must be carried as a broken payload", serviceStatus.error)
+
+            listOf(true, false).forEach { canStopService ->
+                val state = ControlUiState(
+                    status = projectedControlStatus(
+                        serviceStatus = serviceStatus,
+                        canStopService = canStopService,
+                    ),
+                    hasRootAccess = true,
+                    canStopService = canStopService,
+                    moduleInstallState = ModuleInstallState.READY,
+                    moduleMutationState = ModuleMutationState.IDLE,
+                )
+                val case = "$label (canStopService=$canStopService)"
+
+                assertEquals(case, ControlStatus.UNAVAILABLE, state.status)
+                assertFalse("$case must not arm the erase action", state.canPurgeModule)
+                assertFalse("$case must not arm the rollback action", state.canFullRollback)
+            }
         }
     }
 

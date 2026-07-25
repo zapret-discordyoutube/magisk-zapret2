@@ -331,9 +331,12 @@ object ModulePurgeController {
      * Strict parser for the exact five-field `--prepare` machine protocol.
      *
      * Symmetric with [parseReportOutput]: a well-formed record is carried through as itself, and
-     * the caller grades it. `prepare_purge` prints the same five fields for all eight of its
-     * refusals — a live rollback transaction, unsafe uninstall evidence, an unsafe module
-     * identity, an already-armed confirmation, and so on — each with its own
+     * the caller grades it. `prepare_purge` prints the same five fields for all nineteen of its
+     * refusals — seven `blocked` (missing root, an unsafe module identity, a live rollback
+     * transaction, unsafe uninstall evidence, an unsafe removal marker, an already-armed
+     * confirmation, a stale unsafe purge request) and twelve `error`, which cover an invalid
+     * source, unavailable secure state and every step of writing, securing, publishing and
+     * verifying the one-time confirmation — each with its own
      * `Z2_PURGE_PREPARE_DIAGNOSTIC`, which is the only text that points at the remedy. Rejecting
      * those records here threw that sentence away and left the user with a bare protocol
      * complaint that reads like a version mismatch. Only a record the parser cannot trust at all

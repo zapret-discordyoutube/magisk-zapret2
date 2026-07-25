@@ -1184,6 +1184,105 @@ class ServiceLifecycleControllerTest {
         }
     }
 
+    /**
+     * The measurement the narrowed certification rule actually asks for.
+     *
+     * `runtimeQuiescent` is what replaced "the grade is `stopped`", and it is a conjunction of
+     * every fact that would mean a runtime is still there to certify — including the rule count.
+     * The single-field sweep above cannot reach that conjunct: mutating `Z2_RULES` alone is
+     * rejected two rules earlier by `ipv4_rules + ipv6_rules == rules`, so the count is never
+     * carried into the quiescence test on its own.
+     *
+     * This is the coherent record that does reach it. Five rules are counted, all of them in
+     * IPv4, the totals agree with each other and with `Z2_EXPECTED_RULES`, and the payload then
+     * certifies that ruleset (`Z2_RULESET_VERIFIED=1`) while claiming no process, no active
+     * family and no owner metadata. `zapret-status.sh` cannot print it: the stopped fast path is
+     * the only route to a certification without owner state and it requires `RULES_TOTAL=0`.
+     * Accepting it would let a fabricated payload assert a verified ruleset that no owner and no
+     * runtime accounts for, which is precisely the claim the certification rule exists to refuse.
+     */
+    @Test
+    fun parseStatusOutput_rejectsACertifiedRulesetNoRuntimeAccountsFor() {
+        val quietWithCountedRules = tombstoneOwnedQuietStatusLines().map { line ->
+            when {
+                line.startsWith("Z2_RULES=") -> "Z2_RULES=5"
+                line.startsWith("Z2_IPV4_RULES=") -> "Z2_IPV4_RULES=5"
+                line.startsWith("Z2_EXPECTED_RULES=") -> "Z2_EXPECTED_RULES=5"
+                else -> line
+            }
+        }
+
+        // Everything the earlier rules check is internally consistent, so the record survives
+        // every gate before the certification rule.
+        assertTrue(quietWithCountedRules.contains("Z2_IPV6_RULES=0"))
+        assertTrue(quietWithCountedRules.contains("Z2_RULESET_VERIFIED=1"))
+        assertTrue(quietWithCountedRules.contains("Z2_OWNER_METADATA_VERIFIED=0"))
+        assertTrue(quietWithCountedRules.contains("Z2_PROCESS=0"))
+        assertTrue(quietWithCountedRules.contains("Z2_ACTIVE=0"))
+        assertTrue(quietWithCountedRules.contains("Z2_IPV4=0"))
+        assertTrue(quietWithCountedRules.contains("Z2_IPV6=0"))
+
+        val status = ServiceLifecycleController.parseStatusOutput(quietWithCountedRules)
+
+        assertFalse(
+            "a certified ruleset with no owner, no process and no active family must fail closed",
+            status.metadataComplete,
+        )
+        assertEquals("unknown", status.declaredStatus)
+        assertNotNull(status.error)
+
+        // The same record with the rules torn down is the quiet teardown the rule does admit, so
+        // the count is the only thing being refused here.
+        assertTrue(
+            ServiceLifecycleController.parseStatusOutput(tombstoneOwnedQuietStatusLines())
+                .metadataComplete,
+        )
+    }
+
+    /**
+     * A running service must account for every family it counted rules in.
+     *
+     * The `ok` grade in `statusPayloadSemanticsAreValid` deliberately does not require
+     * `Z2_IPV6`: a service can run IPv4-only and honestly report `ipv6_active=0` with zero IPv6
+     * rules. That leaves the app to reject the one combination the module never prints — an
+     * inactive IPv6 family that nonetheless carries counted IPv6 rules — and
+     * [ServiceLifecycleController.ServiceStatus.healthy] is the only place it is rejected.
+     *
+     * Without it the screen would report RUNNING over a ruleset whose IPv6 half is unaccounted
+     * for, which is the state a partially torn-down or externally-flushed table leaves behind.
+     */
+    @Test
+    fun healthy_refusesCountedRulesInAFamilyTheModuleReportsInactive() {
+        val ipv6CountedButInactive = healthyStatusLines().map { line ->
+            if (line.startsWith("Z2_IPV6=")) "Z2_IPV6=0" else line
+        }
+
+        val status = ServiceLifecycleController.parseStatusOutput(ipv6CountedButInactive)
+
+        // The payload is internally consistent enough to be graded: 2 + 1 == 3 == expected.
+        assertTrue(status.metadataComplete)
+        assertEquals("ok", status.declaredStatus)
+        assertNull(status.error)
+        assertFalse(status.ipv6Active)
+        assertEquals(1, status.ipv6RulesCount)
+        assertFalse(
+            "IPv6 rules counted in a family reported inactive must not read as a healthy service",
+            status.healthy,
+        )
+
+        // Honest IPv4-only: the family is inactive and carries no rules, and that is healthy.
+        val ipv4Only = healthyStatusLines().map { line ->
+            when {
+                line.startsWith("Z2_IPV6=") -> "Z2_IPV6=0"
+                line.startsWith("Z2_IPV6_RULES=") -> "Z2_IPV6_RULES=0"
+                line.startsWith("Z2_IPV4_RULES=") -> "Z2_IPV4_RULES=3"
+                else -> line
+            }
+        }
+
+        assertTrue(ServiceLifecycleController.parseStatusOutput(ipv4Only).healthy)
+    }
+
     @Test
     fun parseStatusOutput_rejectsWhitespaceAndPrefixKeyInjection() {
         val whitespaceKey = ServiceLifecycleController.parseStatusOutput(
