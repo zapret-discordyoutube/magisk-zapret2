@@ -161,8 +161,43 @@ P7. **Diagnostics never undo a completed operation.** Once an effect is
   the hosts-preservation transaction, which the `common.sh` durability
   contract explicitly assigns to the dedicated mutation scripts (the analysis
   finding that they violated the contract was a misreading).
-- **`customize.sh`**: one validation loop and one filesystem traversal for
-  permission normalization (was two loops and three traversals).
+- **`customize.sh`**: permission normalization runs as flat find passes with a
+  verification scan that fails the install loudly if the modes did not land.
+  The previous single-traversal form nested `-exec chmod {} +` inside grouped
+  `-o` alternations, and Magisk's busybox find silently skips such actions —
+  it exits 0 having changed nothing, which left every module file at the
+  umask-077 modes the installer's unzip produced and broke every app read
+  that requires the published 0644 contract (strategy catalogs first).
+- **Single-endpoint preset mutation** (formerly deferred, now shipped): the
+  app performs both preset flavors through one module transaction.
+  `zapret-apply-preset.sh <name>` applies a selection;
+  `zapret-apply-preset.sh --save-content <candidate> <expected-digest> <name>
+  <apply|auto>` publishes edited content under a canonical content
+  compare-and-swap, commits the selection only when it actually changes,
+  replaces the daemon only when the saved preset governs a running service,
+  and rolls back file, selection and daemon together. The category/profile
+  path that used to take 14–16 privileged round trips is now candidate write
+  plus one transaction.
+- **Validation is paid once per transaction**: the transaction compiles the
+  candidate into the canonical argv slot bound to the runtime.ini generation
+  it is about to commit, runs the one `nfqws2 --dry-run`, and records the
+  generation-bound validation receipt. The replacement child then finds the
+  binding current and the receipt fresh instead of recompiling and re-running
+  the dry-run after the commit.
+- **Android fork-cost findings** (measured on a Pixel 9 Pro XL): mksh ships
+  `printf` as an external binary, so every printf was a ~45 ms fork+exec; the
+  machine protocol now renders its narrow format dialect through the raw
+  `print` builtin (`common.sh` adapter), and the preset listing fast path
+  buffers its rows into a single write — the catalog listing dropped from
+  5.4 s to 0.15 s on a 98-preset catalog. The exact owned-process scan uses
+  one `pgrep -f` enumeration with the same per-candidate identity proof
+  instead of a shell walk over every `/proc` entry, and the post-kill death
+  poll re-checks only pid+starttime liveness (the entry proof already pinned
+  the identity; argv/exe cannot change while both hold) instead of paying
+  three to four forks per 100 ms turn. A subshell forked from a shell that
+  has the full lifecycle library sourced costs ~68 ms on this class of
+  device, which is the dominant remaining cost of a replacement transaction —
+  reducing substitution counts on the hot path is the next scheduled pass.
 
 ## 4. Changes in 2.2.0 (app)
 
