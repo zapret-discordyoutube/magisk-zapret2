@@ -241,9 +241,12 @@ MODULE_SOURCE="$WORK_ROOT/module-source"
 APP_SOURCE="$WORK_ROOT/app-source"
 mkdir -p -- "$MODULE_SOURCE" "$APP_SOURCE"
 if [[ "$channel_arg" == stable ]]; then
-    # -p keeps the commit's canonical modes: this process runs under umask 077,
-    # and shell tests assert packaged-executable bits on the snapshot itself.
-    git -C "$REPO" archive "$SOURCE_SHA" | tar -xp -C "$MODULE_SOURCE"
+    # The snapshot must reproduce the commit's canonical 644/755 modes, not
+    # this process's environment: git archive itself widens modes through
+    # tar.umask (default 002), and extraction re-derives them from the shell
+    # umask (077 here) unless told to preserve the archive's own bits.
+    git -C "$REPO" -c tar.umask=0022 archive "$SOURCE_SHA" |
+        tar -xp -C "$MODULE_SOURCE"
 else
     while IFS= read -r -d '' source_path; do
         case "$source_path" in
