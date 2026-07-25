@@ -78,32 +78,51 @@ class HostlistRepository @Inject constructor() {
 
     internal fun listFiles(): Result<List<HostlistFileRecord>> = try {
         val directory = RootFileIo.shellQuote(LISTS_DIR)
+        // Two forks for the whole catalog: one batched stat provides every
+        // file's metadata, one awk pass counts the data lines of every file
+        // and joins the two by path. The previous form paid three forks per
+        // file, and its metadata heredoc broke the moment the interpolated
+        // awk block anchored trimIndent at column zero — an indented EOF
+        // terminator is not a terminator, so the shell refused the whole
+        // script and the screen showed an empty catalog. No heredocs.
         val result = RootCommandExecutor.execute(
             """
                 [ -d $directory ] && [ ! -L $directory ] || exit 1
-                for z2_file in $directory/*.txt; do
-                    [ -e "${'$'}z2_file" ] || continue
+                set -- $directory/*.txt
+                [ -e "${'$'}1" ] || [ -L "${'$'}1" ] || exit 0
+                for z2_file in "${'$'}@"; do
                     [ -f "${'$'}z2_file" ] && [ ! -L "${'$'}z2_file" ] && [ -r "${'$'}z2_file" ] || exit 1
-                    z2_name=${'$'}{z2_file##*/}
-                    case "${'$'}z2_name" in ''|*[!A-Za-z0-9._-]*|.*|*.|*..) exit 1 ;; esac
-                    z2_meta=${'$'}(stat -c '%u:%a:%h:%s' "${'$'}z2_file" 2>/dev/null) || exit 1
-                    IFS=: read -r z2_uid z2_mode z2_links z2_size <<EOF
-                    ${'$'}z2_meta
-                    EOF
-                    [ "${'$'}z2_uid" = 0 ] && [ "${'$'}z2_links" = 1 ] || exit 1
-                    case "${'$'}z2_mode" in 600|644) ;; *) exit 1 ;; esac
-                    case "${'$'}z2_size" in ''|*[!0-9]*) exit 1 ;; esac
-                    [ "${'$'}z2_size" -le $MAX_HOSTLIST_BYTES ] || exit 1
-                    z2_lines=${'$'}(awk '
-                        {
-                            $normalizeHostlistDataLineAwk
-                            z2_count++
-                        }
-                        END { print z2_count + 0 }
-                    ' "${'$'}z2_file" 2>/dev/null) || exit 1
-                    case "${'$'}z2_lines" in ''|*[!0-9]*) exit 1 ;; esac
-                    printf '%s|%s|%s|%s\n' "${'$'}z2_name" "${'$'}z2_file" "${'$'}z2_lines" "${'$'}z2_size"
                 done
+                stat -c '%n|%u|%a|%h|%s' "${'$'}@" 2>/dev/null | awk -F'|' '
+                    NR == FNR {
+                        if (NF != 5) exit 1
+                        z2_meta_uid[${'$'}1] = ${'$'}2
+                        z2_meta_mode[${'$'}1] = ${'$'}3
+                        z2_meta_links[${'$'}1] = ${'$'}4
+                        z2_meta_size[${'$'}1] = ${'$'}5
+                        next
+                    }
+                    {
+                        $normalizeHostlistDataLineAwk
+                        z2_count[FILENAME]++
+                    }
+                    END {
+                        for (z2_i = 2; z2_i < ARGC; z2_i++) {
+                            z2_path = ARGV[z2_i]
+                            if (!(z2_path in z2_meta_uid)) exit 1
+                            z2_name = z2_path
+                            sub(/^.*\//, "", z2_name)
+                            if (z2_name !~ /^[A-Za-z0-9._-]+${'$'}/) exit 1
+                            if (z2_name ~ /^\./ || z2_name ~ /\.${'$'}/) exit 1
+                            if (z2_meta_uid[z2_path] != 0) exit 1
+                            if (z2_meta_links[z2_path] != 1) exit 1
+                            if (z2_meta_mode[z2_path] != 600 && z2_meta_mode[z2_path] != 644) exit 1
+                            if (z2_meta_size[z2_path] !~ /^[0-9]+${'$'}/) exit 1
+                            if (z2_meta_size[z2_path] + 0 > $MAX_HOSTLIST_BYTES) exit 1
+                            print z2_name "|" z2_path "|" (z2_count[z2_path] + 0) "|" z2_meta_size[z2_path]
+                        }
+                    }
+                ' - "${'$'}@" || exit 1
             """.trimIndent(),
         )
         check(result.isSuccess) { "Unable to enumerate protected hostlists" }
