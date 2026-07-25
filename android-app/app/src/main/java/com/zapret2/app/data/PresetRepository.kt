@@ -169,6 +169,36 @@ internal object PresetMachineProtocol {
         )
     }
 
+    /**
+     * Projects the transactional apply receipt onto the mutation outcome.
+     *
+     * Null means "no receipt": the entry point is absent on the installed
+     * generation (explicit unsupported answer) or the command never produced
+     * the schema line, and only then may the caller run the historical
+     * multi-step flow. A receipt that claims success while the command failed
+     * is a protocol violation and reads as an I/O failure, never as a green
+     * result and never as permission to run the transaction a second time.
+     */
+    fun parseApplyReceipt(lines: List<String>, commandSucceeded: Boolean): PresetMutationOutcome? {
+        val values = linkedMapOf<String, String>()
+        lines.forEach { line ->
+            if (!line.startsWith("Z2_APPLY_")) return@forEach
+            val separator = line.indexOf('=')
+            if (separator <= 0) return@forEach
+            values[line.substring(0, separator)] = line.substring(separator + 1)
+        }
+        if (values["Z2_APPLY_SCHEMA"] != "1") return null
+        return when (values["Z2_APPLY_OUTCOME"]) {
+            "unsupported" -> null
+            "applied" -> if (commandSucceeded) PresetMutationOutcome.Applied else PresetMutationOutcome.IoFailed
+            "saved" -> if (commandSucceeded) PresetMutationOutcome.Saved else PresetMutationOutcome.IoFailed
+            "rejected" -> PresetMutationOutcome.Rejected(PresetIssue.UNSAFE_PRESET_NAME)
+            "restart_failed_rolled_back" -> PresetMutationOutcome.RestartFailedRolledBack
+            "rollback_failed" -> PresetMutationOutcome.RollbackFailed
+            else -> PresetMutationOutcome.IoFailed
+        }
+    }
+
     private fun String.containsControl(): Boolean = any { it.code < 0x20 || it.code == 0x7f }
 
     private fun isValidPortUnion(value: String): Boolean {
@@ -209,6 +239,14 @@ internal interface PresetRunner {
     suspend fun removeFile(fileName: String): Boolean
     suspend fun restart(): Boolean
     suspend fun isServiceRunning(): Boolean?
+
+    /**
+     * One-round-trip preset application through the module's transactional
+     * entry point. Returns null when the installed generation does not
+     * publish that entry point yet, in which case the caller falls back to
+     * the historical multi-step flow.
+     */
+    suspend fun applyPresetTransaction(fileName: String): PresetMutationOutcome? = null
 }
 
 @Singleton
@@ -374,6 +412,27 @@ internal class RootPresetRunner @Inject constructor() : PresetRunner {
     override suspend fun isServiceRunning(): Boolean? =
         ServiceLifecycleController.getStatus().takeIf { it.rootGranted }?.processRunning
 
+    override suspend fun applyPresetTransaction(fileName: String): PresetMutationOutcome? {
+        if (!PresetNamePolicy.isValid(fileName)) {
+            return PresetMutationOutcome.Rejected(PresetIssue.UNSAFE_PRESET_NAME)
+        }
+        val script = "$zapretDir/scripts/zapret-apply-preset.sh"
+        val quotedScript = RootFileIo.shellQuote(script)
+        // The absence probe travels in the same round trip: an older installed
+        // generation without the entry point answers with an explicit
+        // "unsupported" receipt instead of a shell error the caller would have
+        // to guess about.
+        val result = ServiceLifecycleController.executeRoot(
+            ModuleMutationCoordinator.inheritLifecycleLock(
+                "if [ -f $quotedScript ] && [ ! -L $quotedScript ]; then " +
+                    "ZAPRET2_EMIT_STATUS_V6=1 sh $quotedScript ${RootFileIo.shellQuote(fileName)}; " +
+                    "else echo Z2_APPLY_SCHEMA=1; echo Z2_APPLY_OUTCOME=unsupported; fi",
+            ),
+            RootCommandPolicy.LIFECYCLE,
+        )
+        return PresetMachineProtocol.parseApplyReceipt(result.stdout, result.success)
+    }
+
     private fun isSafeName(fileName: String): Boolean =
         RootFileIo.isSimpleFileName(fileName, ".txt")
 
@@ -452,6 +511,10 @@ internal class TransactionalPresetRepository @Inject constructor(
         if (!PresetNamePolicy.isValid(fileName)) {
             return@safelyMutate PresetMutationOutcome.Rejected(PresetIssue.UNSAFE_PRESET_NAME)
         }
+        // One module-owned transaction is the primary path; the multi-step
+        // flow below survives only as the compatibility fallback for an
+        // installed generation that predates the transactional entry point.
+        runner.applyPresetTransaction(fileName)?.let { return@safelyMutate it }
         val oldConfig = runner.snapshotActiveConfig() ?: return@safelyMutate PresetMutationOutcome.IoFailed
         val wasRunning = runner.isServiceRunning() ?: return@safelyMutate PresetMutationOutcome.IoFailed
         when (writeConfigResult(ActivePresetConfig(fileName))) {

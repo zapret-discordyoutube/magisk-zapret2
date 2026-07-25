@@ -133,6 +133,7 @@ class ModulePackageContractTest {
             "immutable-exec|0755|zapret2/scripts/zapret-start.sh",
             "immutable-exec|0755|zapret2/scripts/zapret-stop.sh",
             "immutable-exec|0755|zapret2/scripts/zapret-restart.sh",
+            "immutable-exec|0755|zapret2/scripts/zapret-apply-preset.sh",
             "immutable-exec|0755|zapret2/scripts/zapret-status.sh",
             "immutable-exec|0755|zapret2/scripts/zapret-full-rollback.sh",
             "immutable-exec|0755|zapret2/scripts/lifecycle/purge-contract.sh",

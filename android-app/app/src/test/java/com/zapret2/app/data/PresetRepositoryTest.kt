@@ -171,6 +171,67 @@ class PresetRepositoryTest {
     }
 
     @Test
+    fun apply_prefersTheModuleTransactionAndRunsNoLegacySteps() = runBlocking {
+        val runner = FakePresetRunner(
+            validation = PresetValidation.Compatible,
+            transactionalOutcome = PresetMutationOutcome.Applied,
+        )
+        val gate = RecordingGate()
+        val repository = TransactionalPresetRepository(runner, gate)
+
+        val result = repository.apply("published.txt")
+
+        assertEquals(PresetMutationOutcome.Applied, result)
+        assertEquals(1, gate.calls)
+        assertEquals(1, runner.transactionalCalls)
+        assertEquals(0, runner.configWrites)
+        assertEquals(0, runner.restartCalls)
+        assertEquals(listOf("apply-transaction"), runner.events)
+    }
+
+    @Test
+    fun applyReceipt_projectsEveryOutcomeAndFallsBackOnlyWithoutAReceipt() {
+        fun parse(lines: List<String>, success: Boolean = true) =
+            PresetMachineProtocol.parseApplyReceipt(lines, success)
+
+        // No receipt or explicit unsupported answer → legacy fallback allowed.
+        assertEquals(null, parse(listOf("random noise")))
+        assertEquals(null, parse(listOf("Z2_APPLY_SCHEMA=1", "Z2_APPLY_OUTCOME=unsupported")))
+
+        val receipt = listOf(
+            "start log line",
+            "Z2_APPLY_SCHEMA=1",
+            "Z2_APPLY_WAS_RUNNING=1",
+        )
+        assertEquals(
+            PresetMutationOutcome.Applied,
+            parse(receipt + "Z2_APPLY_OUTCOME=applied"),
+        )
+        assertEquals(
+            PresetMutationOutcome.Saved,
+            parse(receipt + "Z2_APPLY_OUTCOME=saved"),
+        )
+        assertEquals(
+            PresetMutationOutcome.Rejected(PresetIssue.UNSAFE_PRESET_NAME),
+            parse(receipt + "Z2_APPLY_OUTCOME=rejected", success = false),
+        )
+        assertEquals(
+            PresetMutationOutcome.RestartFailedRolledBack,
+            parse(receipt + "Z2_APPLY_OUTCOME=restart_failed_rolled_back", success = false),
+        )
+        assertEquals(
+            PresetMutationOutcome.RollbackFailed,
+            parse(receipt + "Z2_APPLY_OUTCOME=rollback_failed", success = false),
+        )
+        // A green outcome on a failed command, a garbled outcome, or a missing
+        // outcome is a protocol violation: never a success, never a second run.
+        assertEquals(PresetMutationOutcome.IoFailed, parse(receipt + "Z2_APPLY_OUTCOME=applied", success = false))
+        assertEquals(PresetMutationOutcome.IoFailed, parse(receipt + "Z2_APPLY_OUTCOME=saved", success = false))
+        assertEquals(PresetMutationOutcome.IoFailed, parse(receipt + "Z2_APPLY_OUTCOME=exploded"))
+        assertEquals(PresetMutationOutcome.IoFailed, parse(receipt))
+    }
+
+    @Test
     fun save_rejectsCandidateBeforeAtomicReplaceAndLeavesTargetUntouched() = runBlocking {
         val runner = FakePresetRunner(validation = PresetValidation.Quarantined(PresetIssue.NO_VALID_OPTIONS))
         runner.files["custom.txt"] = "old"
@@ -417,7 +478,12 @@ class PresetRepositoryTest {
 
         assertEquals(PresetMutationOutcome.Applied, result)
         assertEquals(ActivePresetConfig("good.txt"), runner.config)
-        assertEquals(listOf("snapshot-config", "write-config", "restart"), runner.events)
+        // The transactional probe answered "unavailable" (null), so the legacy
+        // steps follow it — still without any deep revalidation.
+        assertEquals(
+            listOf("apply-transaction", "snapshot-config", "write-config", "restart"),
+            runner.events,
+        )
     }
 
     private class RecordingGate : PresetMutationGate {
@@ -439,6 +505,7 @@ class PresetRepositoryTest {
         private val replaceFailure: Exception? = null,
         private val snapshotFileFailureOnCall: Int? = null,
         private val configWriteFailureOnCall: Int? = null,
+        private val transactionalOutcome: PresetMutationOutcome? = null,
     ) : PresetRunner {
         var config = ActivePresetConfig("old.txt")
         val files = linkedMapOf<String, String>()
@@ -448,6 +515,13 @@ class PresetRepositoryTest {
         var restartCalls = 0
         var replaceCalls = 0
         var snapshotFileCalls = 0
+        var transactionalCalls = 0
+
+        override suspend fun applyPresetTransaction(fileName: String): PresetMutationOutcome? {
+            events += "apply-transaction"
+            transactionalCalls++
+            return transactionalOutcome
+        }
 
         override suspend fun listPresets(): List<String>? = null
 

@@ -58,6 +58,7 @@ internal object ModulePackageContract {
         "zapret2/scripts/zapret-start.sh",
         "zapret2/scripts/zapret-stop.sh",
         "zapret2/scripts/zapret-restart.sh",
+        "zapret2/scripts/zapret-apply-preset.sh",
         "zapret2/scripts/zapret-status.sh",
         "zapret2/scripts/zapret-full-rollback.sh",
         PURGE_CONTRACT_PATH,
