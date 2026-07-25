@@ -125,6 +125,18 @@ z2_fw_ensure_scratch_dir() {
     [ -d "$STATE_DIR/tmp" ] && [ ! -L "$STATE_DIR/tmp" ] || return 1
 }
 
+# Scratch names end in the creating PID, so residue from a previous boot whose
+# PID the kernel handed us again would fence this transaction forever. The
+# creator is provably gone, and this caller owns the lifecycle lock, so the
+# abandoned file is ours to drop.
+z2_fw_claim_scratch_path() {
+    local path="$1"
+    { [ -e "$path" ] || [ -L "$path" ]; } || return 0
+    command -v retire_dead_scratch_files >/dev/null 2>&1 || return 1
+    retire_dead_scratch_files >/dev/null 2>&1 || return 1
+    [ ! -e "$path" ] && [ ! -L "$path" ]
+}
+
 z2_fw_run_restore() {
     local restore="$1" tool="$2" phase="$3" batch="$4"
     local capture wait_supported=0 attempts=0 rc=1 cleanup_rc=0 detail
@@ -142,11 +154,11 @@ z2_fw_run_restore() {
         Z2_FW_LAST_RESTORE_DETAIL="unsafe firewall diagnostic path"
         return 1
     }
-    if [ -e "$capture" ] || [ -L "$capture" ]; then
+    z2_fw_claim_scratch_path "$capture" || {
         Z2_FW_LAST_FAILURE_CLASS=STATE_UNAVAILABLE
         Z2_FW_LAST_RESTORE_DETAIL="firewall diagnostic path already exists"
         return 1
-    fi
+    }
     umask 077
     if ! : > "$capture" || ! chmod 0600 "$capture" 2>/dev/null; then
         rm -f "$capture" 2>/dev/null
@@ -400,11 +412,11 @@ z2_fw_apply_restore() {
         Z2_FW_ERROR_DETAIL="unsafe firewall batch path"
         return 1
     }
-    if [ -e "$batch" ] || [ -L "$batch" ]; then
+    z2_fw_claim_scratch_path "$batch" || {
         Z2_FW_FAILURE_CLASS=STATE_UNAVAILABLE
         Z2_FW_ERROR_DETAIL="firewall batch path already exists"
         return 1
-    fi
+    }
     umask 077
     z2_fw_write_batch "$batch" "$connbytes" || {
         rm -f "$batch" 2>/dev/null
@@ -660,7 +672,7 @@ z2_fw_apply_cleanup() {
     batch="$STATE_DIR/tmp/firewall-cleanup.${tool}.$$"
     z2_fw_ensure_scratch_dir || return 1
     state_path_is_managed_file "$batch" || return 1
-    [ ! -e "$batch" ] && [ ! -L "$batch" ] || return 1
+    z2_fw_claim_scratch_path "$batch" || return 1
     umask 077
     if ! z2_fw_write_cleanup_batch "$batch" ||
        ! chmod 0600 "$batch" 2>/dev/null; then

@@ -90,7 +90,7 @@ P5. **Root-manager canon.** `customize.sh` stages and validates; `service.sh`
   Uninstall removes the directory and any staging residue outright, so a
   crashed operation can no longer fence it as an unknown child. Fixes defect 1.
 - **Single boot pass**: when autostart is enabled, `service.sh` no longer runs
-  its own lock+audit recovery cycle — `zapret-start.sh` performs the identical
+  its own lock+audit recovery cycle — `zapret-start.sh` performs the same
   audit under its own lock moments later. The standalone pass runs when the
   module is disabled, when autostart is off, and as the retry path when a
   start is refused *by* recovery state (the only case where discarding an
@@ -99,9 +99,8 @@ P5. **Root-manager canon.** `customize.sh` stages and validates; `service.sh`
   available instead of a 1 Hz `getprop` fork loop.
 - **Read once per transaction**: `read_install_generation_meta` parses the
   installer record once per process while still re-checking the path identity
-  on every call, the compiler publishes the artifact metadata it just wrote so
-  the warm start parses it once instead of five times, and the duplicated
-  status/owner reads on the stop path were collapsed (P1).
+  on every call, and the duplicated status/owner reads on the stop path were
+  collapsed (P1).
 - **Boot-bound status snapshot**: the committed snapshot records the boot it
   describes, and a reader rejects any other — leaving no facts behind. A
   snapshot describes processes and netfilter objects that a reboot destroys,
@@ -111,10 +110,11 @@ P5. **Root-manager canon.** `customize.sh` stages and validates; `service.sh`
   authenticated owner record — or a snapshot committed with a verified ruleset
   — proves this generation published nothing there.
 - **Warm-start dedup**: one compiled-artifact binding check at entry plus one
-  TOCTOU re-check immediately before daemon launch (was 3); metadata parsed
-  once (was 5–6); receipt writer reuses the hashes the checker just computed;
-  `prepare_private_runtime_file` runs once per file; pidfile wait polls at
-  100 ms. (`nfqws2.cmdline` is still produced: the shell layer never reads it
+  TOCTOU re-check immediately before daemon launch (was 3); the artifact is
+  parsed twice instead of five or six times, because the compiler publishes
+  the metadata it just wrote and the launcher trusts the proof from the
+  binding check; `prepare_private_runtime_file` runs once per file; pidfile
+  wait polls at 100 ms. (`nfqws2.cmdline` is still produced: the shell layer never reads it
   back, but the Android app renders it on the logs screen.)
 - **Stop dedup**: status facts restored once instead of three times, the owner
   record read once for both the queue number and the ownership decision,
@@ -166,11 +166,14 @@ P5. **Root-manager canon.** `customize.sh` stages and validates; `service.sh`
 
 ## 6. Compatibility
 
-- Update path from 2.1.x: state files (`owner.meta` v8, `runtime.ini`,
-  `install-generation.meta`, status snapshot) are unchanged. Obsolete files
-  from older versions (`legacy-direct-rules.migrated`, `firewall-teardown.wal`,
-  track journals, legacy rollback snapshots) are deleted on sight by boot
-  recovery and uninstall.
+- Update path from 2.1.x: `owner.meta` (v8), `runtime.ini`, presets, hostlists
+  and `install-generation.meta` are unchanged. The status snapshot gained a
+  `boot_id` key and a 2.1.x snapshot is therefore rejected — which is the
+  correct outcome, since activating a new module package requires a reboot and
+  every snapshot predating it describes processes and rules that no longer
+  exist. Obsolete files from older versions (`legacy-direct-rules.migrated`,
+  `firewall-teardown.wal`, track journals, legacy rollback snapshots) are
+  deleted on sight by boot recovery and uninstall.
 - Status wire protocols (v1–v6), the error envelope, and all `Z2_*` machine
   outputs are unchanged; the Android app from 2.1.x keeps working against a
   2.2.0 module and vice versa.

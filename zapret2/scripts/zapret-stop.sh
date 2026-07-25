@@ -29,7 +29,11 @@ write_stop_status() {
     STATUS_ERRORS="$message"; STATUS_OWN_PID=""; STATUS_OWN_PID_STARTTIME=""
     STATUS_OWN_ARGV_SHA256=""; STATUS_OWNER_GENERATION=""
     STATUS_PID_VERIFIED=0; STATUS_OWNER_METADATA_VERIFIED=0
-    STATUS_RULESET_VERIFIED=1; STATUS_RULES_EXPECTED=0; STATUS_QNUM="${STOP_QNUM:-${STATUS_QNUM:-${QNUM:-}}}"
+    # Only a completed stop proved the owned ruleset is gone. A failed stop
+    # records what it could not prove, and claiming verification here would
+    # let the next stop read this snapshot as proof there is nothing left.
+    if [ "$state" = stopped ]; then STATUS_RULESET_VERIFIED=1; else STATUS_RULESET_VERIFIED=0; fi
+    STATUS_RULES_EXPECTED=0; STATUS_QNUM="${STOP_QNUM:-${STATUS_QNUM:-${QNUM:-}}}"
     STATUS_IPV4_ACTIVE=0; STATUS_IPV6_ACTIVE=0; STATUS_CHAINS=0; STATUS_ANCHORS=0
     STATUS_IPV4_RULES=0; STATUS_IPV6_RULES=0
     STATUS_NFQUEUE_SUPPORTED="${STATUS_NFQUEUE_SUPPORTED:-0}"
@@ -121,7 +125,8 @@ main() {
         STOP_QNUM="$OWNER_STATE_QNUM"
         CLEANUP_IPV6_OWNERSHIP_EXPECTED="${OWNER_STATE_IPV6_ACTIVE:-1}"
         IPV6_PUBLICATION_RECORDED="${OWNER_STATE_IPV6_ACTIVE:-0}"
-    elif [ -n "${STATUS_FILE_STATUS:-}" ] && [ "${STATUS_FILE_RULESET_VERIFIED:-0}" = 1 ]; then
+    elif { [ "${STATUS_FILE_STATUS:-}" = ok ] || [ "${STATUS_FILE_STATUS:-}" = stopped ]; } &&
+         [ "${STATUS_FILE_RULESET_VERIFIED:-0}" = 1 ]; then
         CLEANUP_IPV6_OWNERSHIP_EXPECTED="${STATUS_FILE_IPV6_ACTIVE:-1}"
         IPV6_PUBLICATION_RECORDED="${STATUS_FILE_IPV6_ACTIVE:-0}"
     elif [ -n "${STATUS_FILE_STATUS:-}" ]; then

@@ -410,7 +410,8 @@ STOP_QNUM="${STATUS_FILE_QNUM:-${QNUM:-}}"
 # status facts default to zero when no snapshot exists, so absence of evidence
 # must not read as evidence of absence.
 CLEANUP_IPV6_OWNERSHIP_EXPECTED=1
-if [ -n "${STATUS_FILE_STATUS:-}" ] && [ "${STATUS_FILE_RULESET_VERIFIED:-0}" = 1 ]; then
+if { [ "${STATUS_FILE_STATUS:-}" = ok ] || [ "${STATUS_FILE_STATUS:-}" = stopped ]; } &&
+   [ "${STATUS_FILE_RULESET_VERIFIED:-0}" = 1 ]; then
     CLEANUP_IPV6_OWNERSHIP_EXPECTED="$STATUS_FILE_IPV6_ACTIVE"
 fi
 if read_owner_state >/dev/null 2>&1; then
