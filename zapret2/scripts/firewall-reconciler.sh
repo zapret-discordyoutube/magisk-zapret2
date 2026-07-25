@@ -11,6 +11,7 @@ Z2_FW_OUT_CHAIN="${Z2_FW_OUT_CHAIN:-ZAPRET2_OUT}"
 Z2_FW_IN_CHAIN="${Z2_FW_IN_CHAIN:-ZAPRET2_IN}"
 Z2_FW_BACKEND=""
 Z2_FW_CONNBYTES=0
+Z2_FW_MULTIPORT=1
 Z2_FW_RULES=0
 Z2_FW_CHAINS=0
 Z2_FW_ANCHORS=0
@@ -105,6 +106,25 @@ z2_fw_lock_retry_pause() {
 z2_fw_diagnostic_is_connbytes_unsupported() {
     case "$1" in
         *[Cc]onnbytes*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Two independent signals are required here, unlike connbytes. A kernel without
+# xt_multiport makes iptables report the missing extension and then reject the
+# port argument it can no longer parse, so the port complaint arrives together
+# with the extension name. That complaint on its own is also exactly what a
+# genuinely malformed port list produces, and silently rebuilding the intended
+# topology because of it would hide a broken configuration instead of a missing
+# kernel module.
+z2_fw_diagnostic_is_multiport_unsupported() {
+    case "$1" in
+        *[Mm]ultiport*) ;;
+        *) return 1 ;;
+    esac
+    case "$1" in
+        *not\ supported*|*missing\ kernel\ module*|*no\ kernel\ module*|\
+        *load\ match*|*[Uu]nknown\ option*|*invalid\ port/service*) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -354,34 +374,101 @@ z2_fw_emit_baseline_cleanup() {
     fi
 }
 
-z2_fw_emit_batch_rule() {
-    local chain="$1" proto="$2" direction="$3" ports="$4"
-    local packet_count="$5" cb_dir="$6" connbytes="$7"
-    [ -n "$ports" ] || return 0
-    printf '%s' "-A $chain -p $proto -m multiport"
-    if [ "$direction" = out ]; then
-        printf '%s' " --dports $ports"
-    else
-        printf '%s' " --sports $ports"
-    fi
+# multiport accepts at most 15 values and a range spends two of them. That is a
+# userspace parser limit rather than a kernel capability, so it is computed
+# before the batch is written instead of being discovered from a rejection.
+Z2_FW_MULTIPORT_MAX_VALUES=15
+
+z2_fw_port_intervals() {
+    local rest="$1" token
+    while [ -n "$rest" ]; do
+        case "$rest" in
+            *,*) token="${rest%%,*}"; rest="${rest#*,}" ;;
+            *) token="$rest"; rest="" ;;
+        esac
+        [ -z "$token" ] || printf '%s\n' "$token"
+    done
+}
+
+z2_fw_port_list_weight() {
+    local list="$1" weight=0 token
+    for token in $(z2_fw_port_intervals "$list"); do
+        case "$token" in
+            *:*) weight=$((weight + 2)) ;;
+            *) weight=$((weight + 1)) ;;
+        esac
+    done
+    printf '%s\n' "$weight"
+}
+
+z2_fw_port_interval_count() {
+    local count=0 token
+    for token in $(z2_fw_port_intervals "$1"); do
+        count=$((count + 1))
+    done
+    printf '%s\n' "$count"
+}
+
+# Both families are authored from the same port lists, so one list over the
+# limit disqualifies multiport for the whole ruleset rather than for one rule.
+z2_fw_multiport_fits() {
+    local tcp udp
+    tcp="$(z2_fw_port_list_weight "$PORTS_TCP")" || return 1
+    udp="$(z2_fw_port_list_weight "$PORTS_UDP")" || return 1
+    [ "$tcp" -le "$Z2_FW_MULTIPORT_MAX_VALUES" ] &&
+        [ "$udp" -le "$Z2_FW_MULTIPORT_MAX_VALUES" ]
+}
+
+z2_fw_emit_rule_tail() {
+    local packet_count="$1" cb_dir="$2" connbytes="$3"
     if [ "$connbytes" = 1 ]; then
         printf '%s' " -m connbytes --connbytes 1:$packet_count --connbytes-dir $cb_dir --connbytes-mode packets"
     fi
     printf '%s\n' " -m mark ! --mark $DESYNC_MARK/$DESYNC_MARK -j NFQUEUE --queue-num $QNUM --queue-bypass"
 }
 
+z2_fw_emit_batch_rule() {
+    local chain="$1" proto="$2" direction="$3" ports="$4"
+    local packet_count="$5" cb_dir="$6" connbytes="$7" multiport="${8:-1}"
+    local token
+    [ -n "$ports" ] || return 0
+    if [ "$multiport" = 1 ]; then
+        printf '%s' "-A $chain -p $proto -m multiport"
+        if [ "$direction" = out ]; then
+            printf '%s' " --dports $ports"
+        else
+            printf '%s' " --sports $ports"
+        fi
+        z2_fw_emit_rule_tail "$packet_count" "$cb_dir" "$connbytes"
+        return 0
+    fi
+    # A port list has no single-rule form without xt_multiport, so each
+    # interval becomes its own rule. The protocol match provides --dport and
+    # --sport natively, and both accept one port or one range, so this form
+    # needs no extension beyond the one -p already loaded.
+    for token in $(z2_fw_port_intervals "$ports"); do
+        printf '%s' "-A $chain -p $proto"
+        if [ "$direction" = out ]; then
+            printf '%s' " --dport $token"
+        else
+            printf '%s' " --sport $token"
+        fi
+        z2_fw_emit_rule_tail "$packet_count" "$cb_dir" "$connbytes"
+    done
+}
+
 z2_fw_write_batch() {
-    local path="$1" connbytes="$2"
+    local path="$1" connbytes="$2" multiport="${3:-1}"
     {
         printf '%s\n' '*mangle'
         z2_fw_emit_baseline_cleanup
         printf ':%s - [0:0]\n' "$Z2_FW_OUT_CHAIN"
         [ "$connbytes" != 1 ] || printf ':%s - [0:0]\n' "$Z2_FW_IN_CHAIN"
-        z2_fw_emit_batch_rule "$Z2_FW_OUT_CHAIN" tcp out "$PORTS_TCP" "$TCP_PKT_OUT" original "$connbytes"
-        z2_fw_emit_batch_rule "$Z2_FW_OUT_CHAIN" udp out "$PORTS_UDP" "$UDP_PKT_OUT" original "$connbytes"
+        z2_fw_emit_batch_rule "$Z2_FW_OUT_CHAIN" tcp out "$PORTS_TCP" "$TCP_PKT_OUT" original "$connbytes" "$multiport"
+        z2_fw_emit_batch_rule "$Z2_FW_OUT_CHAIN" udp out "$PORTS_UDP" "$UDP_PKT_OUT" original "$connbytes" "$multiport"
         if [ "$connbytes" = 1 ]; then
-            z2_fw_emit_batch_rule "$Z2_FW_IN_CHAIN" tcp in "$PORTS_TCP" "$TCP_PKT_IN" reply 1
-            z2_fw_emit_batch_rule "$Z2_FW_IN_CHAIN" udp in "$PORTS_UDP" "$UDP_PKT_IN" reply 1
+            z2_fw_emit_batch_rule "$Z2_FW_IN_CHAIN" tcp in "$PORTS_TCP" "$TCP_PKT_IN" reply 1 "$multiport"
+            z2_fw_emit_batch_rule "$Z2_FW_IN_CHAIN" udp in "$PORTS_UDP" "$UDP_PKT_IN" reply 1 "$multiport"
         fi
         printf '%s\n' "-A OUTPUT -j $Z2_FW_OUT_CHAIN"
         [ "$connbytes" != 1 ] || printf '%s\n' "-A INPUT -j $Z2_FW_IN_CHAIN"
@@ -399,7 +486,7 @@ z2_fw_write_cleanup_batch() {
 }
 
 z2_fw_apply_restore() {
-    local tool="$1" connbytes="$2" restore batch
+    local tool="$1" connbytes="$2" multiport="${3:-1}" restore batch
     Z2_FW_FAILURE_CLASS=""
     Z2_FW_ERROR_DETAIL=""
     restore="$(z2_fw_restore_command "$tool")" || return 2
@@ -421,7 +508,7 @@ z2_fw_apply_restore() {
         return 1
     }
     umask 077
-    z2_fw_write_batch "$batch" "$connbytes" || {
+    z2_fw_write_batch "$batch" "$connbytes" "$multiport" || {
         rm -f "$batch" 2>/dev/null
         Z2_FW_FAILURE_CLASS=STATE_UNAVAILABLE
         Z2_FW_ERROR_DETAIL="cannot create firewall batch"
@@ -466,27 +553,34 @@ z2_fw_apply_restore() {
 }
 
 z2_fw_expected_rule_count() {
-    local connbytes="$1" per_direction=0
-    [ -z "$PORTS_TCP" ] || per_direction=$((per_direction + 1))
-    [ -z "$PORTS_UDP" ] || per_direction=$((per_direction + 1))
+    local connbytes="$1" multiport="${2:-1}" per_direction=0 tcp udp
+    if [ "$multiport" = 1 ]; then
+        [ -z "$PORTS_TCP" ] || per_direction=$((per_direction + 1))
+        [ -z "$PORTS_UDP" ] || per_direction=$((per_direction + 1))
+    else
+        # One rule per interval, so the published count is the interval count.
+        tcp="$(z2_fw_port_interval_count "$PORTS_TCP")" || return 1
+        udp="$(z2_fw_port_interval_count "$PORTS_UDP")" || return 1
+        per_direction=$((tcp + udp))
+    fi
     printf '%s\n' $((per_direction * (1 + connbytes)))
 }
 
 z2_fw_verify_family() {
-    local tool="$1" connbytes="$2" listing verification
+    local tool="$1" connbytes="$2" multiport="${3:-1}" listing verification
     local out_tcp out_udp in_tcp in_udp
     Z2_FW_VERIFY_DETAIL=""
     listing="$("$tool" -t mangle -S 2>/dev/null)" || {
         Z2_FW_VERIFY_DETAIL="$tool mangle snapshot command failed"
         return 1
     }
-    out_tcp="$(z2_fw_emit_batch_rule "$Z2_FW_OUT_CHAIN" tcp out "$PORTS_TCP" "$TCP_PKT_OUT" original "$connbytes")" || return 1
-    out_udp="$(z2_fw_emit_batch_rule "$Z2_FW_OUT_CHAIN" udp out "$PORTS_UDP" "$UDP_PKT_OUT" original "$connbytes")" || return 1
+    out_tcp="$(z2_fw_emit_batch_rule "$Z2_FW_OUT_CHAIN" tcp out "$PORTS_TCP" "$TCP_PKT_OUT" original "$connbytes" "$multiport")" || return 1
+    out_udp="$(z2_fw_emit_batch_rule "$Z2_FW_OUT_CHAIN" udp out "$PORTS_UDP" "$UDP_PKT_OUT" original "$connbytes" "$multiport")" || return 1
     in_tcp=""
     in_udp=""
     if [ "$connbytes" = 1 ]; then
-        in_tcp="$(z2_fw_emit_batch_rule "$Z2_FW_IN_CHAIN" tcp in "$PORTS_TCP" "$TCP_PKT_IN" reply 1)" || return 1
-        in_udp="$(z2_fw_emit_batch_rule "$Z2_FW_IN_CHAIN" udp in "$PORTS_UDP" "$UDP_PKT_IN" reply 1)" || return 1
+        in_tcp="$(z2_fw_emit_batch_rule "$Z2_FW_IN_CHAIN" tcp in "$PORTS_TCP" "$TCP_PKT_IN" reply 1 "$multiport")" || return 1
+        in_udp="$(z2_fw_emit_batch_rule "$Z2_FW_IN_CHAIN" udp in "$PORTS_UDP" "$UDP_PKT_IN" reply 1 "$multiport")" || return 1
     fi
     # The backend re-renders published rules in its own save format: match
     # option order, --dports vs --dport for a single port, and mark mask
@@ -499,8 +593,27 @@ z2_fw_verify_family() {
         -v connbytes="$connbytes" \
         -v out_tcp="$out_tcp" -v out_udp="$out_udp" \
         -v in_tcp="$in_tcp" -v in_udp="$in_udp" '
-        function required_seen(expected, seen) {
-            return expected == "" ? seen == 0 : seen == 1
+        # Without multiport a port list becomes one rule per interval, so a
+        # single expected signature per chain and protocol is no longer the
+        # shape to compare against. Expectations are loaded as a multiset of
+        # canonical signatures: every published rule must match one, and every
+        # expected one must appear exactly as often as it was authored.
+        function load_expected(rules, chainkey,    n, lines, i, sig) {
+            if (rules == "") return
+            n = split(rules, lines, "\n")
+            for (i = 1; i <= n; i++) {
+                if (lines[i] == "") continue
+                sig = canon(lines[i])
+                if (sig == "") { expected_bad = 1; return }
+                exp_count[sig]++
+                exp_total[chainkey]++
+            }
+        }
+        function expectations_met(chainkey,    sig) {
+            for (sig in exp_count)
+                if (index(sig, "-A " chainkey " ") == 1 &&
+                    seen_count[sig] != exp_count[sig]) return 0
+            return 1
         }
         function canon(line,    n, t, i, tok, val, chain, proto, portskey,
                        ports, cbrange, cbdir, cbmode, markval, markinv,
@@ -577,17 +690,11 @@ z2_fw_verify_family() {
             if (bypass) sig = sig " bypass"
             return sig
         }
-        function canon_expected(rule) {
-            if (rule == "") return ""
-            rule = canon(rule)
-            if (rule == "") expected_bad = 1
-            return rule
-        }
         BEGIN {
-            c_out_tcp = canon_expected(out_tcp)
-            c_out_udp = canon_expected(out_udp)
-            c_in_tcp = canon_expected(in_tcp)
-            c_in_udp = canon_expected(in_udp)
+            load_expected(out_tcp, out)
+            load_expected(out_udp, out)
+            load_expected(in_tcp, inchain)
+            load_expected(in_udp, inchain)
             if (expected_bad) {
                 print "EXPECTED_RULE_UNPARSEABLE"
                 bail = 1
@@ -599,15 +706,13 @@ z2_fw_verify_family() {
         $1 == "-A" && $2 == out {
             out_rules++
             sig = canon($0)
-            if (sig != "" && sig == c_out_tcp) out_tcp_seen++
-            else if (sig != "" && sig == c_out_udp) out_udp_seen++
+            if (sig != "" && (sig in exp_count)) seen_count[sig]++
             else bad=1
         }
         $1 == "-A" && $2 == inchain {
             in_rules++
             sig = canon($0)
-            if (sig != "" && sig == c_in_tcp) in_tcp_seen++
-            else if (sig != "" && sig == c_in_udp) in_udp_seen++
+            if (sig != "" && (sig in exp_count)) seen_count[sig]++
             else bad=1
         }
         $1 == "-A" {
@@ -626,22 +731,18 @@ z2_fw_verify_family() {
         }
         END {
             if (bail) exit 1
-            expected_out=(c_out_tcp != "") + (c_out_udp != "")
-            expected_in=(c_in_tcp != "") + (c_in_udp != "")
+            expected_out=exp_total[out]
+            expected_in=exp_total[inchain]
             if (bad) reason="FOREIGN_OR_UNEXPECTED_RULE"
             else if (out_chain != 1) reason="OUT_CHAIN_COUNT:" out_chain
             else if (out_anchor != 1) reason="OUT_ANCHOR_COUNT:" out_anchor
             else if (out_rules != expected_out) reason="OUT_RULE_COUNT:" out_rules
-            else if (!required_seen(c_out_tcp, out_tcp_seen) ||
-                     !required_seen(c_out_udp, out_udp_seen))
-                reason="OUT_RULE_MISMATCH"
+            else if (!expectations_met(out)) reason="OUT_RULE_MISMATCH"
             if (connbytes == 1) {
                 if (reason == "" && in_chain != 1) reason="INPUT_CHAIN_COUNT:" in_chain
                 else if (reason == "" && in_anchor != 1) reason="INPUT_ANCHOR_COUNT:" in_anchor
                 else if (reason == "" && in_rules != expected_in) reason="INPUT_RULE_COUNT:" in_rules
-                else if (reason == "" &&
-                         (!required_seen(c_in_tcp, in_tcp_seen) ||
-                          !required_seen(c_in_udp, in_udp_seen)))
+                else if (reason == "" && !expectations_met(inchain))
                     reason="INPUT_RULE_MISMATCH"
             } else {
                 if (reason == "" &&
@@ -658,7 +759,7 @@ z2_fw_verify_family() {
         return 1
     }
     Z2_FW_CONNBYTES="$connbytes"
-    Z2_FW_RULES="$(z2_fw_expected_rule_count "$connbytes")" || return 1
+    Z2_FW_RULES="$(z2_fw_expected_rule_count "$connbytes" "$multiport")" || return 1
     Z2_FW_CHAINS=$((1 + connbytes))
     Z2_FW_ANCHORS=$((1 + connbytes))
     return 0
@@ -723,8 +824,9 @@ z2_fw_cleanup_family() {
 
 z2_fw_reconcile_family() {
     local tool="$1" baseline_mode="${2:-owned}" apply_rc candidate_detail verify_detail
+    local connbytes multiport
     case "$baseline_mode" in owned|audited) ;; *) return 2 ;; esac
-    Z2_FW_BACKEND=""; Z2_FW_CONNBYTES=0
+    Z2_FW_BACKEND=""; Z2_FW_CONNBYTES=0; Z2_FW_MULTIPORT=1
     Z2_FW_RULES=0; Z2_FW_CHAINS=0; Z2_FW_ANCHORS=0
     Z2_FW_FAILURE_CLASS=""; Z2_FW_ERROR_DETAIL=""; Z2_FW_FALLBACK_DETAIL=""
     command -v "$tool" >/dev/null 2>&1 || {
@@ -750,59 +852,72 @@ z2_fw_reconcile_family() {
             return 1
         }
     fi
-    if z2_fw_apply_restore "$tool" 1; then
-        apply_rc=0
-    else
-        apply_rc=$?
-    fi
-    if [ "$apply_rc" = 0 ]; then
-        if ! z2_fw_verify_family "$tool" 1; then
-            verify_detail="$Z2_FW_VERIFY_DETAIL"
-            z2_fw_cleanup_family "$tool" >/dev/null 2>&1 || true
-            Z2_FW_FAILURE_CLASS=POSTCONDITION_FAILED
-            Z2_FW_ERROR_DETAIL="$verify_detail"
-            return 1
+    # Two optional capabilities, each with its own latch. A rejection may only
+    # retire the capability its own diagnostic names, and each is retired at
+    # most once, so at most two downgrades happen and neither can be undone by
+    # a later failure. Anything the backend rejects for a reason it does not
+    # name is a publication error: silently rebuilding a different topology
+    # would hide a broken configuration instead of a missing kernel module.
+    #
+    # The two fail at different phases. iptables-restore --test parses in
+    # userspace but asks the kernel for match revisions while doing so, which
+    # is where a missing xt_multiport surfaces; connbytes passes the test phase
+    # and is rejected only at COMMIT. Legacy restore submits the whole table in
+    # one atomic replace, so a rejected COMMIT leaves the pre-transaction
+    # state, and post-publication verification still gates every result.
+    connbytes=1
+    multiport=1
+    # The 15-value limit is a parser rule, not a capability, so it is settled
+    # before the first attempt rather than learned from a rejection.
+    z2_fw_multiport_fits || {
+        multiport=0
+        Z2_FW_FALLBACK_DETAIL="port list exceeds the $Z2_FW_MULTIPORT_MAX_VALUES values multiport accepts"
+    }
+    while :; do
+        if z2_fw_apply_restore "$tool" "$connbytes" "$multiport"; then
+            apply_rc=0
+        else
+            apply_rc=$?
         fi
-        Z2_FW_CONNBYTES=1
-        Z2_FW_FAILURE_CLASS=""; Z2_FW_ERROR_DETAIL=""
-        return 0
-    fi
-    candidate_detail="$Z2_FW_ERROR_DETAIL"
-    # Candidate rejection is a capability signal. So is a COMMIT failure that
-    # names the connbytes extension: iptables-restore --test validates in
-    # userspace only, so a kernel without the connbytes match (or its required
-    # revision) accepts the test phase and rejects the ruleset only at COMMIT.
-    # Legacy restore submits the whole table in one atomic replace, so a
-    # rejected COMMIT leaves the pre-transaction state; post-publication
-    # verification still gates the fallback result. Any other COMMIT or
-    # postcondition failure is a publication error and must not silently
-    # alter the intended topology.
-    case "$apply_rc" in
-        4) ;;
-        *)
-            # Match the raw backend stderr: the wrapped detail always
-            # contains a "connbytes=1" marker of its own.
-            [ "$Z2_FW_FAILURE_CLASS" = PUBLICATION_FAILED ] &&
-                z2_fw_diagnostic_is_connbytes_unsupported "$Z2_FW_LAST_RESTORE_DETAIL" ||
+        if [ "$apply_rc" = 0 ]; then
+            if ! z2_fw_verify_family "$tool" "$connbytes" "$multiport"; then
+                verify_detail="$Z2_FW_VERIFY_DETAIL"
+                z2_fw_cleanup_family "$tool" >/dev/null 2>&1 || true
+                Z2_FW_FAILURE_CLASS=POSTCONDITION_FAILED
+                Z2_FW_ERROR_DETAIL="$verify_detail"
                 return 1
-            ;;
-    esac
-    if z2_fw_apply_restore "$tool" 0; then
-        if ! z2_fw_verify_family "$tool" 0; then
-            verify_detail="$Z2_FW_VERIFY_DETAIL"
-            z2_fw_cleanup_family "$tool" >/dev/null 2>&1 || true
-            Z2_FW_FAILURE_CLASS=POSTCONDITION_FAILED
-            Z2_FW_ERROR_DETAIL="$verify_detail"
+            fi
+            Z2_FW_CONNBYTES="$connbytes"
+            Z2_FW_MULTIPORT="$multiport"
+            Z2_FW_FAILURE_CLASS=""; Z2_FW_ERROR_DETAIL=""
+            return 0
+        fi
+        candidate_detail="$Z2_FW_ERROR_DETAIL"
+        # A candidate rejection at test is a capability signal by itself; any
+        # other failure has to be a publication failure to be one at all.
+        if [ "$apply_rc" != 4 ] && [ "$Z2_FW_FAILURE_CLASS" != PUBLICATION_FAILED ]; then
             return 1
         fi
-        Z2_FW_CONNBYTES=0
-        Z2_FW_FALLBACK_DETAIL="$candidate_detail"
-        Z2_FW_FAILURE_CLASS=""; Z2_FW_ERROR_DETAIL=""
-        return 0
-    fi
-    if [ -z "$Z2_FW_ERROR_DETAIL" ]; then
-        Z2_FW_FAILURE_CLASS=POSTCONDITION_FAILED
-        Z2_FW_ERROR_DETAIL="$tool post-publication verification failed (connbytes=0)"
-    fi
-    return 1
+        # Match the raw backend stderr: the wrapped detail carries markers of
+        # its own. The named capability wins, so a multiport rejection never
+        # spends the connbytes latch on its way down.
+        if [ "$connbytes" = 1 ] &&
+           z2_fw_diagnostic_is_connbytes_unsupported "$Z2_FW_LAST_RESTORE_DETAIL"; then
+            connbytes=0
+        elif [ "$multiport" = 1 ] &&
+             z2_fw_diagnostic_is_multiport_unsupported "$Z2_FW_LAST_RESTORE_DETAIL"; then
+            multiport=0
+        elif [ "$apply_rc" = 4 ] && [ "$connbytes" = 1 ]; then
+            # An unnamed test rejection retires the richer topology first,
+            # which is the only one whose absence a kernel can survive.
+            connbytes=0
+        else
+            if [ -z "$Z2_FW_ERROR_DETAIL" ]; then
+                Z2_FW_FAILURE_CLASS=POSTCONDITION_FAILED
+                Z2_FW_ERROR_DETAIL="$tool post-publication verification failed (connbytes=$connbytes, multiport=$multiport)"
+            fi
+            return 1
+        fi
+        Z2_FW_FALLBACK_DETAIL="${Z2_FW_FALLBACK_DETAIL:+$Z2_FW_FALLBACK_DETAIL; }$candidate_detail"
+    done
 }

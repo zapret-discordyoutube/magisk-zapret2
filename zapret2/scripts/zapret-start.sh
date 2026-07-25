@@ -28,6 +28,8 @@ FAST_REPLACE_FIREWALL_FINGERPRINT=""
 FAST_REPLACE_IPV6_ACTIVE=0
 FAST_REPLACE_IPV4_CONNBYTES=0
 FAST_REPLACE_IPV6_CONNBYTES=0
+FAST_REPLACE_IPV4_MULTIPORT=1
+FAST_REPLACE_IPV6_MULTIPORT=1
 
 log_msg() {
     append_lifecycle_log "[INFO] $(date '+%Y-%m-%d %H:%M:%S') $1"
@@ -252,6 +254,11 @@ capture_fast_replace_baseline() {
     FAST_REPLACE_IPV6_ACTIVE="$OWNER_STATE_IPV6_ACTIVE"
     FAST_REPLACE_IPV4_CONNBYTES="$OWNER_STATE_IPV4_CONNBYTES"
     FAST_REPLACE_IPV6_CONNBYTES="$OWNER_STATE_IPV6_CONNBYTES"
+    # A fast replace reuses the topology the previous generation published, so
+    # it inherits the extensions that generation actually got, not the ones the
+    # module would like to have.
+    FAST_REPLACE_IPV4_MULTIPORT="$OWNER_STATE_IPV4_MULTIPORT"
+    FAST_REPLACE_IPV6_MULTIPORT="$OWNER_STATE_IPV6_MULTIPORT"
     FAST_REPLACE_BASELINE=1
 }
 
@@ -263,10 +270,12 @@ prepare_fast_replace_candidate() {
     fi
     [ "$desired_ipv6" = "$FAST_REPLACE_IPV6_ACTIVE" ] || return 1
 
-    IPV4_NFQUEUE=1; IPV4_QUEUE_BYPASS=1; IPV4_MULTIPORT=1; IPV4_MARK=1
+    IPV4_NFQUEUE=1; IPV4_QUEUE_BYPASS=1; IPV4_MARK=1
     IPV4_CONNBYTES="$FAST_REPLACE_IPV4_CONNBYTES"
+    IPV4_MULTIPORT="$FAST_REPLACE_IPV4_MULTIPORT"
     IPV6_ACTIVE="$FAST_REPLACE_IPV6_ACTIVE"; IPV6_BUILT="$FAST_REPLACE_IPV6_ACTIVE"
-    IPV6_CONNBYTES="$FAST_REPLACE_IPV6_CONNBYTES"; IPV6_MULTIPORT=1; IPV6_MARK=1
+    IPV6_CONNBYTES="$FAST_REPLACE_IPV6_CONNBYTES"; IPV6_MARK=1
+    IPV6_MULTIPORT="$FAST_REPLACE_IPV6_MULTIPORT"
     OWNER_WRITE_READY=0; OWNER_WRITE_QNUM=""; OWNER_WRITE_SOURCE_GENERATION=""
     prepare_new_firewall_identity || return 1
     prepare_owner_generation_spec 1 "$IPV6_ACTIVE" || return 1
@@ -750,11 +759,20 @@ main() {
             FIREWALL "$(firewall_failure_code)" START_FIREWALL_IPV4 1
     fi
     IPV4_CONNBYTES="$Z2_FW_CONNBYTES"
+    # Published, not assumed. This field used to be a constant 1 while the
+    # ruleset was authored with -m multiport unconditionally, so a kernel
+    # without xt_multiport could not start at all and the record still claimed
+    # the extension had been used.
+    IPV4_MULTIPORT="$Z2_FW_MULTIPORT"
     IPV4_RULES="$Z2_FW_RULES"; IPV4_BUILT=1; IPV4_ACTIVE=1
     FALLBACK_MODE=0
     if [ "$IPV4_CONNBYTES" != 1 ]; then
         FALLBACK_MODE=1
         DIAGNOSTICS="${DIAGNOSTICS}IPv4 connbytes unavailable; using outgoing-only interception; "
+    fi
+    if [ "$IPV4_MULTIPORT" != 1 ]; then
+        FALLBACK_MODE=1
+        DIAGNOSTICS="${DIAGNOSTICS}IPv4 multiport unavailable; one rule per port interval; "
     fi
 
     IPV6_ACTIVE=0; IPV6_BUILT=0; IPV6_RULES=0
@@ -766,7 +784,12 @@ main() {
         IPV6_TOUCHED=1
         if z2_fw_reconcile_family ip6tables audited; then
             IPV6_CONNBYTES="$Z2_FW_CONNBYTES"
+            IPV6_MULTIPORT="$Z2_FW_MULTIPORT"
             IPV6_RULES="$Z2_FW_RULES"; IPV6_BUILT=1; IPV6_ACTIVE=1
+            if [ "$IPV6_MULTIPORT" != 1 ]; then
+                FALLBACK_MODE=1
+                DIAGNOSTICS="${DIAGNOSTICS}IPv6 multiport unavailable; one rule per port interval; "
+            fi
             if [ "$IPV6_CONNBYTES" != 1 ]; then
                 FALLBACK_MODE=1
                 DIAGNOSTICS="${DIAGNOSTICS}IPv6 connbytes unavailable; using outgoing-only interception; "

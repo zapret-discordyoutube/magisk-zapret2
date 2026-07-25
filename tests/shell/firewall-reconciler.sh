@@ -116,6 +116,18 @@ if [ "${Z2_RESTORE_REJECT_CONNBYTES:-0}" = 1 ] &&
     echo 'connbytes match is unavailable' >&2
     exit 1
 fi
+if [ "${Z2_RESTORE_REJECT_MULTIPORT:-0}" = 1 ] &&
+   printf '%s\n' "$payload" | grep -q -- '-m multiport'; then
+    # Verbatim from a device whose kernel lacks xt_multiport: the extension
+    # asks the kernel for a match revision while the batch is still being
+    # parsed, so the failure lands on --test, and the port list it can no
+    # longer parse is reported right after the missing-module warnings.
+    echo 'Warning: Extension multiport revision 0 not supported, missing kernel module?' >&2
+    echo 'Warning: Extension multiport is not supported, missing kernel module?' >&2
+    echo "iptables-restore v1.8.11 (legacy): invalid port/service \`443:65535' specified" >&2
+    echo 'Error occurred at line: 4' >&2
+    exit 2
+fi
 [ "${Z2_RESTORE_REJECT_ALL:-0}" != 1 ] || {
     printf 'vendor parser rejected ruleset\033[31m\n' >&2
     exit 1
@@ -382,6 +394,73 @@ fi
 [ -f "$FW/chain.out" ] || fail "foreign-reference preflight partially mutated its chain"
 unset Z2_FOREIGN_REF
 z2_fw_cleanup_family iptables || fail "stable namespace did not recover after foreign reference disappeared"
+
+# A kernel without xt_multiport rejects the batch while it is still parsing it.
+# The port list has no single-rule form there, so each interval becomes its own
+# rule, the published record stops claiming an extension that was never used,
+# and verification has to accept the wider shape without letting anything
+# foreign through.
+z2_fw_cleanup_family iptables || fail "could not reset before the multiport case"
+PORTS_TCP=80,443
+PORTS_UDP=443:65535
+Z2_RESTORE_REJECT_MULTIPORT=1
+export Z2_RESTORE_REJECT_MULTIPORT
+z2_fw_reconcile_family iptables ||
+    fail "a kernel without multiport could not publish any ruleset at all"
+[ "$Z2_FW_MULTIPORT" = 0 ] || fail "the published record still claims the multiport extension"
+[ "$Z2_FW_CONNBYTES" = 1 ] ||
+    fail "a multiport rejection spent the connbytes latch its diagnostic never names"
+[ "$Z2_FW_RULES" = 6 ] ||
+    fail "expected one rule per interval per direction, got $Z2_FW_RULES"
+if grep -q -- '-m multiport' "$FW/rules.out"; then
+    fail "the published ruleset still uses the extension the kernel rejected"
+fi
+grep -Fq -- '--dport 80 ' "$FW/rules.out" || fail "the 80 interval got no rule of its own"
+grep -Fq -- '--dport 443 ' "$FW/rules.out" || fail "the 443 interval got no rule of its own"
+grep -Fq -- '--dport 443:65535 ' "$FW/rules.out" || fail "the UDP range was not published"
+z2_fw_verify_family iptables "$Z2_FW_CONNBYTES" "$Z2_FW_MULTIPORT" ||
+    fail "the split ruleset did not verify"
+cp "$FW/rules.out" "$FW/rules.out.split"
+printf '%s\n' '-A ZAPRET2_OUT -p tcp --dport 8080 -j RETURN' >> "$FW/rules.out"
+if z2_fw_verify_family iptables "$Z2_FW_CONNBYTES" "$Z2_FW_MULTIPORT"; then
+    fail "a foreign rule was accepted once the ruleset was split per interval"
+fi
+mv "$FW/rules.out.split" "$FW/rules.out"
+unset Z2_RESTORE_REJECT_MULTIPORT
+
+# The 15-value limit is a userspace parser rule, not a kernel capability, so a
+# list that cannot fit never reaches the backend as a multiport rule at all —
+# there is nothing to reject and nothing to fall back from.
+z2_fw_cleanup_family iptables || fail "could not reset before the port limit case"
+PORTS_TCP=1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16
+PORTS_UDP=443
+: > "$FW/restore.count"
+printf '0\n' > "$FW/restore.count"
+z2_fw_reconcile_family iptables || fail "an oversized port list could not publish"
+[ "$Z2_FW_MULTIPORT" = 0 ] || fail "a port list past the limit was still offered to multiport"
+[ "$(grep -c -- '-A ZAPRET2_OUT ' "$FW/rules.out")" = 17 ] ||
+    fail "an oversized list did not become one rule per interval"
+[ "$(cat "$FW/restore.count")" = 2 ] ||
+    fail "the limit was discovered by rejection instead of being computed"
+
+# A range spends two of the fifteen. Eight ranges are eight intervals but weigh
+# sixteen, so counting intervals instead of values would wrongly keep multiport.
+z2_fw_cleanup_family iptables || fail "could not reset before the range weight case"
+PORTS_TCP=1:2,3:4,5:6,7:8,9:10,11:12,13:14,15:16
+PORTS_UDP=443
+z2_fw_reconcile_family iptables || fail "eight ranges could not publish"
+[ "$Z2_FW_MULTIPORT" = 0 ] || fail "a range was counted as one value instead of two"
+
+# With the extension present and the list within the limit nothing changes.
+z2_fw_cleanup_family iptables || fail "could not reset before the unchanged case"
+PORTS_TCP=80,443
+PORTS_UDP=443:65535
+z2_fw_reconcile_family iptables || fail "a kernel with multiport failed to publish"
+[ "$Z2_FW_MULTIPORT" = 1 ] || fail "multiport was abandoned on a kernel that supports it"
+[ "$Z2_FW_RULES" = 4 ] || fail "the multiport ruleset changed shape"
+grep -q -- '-m multiport' "$FW/rules.out" ||
+    fail "the extension was not used where it is available"
+z2_fw_cleanup_family iptables || fail "could not tear down after the multiport cases"
 
 z2_fw_restore_command() { printf '%s\n' missing-iptables-restore; }
 set +e
