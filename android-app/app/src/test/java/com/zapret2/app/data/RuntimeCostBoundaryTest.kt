@@ -286,7 +286,7 @@ class RuntimeCostBoundaryTest {
 
     @Test
     fun canonicalStagingRelease_keepsActivationOwnedByTheRootManager() {
-        assertEquals("7", ModulePackageContract.LIFECYCLE_CONTRACT_VERSION)
+        assertEquals("8", ModulePackageContract.LIFECYCLE_CONTRACT_VERSION)
         assertTrue(
             repositoryFile("service.sh").readText()
                 .contains("Module package generations are activated only by the root manager at boot."),

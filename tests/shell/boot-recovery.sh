@@ -109,6 +109,21 @@ case "$actual_boot" in
     *) stale_boot=11111111-1111-1111-1111-111111111111 ;;
 esac
 
+# Android resolves `sh` through the boot PATH, which is not the module's to
+# rely on, so service.sh names the interpreter explicitly. Nothing else in the
+# tree asserts that, and the fixture below rewrites the very line that carries
+# it — a regression to a bare `sh` would otherwise be invisible in both
+# directions.
+# Counted, not merely present: service.sh spawns the start script twice — the
+# first attempt and the post-recovery retry — and checking that one of them
+# still names the interpreter would pass while the other quietly regressed.
+start_spawns=$(grep -c 'sh "\$START_SCRIPT"' "$ROOT/service.sh")
+android_spawns=$(grep -c '/system/bin/sh "\$START_SCRIPT"' "$ROOT/service.sh")
+[ "$start_spawns" -ge 1 ] && [ "$start_spawns" = "$android_spawns" ] ||
+    fail "service.sh spawns the start script through an interpreter the boot PATH resolves"
+[ "$(sed -n '1p' "$ROOT/service.sh")" = '#!/system/bin/sh' ] ||
+    fail "service.sh no longer declares the Android interpreter"
+
 prepare_case() {
     mode="$1"
     module="$CASE/$mode/module"
@@ -118,9 +133,11 @@ prepare_case() {
     # The fixture host has no Android /system tree, and the autostart branch
     # is the only one that spawns the start script through it. Rewrite the
     # interpreter in the copy rather than planting a symlink in the host's
-    # /system: the branch under test is the recovery retry, and the production
-    # interpreter is asserted statically by purge-contract.sh. The shebang is
-    # left alone — the fixture invokes the script through an explicit shell.
+    # /system: the branch under test is the recovery retry. Rewriting it is
+    # also why the assertion above exists — this fixture is the only reader of
+    # that line, so it is the one place that has to pin what it rewrites. The
+    # shebang is left alone: the fixture runs the script through an explicit
+    # shell, so it is never consulted.
     sed '1!s|/system/bin/sh|sh|g' "$ROOT/service.sh" > "$module/service.sh"
     cp "$ROOT/zapret2/scripts/common.sh" "$ROOT/zapret2/scripts/firewall-reconciler.sh" \
         "$ROOT/zapret2/scripts/zapret-start.sh" "$module/zapret2/scripts/"
