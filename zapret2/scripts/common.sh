@@ -2980,11 +2980,16 @@ emit_committed_status_v6() {
             owned=0; process=0; active=0
             pid=""; pid_verified=0; pid_start=""; generation=""; owner_verified=0
             ipv4=0; ipv6=0; rules=0; expected=0; ipv4_rules=0; ipv6_rules=0
-            # A stopped receipt asserts a fully verified teardown; that is the
-            # contract the app validates against. A teardown that could not
-            # verify every family withholds the receipt entirely rather than
-            # emitting one that contradicts it.
-            ruleset=1; nfqueue=0; queue_bypass=0
+            # A stopped receipt reports what this teardown actually proved.
+            # Everything measurable is zero either way; the single thing a
+            # teardown that had to skip an unqueryable family cannot do is
+            # certify the ruleset. Carrying that on the receipt is what lets
+            # the operation report its own reservation, instead of staying
+            # silent and leaving the caller to infer it from a second,
+            # separately-raced observation. Unset defaults to withholding the
+            # claim: asserting a verification nobody recorded is the one
+            # direction this field must never fail in.
+            ruleset="${STATUS_RULESET_VERIFIED:-0}"; nfqueue=0; queue_bypass=0
             ;;
         *) return 1 ;;
     esac

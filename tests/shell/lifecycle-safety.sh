@@ -251,6 +251,37 @@ if z2_fw_cleanup_is_unambiguous iptables; then
     fail "foreign reference to the stable namespace passed cleanup preflight"
 fi
 
+# An operation's own receipt must carry that operation's reservation. A stopped
+# receipt that always certified the ruleset forced the caller to withhold the
+# receipt and infer the reservation from a second, separately-raced observation
+# — the extra trip through the snapshot that kept losing it.
+(
+    ZAPRET2_EMIT_STATUS_V6=1; export ZAPRET2_EMIT_STATUS_V6
+    STATUS_RULESET_VERIFIED=0
+    receipt="$(emit_committed_status_v6 stopped idle none)" ||
+        fail "a stop with a reservation could not emit its receipt at all"
+    printf '%s\n' "$receipt" | grep -Fxq 'Z2_STATUS=stopped' ||
+        fail "the reserved receipt did not report a stopped service"
+    printf '%s\n' "$receipt" | grep -Fxq 'Z2_RULESET_VERIFIED=0' ||
+        fail "a stopped receipt certified a ruleset this teardown could not read"
+
+    STATUS_RULESET_VERIFIED=1
+    receipt="$(emit_committed_status_v6 stopped idle none)" ||
+        fail "a fully verified stop could not emit its receipt"
+    printf '%s\n' "$receipt" | grep -Fxq 'Z2_RULESET_VERIFIED=1' ||
+        fail "a fully verified stop lost its verification claim"
+
+    unset STATUS_RULESET_VERIFIED
+    receipt="$(emit_committed_status_v6 stopped idle none)" ||
+        fail "an unrecorded verification could not emit a receipt"
+    printf '%s\n' "$receipt" | grep -Fxq 'Z2_RULESET_VERIFIED=0' ||
+        fail "an unrecorded verification defaulted to asserting one"
+)
+if sed -n '/if \[ "\$STOP_STATUS_COMMITTED" = 1 \]/p' "$ROOT/zapret2/scripts/zapret-stop.sh" |
+   grep -Fq 'FIREWALL_IPV6_SKIPPED_UNPROVEN'; then
+    fail "the stop receipt is withheld again when a family had to be skipped"
+fi
+
 grep -Fq 'boot_id=%s' "$ROOT/zapret2/scripts/common.sh" || fail "owner publication is not boot-bound"
 grep -Fq 'return 2' "$ROOT/zapret2/scripts/common.sh" || fail "tri-state query error is absent"
 grep -Fq 'phase_at_least process-clean' "$ROOT/zapret2/scripts/zapret-full-rollback.sh" || fail "rollback resume gates are absent"

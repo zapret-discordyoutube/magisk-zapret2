@@ -249,11 +249,13 @@ main() {
     trap - HUP INT TERM
     if [ "$rc" -eq 0 ]; then
         log_msg "Zapret2 stopped and owned state is clean"
-        # A stopped receipt asserts a fully verified teardown — the app rejects
-        # one that says otherwise, and would learn nothing from it. When this
-        # stop had to skip a family, withhold the receipt instead: the app then
-        # queries the status directly and sees the real, unreduced picture.
-        if [ "$STOP_STATUS_COMMITTED" = 1 ] && [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" != 1 ]; then
+        # The receipt is this operation's own report, reservation included. It
+        # used to be withheld when a family had to be skipped, because the
+        # caller rejected a stopped receipt that declined to certify the
+        # ruleset — which only moved the problem to the observation the caller
+        # made instead, where the same reservation had to survive a second
+        # trip through the snapshot. It travels on the receipt now.
+        if [ "$STOP_STATUS_COMMITTED" = 1 ]; then
             emit_committed_status_v6 stopped "$receipt_lifecycle_state" "$receipt_owner_kind" || true
         fi
         echo "Zapret2 stopped"
