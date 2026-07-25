@@ -129,6 +129,27 @@ z2_fw_diagnostic_is_multiport_unsupported() {
     esac
 }
 
+# The backend answers a missing extension with several lines of warnings and a
+# parser complaint about whatever it could no longer read. Handed to the user
+# unchanged that reads as a broken configuration. Every match and target the
+# module authors is named here, so the one the kernel refused can be said
+# plainly ahead of the backend's own words — including the three that have no
+# fallback, where naming the extension is the only help there is.
+z2_fw_missing_extension() {
+    local detail="$1" name
+    case "$detail" in
+        *not\ supported*|*missing\ kernel\ module*|*no\ kernel\ module*|\
+        *[Nn]o\ chain/target/match*|*[Uu]nknown\ option*|*[Cc]ouldn\'t\ load*) ;;
+        *) return 1 ;;
+    esac
+    for name in multiport connbytes mark NFQUEUE; do
+        case "$detail" in
+            *"$name"*) printf '%s\n' "$name"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
 z2_fw_ensure_scratch_dir() {
     # common.sh owns the authenticated implementation; the standalone fallback
     # exists only for tests that source this reconciler on its own.
@@ -253,10 +274,13 @@ z2_fw_run_restore() {
 }
 
 z2_fw_set_restore_failure() {
-    local restore="$1" phase="$2" connbytes="$3" detail
+    local restore="$1" phase="$2" connbytes="$3" detail missing cause=""
     detail="${Z2_FW_LAST_RESTORE_DETAIL:-no backend diagnostic}"
     Z2_FW_FAILURE_CLASS="${Z2_FW_LAST_FAILURE_CLASS:-PUBLICATION_FAILED}"
-    Z2_FW_ERROR_DETAIL="$restore $phase failed (connbytes=$connbytes, exit=$Z2_FW_LAST_RESTORE_EXIT): $detail"
+    if missing="$(z2_fw_missing_extension "$detail")"; then
+        cause="this kernel does not provide the $missing extension; "
+    fi
+    Z2_FW_ERROR_DETAIL="$restore $phase failed (connbytes=$connbytes, exit=$Z2_FW_LAST_RESTORE_EXIT): $cause$detail"
     Z2_FW_ERROR_DETAIL="$(z2_fw_normalize_diagnostic "$Z2_FW_ERROR_DETAIL")"
 }
 

@@ -116,6 +116,12 @@ if [ "${Z2_RESTORE_REJECT_CONNBYTES:-0}" = 1 ] &&
     echo 'connbytes match is unavailable' >&2
     exit 1
 fi
+if [ "${Z2_RESTORE_REJECT_MARK:-0}" = 1 ] &&
+   printf '%s\n' "$payload" | grep -q -- '-m mark'; then
+    echo 'Warning: Extension mark revision 0 not supported, missing kernel module?' >&2
+    echo 'iptables-restore v1.8.11 (legacy): unknown option "--mark"' >&2
+    exit 2
+fi
 if [ "${Z2_RESTORE_REJECT_MULTIPORT:-0}" = 1 ] &&
    printf '%s\n' "$payload" | grep -q -- '-m multiport'; then
     # Verbatim from a device whose kernel lacks xt_multiport: the extension
@@ -450,6 +456,26 @@ PORTS_TCP=1:2,3:4,5:6,7:8,9:10,11:12,13:14,15:16
 PORTS_UDP=443
 z2_fw_reconcile_family iptables || fail "eight ranges could not publish"
 [ "$Z2_FW_MULTIPORT" = 0 ] || fail "a range was counted as one value instead of two"
+
+# Some extensions have no alternative. Without the mark match the module would
+# re-queue the packets it reinjects itself, so refusing is the only correct
+# answer — but the refusal has to say which extension is missing instead of
+# handing the user several lines of backend warnings to interpret.
+z2_fw_cleanup_family iptables || fail "could not reset before the required extension case"
+PORTS_TCP=80,443
+PORTS_UDP=443
+Z2_RESTORE_REJECT_MARK=1
+export Z2_RESTORE_REJECT_MARK
+if z2_fw_reconcile_family iptables; then
+    fail "a kernel without the mark match still published a ruleset"
+fi
+case "$Z2_FW_ERROR_DETAIL" in
+    *'does not provide the mark extension'*) ;;
+    *) fail "the missing extension was not named: $Z2_FW_ERROR_DETAIL" ;;
+esac
+z2_fw_family_absent iptables ||
+    fail "a refused required extension left owned objects behind"
+unset Z2_RESTORE_REJECT_MARK
 
 # With the extension present and the list within the limit nothing changes.
 z2_fw_cleanup_family iptables || fail "could not reset before the unchanged case"
