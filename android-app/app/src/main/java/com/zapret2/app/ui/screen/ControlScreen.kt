@@ -65,7 +65,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.zapret2.app.ui.theme.SizeTokens
 import com.zapret2.app.ui.theme.SpacingTokens
 import com.zapret2.app.R
-import com.zapret2.app.data.ModulePurgeController
 import com.zapret2.app.data.ServiceLifecycleController
 import com.zapret2.app.ui.UiText
 import com.zapret2.app.ui.resolve
@@ -845,7 +844,9 @@ private fun ModulePurgeResultDialog(
     result: ModulePurgeUiState.Result,
     onDismiss: () -> Unit,
 ) {
-    val success = result.outcome == ModulePurgeController.Outcome.COMPLETE
+    // The module and its data are gone in every erased outcome; a receipt that could not prove
+    // one reboot-cleared step is reported as done with a reservation, not as a failure.
+    val success = result.erased
     AlertDialog(
         onDismissRequest = {},
         shape = MaterialTheme.shapes.extraLarge,
@@ -877,6 +878,13 @@ private fun ModulePurgeResultDialog(
                     ),
                     style = MaterialTheme.typography.bodyMedium,
                 )
+                if (result.unverifiedCleanup) {
+                    Text(
+                        text = stringResource(R.string.control_purge_success_unverified),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 if (result.rebootRequired) {
                     Text(
                         text = stringResource(R.string.control_purge_reboot_required),

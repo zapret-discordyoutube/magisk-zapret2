@@ -125,6 +125,7 @@
     <string name="control_purge_progress_body">Stopping the service and removing all module-owned data. Do not close the app or reboot yet.</string>
     <string name="control_purge_success_title">Zapret2 data erased</string>
     <string name="control_purge_success_body">The module and its data were removed, and app-owned state was reset. The APK was not deleted.</string>
+    <string name="control_purge_success_unverified">One cleanup step could not be verified: IPv6 firewall rules may still be loaded. The pending reboot removes them.</string>
     <string name="control_purge_failure_title">Complete erase failed</string>
     <string name="control_purge_failure_body">Some data could not be removed safely. Review the diagnostic details below.</string>
     <string name="control_purge_reboot_required">Reboot before reinstalling the module.</string>

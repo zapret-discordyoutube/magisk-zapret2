@@ -76,6 +76,69 @@ class ModulePurgeControllerTest {
         assertFalse(parsed.value.satisfiesCompleteContract)
     }
 
+    @Test
+    fun partialReceiptThatRemovedEverythingIsErasedWithAnUnverifiedCleanupReservation() {
+        val result = purgeResult(
+            outcome = ModulePurgeController.Outcome.PARTIAL,
+            status = "partial",
+            overrides = mapOf("Z2_PURGE_FIREWALL_CLEAN" to "0"),
+        )
+
+        assertTrue(result.moduleFullyRemoved)
+        assertTrue(result.erased)
+        assertTrue(result.erasedWithUnverifiedCleanup)
+    }
+
+    @Test
+    fun completeReceiptIsErasedWithoutAnyReservation() {
+        val result = purgeResult(outcome = ModulePurgeController.Outcome.COMPLETE)
+
+        assertTrue(result.erased)
+        assertFalse(result.erasedWithUnverifiedCleanup)
+    }
+
+    @Test
+    fun partialReceiptIsNotErasedWhenAnythingItOwnsSurvived() {
+        val artifactsRemain = purgeResult(
+            outcome = ModulePurgeController.Outcome.PARTIAL,
+            status = "partial",
+            overrides = mapOf(
+                "Z2_PURGE_FIREWALL_CLEAN" to "0",
+                "Z2_PURGE_STATE_REMOVED" to "0",
+            ),
+        )
+        val apkTouched = purgeResult(
+            outcome = ModulePurgeController.Outcome.PARTIAL,
+            status = "partial",
+            overrides = mapOf("Z2_PURGE_APK_TOUCHED" to "1"),
+        )
+        val appDataSurvived = purgeResult(
+            outcome = ModulePurgeController.Outcome.PARTIAL,
+            status = "partial",
+            overrides = mapOf("Z2_PURGE_FIREWALL_CLEAN" to "0"),
+        ).copy(appDataCleared = false)
+
+        assertFalse(artifactsRemain.erased)
+        assertFalse(apkTouched.erased)
+        assertTrue(appDataSurvived.moduleFullyRemoved)
+        assertFalse(appDataSurvived.erased)
+    }
+
+    private fun purgeResult(
+        outcome: ModulePurgeController.Outcome,
+        status: String = "complete",
+        overrides: Map<String, String> = emptyMap(),
+    ): ModulePurgeController.Result {
+        val lines = completeReport().map { line ->
+            val key = line.substringBefore('=')
+            val value = if (key == "Z2_PURGE_STATUS") status else overrides[key]
+            if (value == null) line else "$key=$value"
+        }
+        val parsed = ModulePurgeController.parseReportOutput(lines)
+            as ModulePurgeController.ParseResult.Valid
+        return ModulePurgeController.Result(outcome = outcome, report = parsed.value)
+    }
+
     private fun completeReport(): List<String> = listOf(
         "Z2_PURGE_VERSION=1",
         "Z2_PURGE_STATUS=complete",

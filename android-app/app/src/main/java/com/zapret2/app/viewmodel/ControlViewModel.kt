@@ -1138,6 +1138,7 @@ class ControlViewModel @Inject constructor(
                 fullRollback = FullRollbackUiState.Idle,
                 modulePurge = ModulePurgeUiState.Result(
                     outcome = result.outcome,
+                    erased = erased,
                     rebootRequired = result.rebootRequired,
                     diagnostic = diagnostic,
                 ),

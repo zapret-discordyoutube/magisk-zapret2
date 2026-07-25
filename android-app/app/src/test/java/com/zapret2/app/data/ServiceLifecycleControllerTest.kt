@@ -355,6 +355,69 @@ class ServiceLifecycleControllerTest {
         }
 
     @Test
+    fun statusObservation_discardsTheCachedAnswerWhenAnInvalidationLandsWhileItsProbeRuns() =
+        runBlocking {
+            ServiceLifecycleController.invalidateStatusProtocolNegotiation()
+            val requested = mutableListOf<Int>()
+            var spokenProtocols = setOf(5)
+            var invalidateDuringCachedProbe = false
+            val probe: suspend (Int) -> ServiceLifecycleController.CommandResult = { version ->
+                requested += version
+                if (invalidateDuringCachedProbe) {
+                    // The installation authority observes a replaced package while the remembered
+                    // version is being probed. The installed script still answers that older flag
+                    // truthfully, so only the invalidation can reject the answer it produced.
+                    invalidateDuringCachedProbe = false
+                    ServiceLifecycleController.invalidateStatusProtocolNegotiation()
+                }
+                if (version in spokenProtocols) {
+                    stoppedPayload(version)
+                } else {
+                    unsupportedProtocolResult()
+                }
+            }
+
+            assertTrue(ServiceLifecycleController.observeNegotiatedStatus(probe).fullyStopped)
+            assertEquals(listOf(6, 5), requested)
+
+            requested.clear()
+            spokenProtocols = setOf(6, 5)
+            invalidateDuringCachedProbe = true
+            assertTrue(ServiceLifecycleController.observeNegotiatedStatus(probe).fullyStopped)
+            assertEquals(listOf(5, 6), requested)
+
+            requested.clear()
+            assertTrue(ServiceLifecycleController.observeNegotiatedStatus(probe).fullyStopped)
+            assertEquals(listOf(6), requested)
+
+            ServiceLifecycleController.invalidateStatusProtocolNegotiation()
+        }
+
+    @Test
+    fun statusObservation_neverRemembersAVersionThePayloadItselfDidNotDeclare() = runBlocking {
+        ServiceLifecycleController.invalidateStatusProtocolNegotiation()
+        val requested = mutableListOf<Int>()
+        val probe: suspend (Int) -> ServiceLifecycleController.CommandResult = { version ->
+            requested += version
+            when (version) {
+                // A complete payload proves the protocol it names, not the one that was asked for.
+                5 -> stoppedPayload(4)
+                else -> unsupportedProtocolResult()
+            }
+        }
+
+        val answered = ServiceLifecycleController.observeNegotiatedStatus(probe)
+        assertTrue(answered.metadataComplete)
+        assertEquals(listOf(6, 5), requested)
+
+        requested.clear()
+        assertTrue(ServiceLifecycleController.observeNegotiatedStatus(probe).metadataComplete)
+        assertEquals(listOf(6, 5), requested)
+
+        ServiceLifecycleController.invalidateStatusProtocolNegotiation()
+    }
+
+    @Test
     fun statusObservation_neverRemembersAProtocolThatAnsweredAnIncompletePayload() = runBlocking {
         ServiceLifecycleController.invalidateStatusProtocolNegotiation()
         val requested = mutableListOf<Int>()
@@ -1027,16 +1090,26 @@ class ServiceLifecycleControllerTest {
         exitCode = 2,
     )
 
+    /** A stopped payload in the exact shape of the protocol [version] it claims to speak. */
     private fun stoppedPayload(version: Int) = ServiceLifecycleController.CommandResult(
         success = false,
         stdout = when (version) {
-            1 -> stoppedStatusLines()
-            else -> versionSixStatusLines(
+            6 -> versionSixStatusLines(
                 stoppedStatusLines(),
                 lifecycleState = "idle",
                 chains = 0,
                 anchors = 0,
             )
+            5 -> versionFiveStatusLines(
+                stoppedStatusLines(),
+                lifecycleState = "idle",
+                chains = 0,
+                anchors = 0,
+            )
+            4 -> versionFourStatusLines(stoppedStatusLines(), lifecycleState = "idle")
+            3 -> versionThreeStatusLines(stoppedStatusLines())
+            1 -> stoppedStatusLines()
+            else -> error("Unsupported machine status protocol $version")
         },
         exitCode = 1,
     )
@@ -1091,21 +1164,28 @@ class ServiceLifecycleControllerTest {
         "Z2_COMPLETE=1",
     )
 
+    private fun versionThreeStatusLines(base: List<String>): List<String> =
+        base.toMutableList().apply {
+            add(0, "Z2_PROTOCOL=3")
+            add(lastIndex, "Z2_ERROR_SCHEMA=1")
+            add(lastIndex, "Z2_ERROR_STATUS=OK")
+            add(lastIndex, "Z2_ERROR_DOMAIN=NONE")
+            add(lastIndex, "Z2_ERROR_STAGE=NONE")
+            add(lastIndex, "Z2_ERROR_CODE=NONE")
+            add(lastIndex, "Z2_ERROR_DETAIL=")
+        }
+
     private fun versionFourStatusLines(
         base: List<String>,
         lifecycleState: String,
         ownerKind: String = "none",
-    ): List<String> = base.toMutableList().apply {
-        add(0, "Z2_PROTOCOL=4")
-        add(lastIndex, "Z2_LIFECYCLE_STATE=$lifecycleState")
-        add(lastIndex, "Z2_LIFECYCLE_OWNER_KIND=$ownerKind")
-        add(lastIndex, "Z2_ERROR_SCHEMA=1")
-        add(lastIndex, "Z2_ERROR_STATUS=OK")
-        add(lastIndex, "Z2_ERROR_DOMAIN=NONE")
-        add(lastIndex, "Z2_ERROR_STAGE=NONE")
-        add(lastIndex, "Z2_ERROR_CODE=NONE")
-        add(lastIndex, "Z2_ERROR_DETAIL=")
-    }
+    ): List<String> = versionThreeStatusLines(base)
+        .map { if (it == "Z2_PROTOCOL=3") "Z2_PROTOCOL=4" else it }
+        .toMutableList()
+        .apply {
+            add(lastIndex, "Z2_LIFECYCLE_STATE=$lifecycleState")
+            add(lastIndex, "Z2_LIFECYCLE_OWNER_KIND=$ownerKind")
+        }
 
     private fun versionFiveStatusLines(
         base: List<String>,

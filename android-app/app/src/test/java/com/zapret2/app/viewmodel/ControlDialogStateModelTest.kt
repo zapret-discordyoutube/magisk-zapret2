@@ -172,6 +172,23 @@ class ControlDialogStateModelTest {
         assertEquals(ModulePurgeController.Outcome.PARTIAL, purge.outcome)
         assertTrue(purge.rebootRequired)
         assertEquals("state cleanup incomplete", purge.diagnostic)
+        // Only a failed erase is persisted, so a restored result never claims the module is gone.
+        assertFalse(purge.erased)
+        assertFalse(purge.unverifiedCleanup)
+    }
+
+    @Test
+    fun erasedPurgeResultReportsSuccessAndReservesOnlyTheUnverifiedPartialStep() {
+        val partial = ModulePurgeUiState.Result(
+            outcome = ModulePurgeController.Outcome.PARTIAL,
+            erased = true,
+            rebootRequired = true,
+            diagnostic = "the IPv6 ruleset could not be verified",
+        )
+
+        assertTrue(partial.unverifiedCleanup)
+        assertFalse(partial.copy(outcome = ModulePurgeController.Outcome.COMPLETE).unverifiedCleanup)
+        assertFalse(partial.copy(erased = false).unverifiedCleanup)
     }
 
     @Test
