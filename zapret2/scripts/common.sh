@@ -2549,10 +2549,16 @@ firewall_family_persistently_unavailable() {
 FIREWALL_IPV6_SKIPPED_UNPROVEN=0
 FIREWALL_IPV6_UNQUERYABLE=0
 FIREWALL_IPV6_AUDITED_EMPTY=0
+# Set when this teardown actually removed the IPv6 family: the baseline was
+# captured, so the frontend answered, and the removal batch committed. The
+# checks that run afterwards re-ask the kernel, and a frontend that goes busy
+# in that window would otherwise erase a proof this very transaction produced.
+FIREWALL_IPV6_TEARDOWN_PROVEN=0
 cleanup_owned_firewall() {
     local baseline_mode="${1:-owned}" rc=0 result
     case "$baseline_mode" in owned|audited) ;; *) return 1;; esac
     FIREWALL_IPV6_SKIPPED_UNPROVEN=0
+    FIREWALL_IPV6_TEARDOWN_PROVEN=0
     command -v z2_fw_cleanup_family >/dev/null 2>&1 || return 1
     z2_fw_cleanup_family iptables "$baseline_mode"
     result=$?
@@ -2564,8 +2570,12 @@ cleanup_owned_firewall() {
         # frontend to answer now.
         if { [ "$baseline_mode" != audited ] || [ "${FIREWALL_IPV6_UNQUERYABLE:-0}" != 1 ]; } &&
            { z2_fw_tool_available ip6tables || ! firewall_family_persistently_unavailable ip6tables; }; then
-            z2_fw_cleanup_family ip6tables "$baseline_mode" ||
-                { FIREWALL_CLEANUP_PREFLIGHT_ERROR="IPv6 owned ruleset could not be removed"; rc=1; }
+            if z2_fw_cleanup_family ip6tables "$baseline_mode"; then
+                FIREWALL_IPV6_TEARDOWN_PROVEN=1
+            else
+                FIREWALL_CLEANUP_PREFLIGHT_ERROR="IPv6 owned ruleset could not be removed"
+                rc=1
+            fi
         else
             # This family cannot be proven now, and on this device it cannot be
             # proven later either. Refusing would fence every teardown until a

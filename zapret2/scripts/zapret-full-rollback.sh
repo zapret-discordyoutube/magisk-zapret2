@@ -367,7 +367,8 @@ firewall_clean() {
         owned_family_absent ip6tables ||
             { ! z2_fw_tool_available ip6tables &&
                 { [ "${CLEANUP_IPV6_OWNERSHIP_EXPECTED:-1}" = 0 ] ||
-                    [ "${FIREWALL_IPV6_AUDITED_EMPTY:-0}" = 1 ]; }; } ||
+                    [ "${FIREWALL_IPV6_AUDITED_EMPTY:-0}" = 1 ] ||
+                    [ "${FIREWALL_IPV6_TEARDOWN_PROVEN:-0}" = 1 ]; }; } ||
             return 1
     elif [ "${IPV6_PUBLICATION_RECORDED:-0}" = 1 ]; then
         # No frontend at all: the module could only have published there while

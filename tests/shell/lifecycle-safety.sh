@@ -244,6 +244,36 @@ chmod 0755 "$MOCK/ip6tables"
     [ "${FIREWALL_IPV6_SKIPPED_UNPROVEN:-0}" = 1 ] ||
         fail "an owned teardown reused another mode's proof to suppress a reservation"
 )
+
+# The checks that run after a teardown re-ask the kernel. A frontend that goes
+# busy in that window would erase the teardown's own evidence, so the teardown
+# records that it captured the family and committed its removal — and stops
+# recording it the moment it did not.
+(
+    Z2_QUERY_MODE=clean; export Z2_QUERY_MODE
+    Z2_IP6_MODE_FILE="$CASE/ip6mode.proven"; export Z2_IP6_MODE_FILE
+    FIREWALL_PROBE_ATTEMPTS=1
+
+    printf 'clean\n' > "$Z2_IP6_MODE_FILE"
+    z2_fw_cleanup_family() { return 0; }
+    CLEANUP_IPV6_OWNERSHIP_EXPECTED=1
+    cleanup_owned_firewall owned || fail "an owned teardown failed on a readable family"
+    [ "${FIREWALL_IPV6_TEARDOWN_PROVEN:-0}" = 1 ] ||
+        fail "a teardown that removed the family did not record its own proof"
+
+    printf 'fail\n' > "$Z2_IP6_MODE_FILE"
+    cleanup_owned_firewall owned || fail "an unreadable family fenced an owned teardown"
+    [ "${FIREWALL_IPV6_TEARDOWN_PROVEN:-0}" = 0 ] ||
+        fail "a teardown that never reached the family still claimed to have removed it"
+
+    printf 'clean\n' > "$Z2_IP6_MODE_FILE"
+    z2_fw_cleanup_family() { [ "$1" != ip6tables ]; }
+    if cleanup_owned_firewall owned; then
+        fail "a failed IPv6 teardown was reported as successful"
+    fi
+    [ "${FIREWALL_IPV6_TEARDOWN_PROVEN:-0}" = 0 ] ||
+        fail "a teardown that failed to remove the family claimed proof anyway"
+)
 rm -f "$MOCK/ip6tables"
 
 Z2_QUERY_MODE=foreign; export Z2_QUERY_MODE

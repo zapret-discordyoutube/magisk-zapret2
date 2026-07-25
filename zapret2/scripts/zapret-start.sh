@@ -357,11 +357,17 @@ rollback_start() {
 firewall_is_clean_after_rollback() {
     command -v iptables >/dev/null 2>&1 || return 1
     owned_family_absent iptables || return 1
-    # An unqueryable IPv6 frontend is acceptable only when this transaction
-    # never published IPv6 rules; otherwise absence stays unproven.
+    # An unqueryable IPv6 frontend is acceptable on two proofs this transaction
+    # can hold: it never published IPv6 rules, or the teardown that just ran
+    # captured the family's baseline and committed its removal. Re-asking the
+    # kernel is not a third one — a frontend that goes busy between the
+    # teardown and this check would otherwise discard the teardown's own
+    # evidence and report a rollback that succeeded as leaving artifacts.
     if command -v ip6tables >/dev/null 2>&1; then
         owned_family_absent ip6tables ||
-            { [ "${CLEANUP_IPV6_OWNERSHIP_EXPECTED:-1}" = 0 ] && ! z2_fw_tool_available ip6tables; } ||
+            { ! z2_fw_tool_available ip6tables &&
+                { [ "${CLEANUP_IPV6_OWNERSHIP_EXPECTED:-1}" = 0 ] ||
+                    [ "${FIREWALL_IPV6_TEARDOWN_PROVEN:-0}" = 1 ]; }; } ||
             return 1
     elif [ "${IPV6_PUBLICATION_RECORDED:-0}" = 1 ]; then
         # No frontend at all: the module could only have published there while
