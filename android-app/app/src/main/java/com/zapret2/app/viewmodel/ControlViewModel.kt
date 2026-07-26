@@ -30,6 +30,8 @@ import com.zapret2.app.data.RuntimeLogRepository
 import com.zapret2.app.data.ServiceEventBus
 import com.zapret2.app.data.ServiceEventSource
 import com.zapret2.app.data.ServiceLifecycleController
+import com.zapret2.app.data.ServiceUptimeAnchor
+import com.zapret2.app.data.serviceUptimeAnchor
 import com.zapret2.app.data.UpdateFailure
 import com.zapret2.app.data.UpdateManager
 import com.zapret2.app.data.UpdateProgress
@@ -479,7 +481,7 @@ internal fun ControlUiState.afterModulePurge(result: ModulePurgeController.Resul
             isRunning = false,
             canStopService = false,
             status = ControlStatus.NOT_INSTALLED,
-            uptime = "",
+            serviceUptime = null,
             processStats = ProcessStats(),
             moduleDiagnostic = null,
             moduleInstallState = ModuleInstallState.MISSING,
@@ -584,7 +586,14 @@ internal object FullRollbackAvailabilityPolicy {
 data class ControlUiState(
     val isRunning: Boolean = false,
     val status: ControlStatus = ControlStatus.CHECKING,
-    val uptime: String = "",
+    /**
+     * When the module's verified process started, or `null` when no status read proved one.
+     *
+     * The screen advances the counter itself from this anchor, so the state carries the fact and
+     * not a rendering of it: a sampled duration string would be stale the instant it was published
+     * and could only be corrected by a status read the app has no reason to repeat.
+     */
+    val serviceUptime: ServiceUptimeAnchor? = null,
     val autostart: Boolean = true,
     val moduleVersion: String = "",
     val networkType: UiText = UiText.Resource(R.string.control_network_checking),
@@ -703,15 +712,15 @@ data class ControlUiState(
 /**
  * What `Zapret2ModuleRepository.readProcessMetrics` can prove about the module's own process.
  *
- * There is deliberately no CPU field: the repository reads `/proc/<pid>` for memory, thread count
- * and uptime and nothing else, so a `cpu` slot could only ever be empty, and the process card row
- * it fed was unreachable for every device.
+ * There is deliberately no CPU field: the repository reads `/proc/<pid>` for memory and thread
+ * count and nothing else, so a `cpu` slot could only ever be empty, and the process card row it fed
+ * was unreachable for every device. Uptime is likewise absent — it belongs to
+ * [ControlUiState.serviceUptime], which the module's own status payload anchors.
  */
 data class ProcessStats(
     val pid: String = "",
     val memory: String = "",
     val threads: String = "",
-    val uptime: String = ""
 )
 
 private const val KEY_DIALOG_KIND = "control_dialog_kind"
@@ -1690,8 +1699,17 @@ class ControlViewModel @Inject constructor(
      * Once this session erased the module there is nothing left to read — the module's own status
      * script went with it — so the read is skipped outright and every publication below stays
      * gated on [withModuleStatusPublication] for the read that was already in flight.
+     *
+     * [observed] is a status the caller already holds under the lifecycle lock — the typed receipt
+     * `zapret-start.sh`/`zapret-stop.sh` printed for the very transition being published. It is the
+     * authority the lifecycle boundary already verified against the expected state, so re-reading it
+     * would spend another `zapret-status.sh` process (~330 ms on device) to learn what the receipt
+     * already said, and would answer about a moment strictly later than the one being reported.
+     * Passing null is an ordinary observation and runs the status process itself.
      */
-    private suspend fun refreshStatus(): ServiceSnapshot {
+    private suspend fun refreshStatus(
+        observed: ServiceLifecycleController.ServiceStatus? = null,
+    ): ServiceSnapshot {
         if (_uiState.value.modulePurgeCompleted) return purgedServiceSnapshot()
         val refreshId = statusRefreshSequence.incrementAndGet()
         val cachedEnvironment = _uiState.value
@@ -1714,7 +1732,7 @@ class ControlViewModel @Inject constructor(
                             networkType = UiText.Resource(
                                 networkStatsManager.getNetworkType().labelRes,
                             ),
-                            uptime = "",
+                            serviceUptime = null,
                             iptablesActive = false,
                             nfqueueRulesCount = 0,
                             processStats = ProcessStats(),
@@ -1741,7 +1759,7 @@ class ControlViewModel @Inject constructor(
             )
         }
 
-        val serviceStatus = ServiceLifecycleController.getStatus()
+        val serviceStatus = observed ?: ServiceLifecycleController.getStatus()
         val lifecycleMutationState = serviceStatus.lifecycleState.toModuleMutationState()
         if (lifecycleMutationState != ModuleMutationState.IDLE) {
             val current = _uiState.value
@@ -1799,10 +1817,10 @@ class ControlViewModel @Inject constructor(
                     pid = processPid,
                     memory = metrics.memoryKb.takeIf(String::isNotBlank)?.let { "$it KB" }.orEmpty(),
                     threads = metrics.threads,
-                    uptime = metrics.uptime,
                 )
             }
         } else ProcessStats()
+        val serviceUptime = serviceStatus.serviceUptimeAnchor()
 
         val status = projectedControlStatus(
             serviceStatus = serviceStatus,
@@ -1815,7 +1833,7 @@ class ControlViewModel @Inject constructor(
                         isRunning = isRunning,
                         canStopService = canStopService,
                         status = status,
-                        uptime = processStats.uptime,
+                        serviceUptime = serviceUptime,
                         networkType = UiText.Resource(networkType.labelRes),
                         iptablesActive = serviceStatus.iptablesActive,
                         nfqueueRulesCount = effectiveRulesCount,
@@ -1890,15 +1908,20 @@ class ControlViewModel @Inject constructor(
 
         viewModelScope.launch {
             try {
-                val currentStatus = refreshStatus()
-                val shouldStop = currentStatus.canStopService
+                // The direction is the one the user acted on: the button they pressed was rendered
+                // from this very state. A leading status process here would spend ~330 ms to
+                // re-derive it, and `perform` immediately takes its own observation under the
+                // lifecycle lock anyway — the only one that can decide anything, because only it
+                // excludes a concurrent owner. Either way the module is idempotent: a start it
+                // already satisfies and a stop with nothing left to stop both commit as no-ops.
+                val shouldStop = _uiState.value.canStopService
                 if (!shouldStop && rejectUnavailableModuleOperation()) return@launch
                 val lifecycleResult = if (shouldStop) {
                     ServiceLifecycleController.stop()
                 } else {
                     ServiceLifecycleController.start()
                 }
-                val verifiedState = refreshStatus()
+                val verifiedState = refreshStatus(lifecycleResult.status)
 
                 val verified = if (shouldStop) !verifiedState.canStopService else verifiedState.isRunning
                 if (lifecycleResult.success && verified) {

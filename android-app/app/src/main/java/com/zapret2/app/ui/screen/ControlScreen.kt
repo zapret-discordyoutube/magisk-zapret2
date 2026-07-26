@@ -66,6 +66,7 @@ import com.zapret2.app.ui.theme.SizeTokens
 import com.zapret2.app.ui.theme.SpacingTokens
 import com.zapret2.app.R
 import com.zapret2.app.ui.UiText
+import com.zapret2.app.ui.rememberServiceUptimeLabel
 import com.zapret2.app.ui.resolve
 import com.zapret2.app.ui.components.AppSnackbarEffect
 import com.zapret2.app.ui.components.AdaptiveEqualWidthGroup
@@ -456,6 +457,7 @@ private fun ServiceStatusCard(
     val warning = MaterialTheme.extendedColors.warning
     val serviceColors = if (state.canStopService) error else success
     val statusDescription = stringResource(state.status.labelRes)
+    val uptimeLabel = rememberServiceUptimeLabel(state.serviceUptime)
     val statusColor by animateColorAsState(
         targetValue = when (state.status) {
             ControlStatus.RUNNING -> success.color
@@ -519,9 +521,9 @@ private fun ServiceStatusCard(
                     color = statusColor,
                     modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                 )
-                if (state.uptime.isNotEmpty()) {
+                uptimeLabel?.let { uptime ->
                     Text(
-                        text = stringResource(R.string.control_uptime, state.uptime),
+                        text = stringResource(R.string.control_uptime, uptime),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

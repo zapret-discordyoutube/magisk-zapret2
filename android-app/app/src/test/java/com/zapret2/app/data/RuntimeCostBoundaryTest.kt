@@ -185,13 +185,39 @@ class RuntimeCostBoundaryTest {
             "android-app/app/src/main/java/com/zapret2/app/viewmodel/ControlViewModel.kt",
         ).readText()
         val refresh = control
-            .substringAfter("private suspend fun refreshStatus()")
+            .substringAfter("private suspend fun refreshStatus(")
             .substringBefore("fun refreshStatusManually()")
 
-        assertTrue(refresh.contains("ServiceLifecycleController.getStatus()"))
+        assertTrue(refresh.contains("observed ?: ServiceLifecycleController.getStatus()"))
         assertFalse(refresh.contains("reconcileEnvironment()"))
         assertFalse(refresh.contains("RuntimeConfigStore.readCore()"))
         assertFalse(refresh.contains("checkRootAccess()"))
+    }
+
+    /**
+     * Starting and stopping the service must cost one status process, not three.
+     *
+     * Measured on a Pixel 9 Pro XL, one `zapret-status.sh` observation is ~330 ms, so the two
+     * observations this contract forbids were ~660 ms of the button's latency. Both were
+     * redundant by construction, in the same way `restart` already documents:
+     *  - the leading one re-derived the direction the user had just acted on, and `perform` takes
+     *    its own observation under the lifecycle lock immediately afterwards — the only one that
+     *    excludes a concurrent owner, and therefore the only one that can decide anything;
+     *  - the trailing one re-read what the typed receipt of the very transition already carried,
+     *    and answered about a strictly later moment than the one being reported.
+     */
+    @Test
+    fun serviceToggle_publishesTheLifecycleReceiptInsteadOfTwoExtraStatusProcesses() {
+        val control = repositoryFile(
+            "android-app/app/src/main/java/com/zapret2/app/viewmodel/ControlViewModel.kt",
+        ).readText()
+        val toggle = control
+            .substringAfter("fun toggleService()")
+            .substringBefore("private fun rejectUnavailableModuleOperation()")
+
+        assertTrue(toggle.contains("val shouldStop = _uiState.value.canStopService"))
+        assertTrue(toggle.contains("refreshStatus(lifecycleResult.status)"))
+        assertEquals(1, Regex("refreshStatus\\(").findAll(toggle).count())
     }
 
     @Test

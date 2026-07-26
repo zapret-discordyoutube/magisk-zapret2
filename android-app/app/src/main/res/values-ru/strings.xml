@@ -137,6 +137,7 @@
     <string name="control_service_running">Служба запущена</string>
     <string name="control_service_stopped">Служба остановлена</string>
     <string name="control_uptime">Время работы: %1$s</string>
+    <string name="control_uptime_days">%1$d д %2$s</string>
     <string name="control_applying">Применение…</string>
     <string name="control_stop_service">Остановить службу</string>
     <string name="control_start_service">Запустить службу</string>

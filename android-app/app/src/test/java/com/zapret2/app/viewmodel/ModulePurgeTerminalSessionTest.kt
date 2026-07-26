@@ -6,6 +6,7 @@ import com.zapret2.app.data.ModuleMutationState
 import com.zapret2.app.data.ModulePurgeController
 import com.zapret2.app.data.PendingModuleState
 import com.zapret2.app.data.ServiceLifecycleController
+import com.zapret2.app.data.ServiceUptimeAnchor
 import com.zapret2.app.sourceRegion
 import java.io.File
 import org.junit.Assert.assertEquals
@@ -299,7 +300,7 @@ class ModulePurgeTerminalSessionTest {
     fun purgeResetRetiresEveryRuntimeFactOfTheErasedModule() {
         val installed = installedControlState()
         // Guard: a fixture that never had these cannot prove they were cleared.
-        assertNotEquals("", installed.uptime)
+        assertNotNull(installed.serviceUptime)
         assertNotEquals(ProcessStats(), installed.processStats)
         assertTrue(installed.iptablesActive)
         assertNotEquals(0, installed.nfqueueRulesCount)
@@ -310,7 +311,7 @@ class ModulePurgeTerminalSessionTest {
         )
 
         assertEquals(ControlStatus.NOT_INSTALLED, reset.status)
-        assertEquals("", reset.uptime)
+        assertNull(reset.serviceUptime)
         assertEquals(ProcessStats(), reset.processStats)
         assertFalse(reset.iptablesActive)
         assertEquals(0, reset.nfqueueRulesCount)
@@ -363,7 +364,7 @@ class ModulePurgeTerminalSessionTest {
             isRunning = false,
             canStopService = false,
             status = requireNotNull(erasedEnvironment.serviceAccess.statusWithoutQuery()),
-            uptime = "",
+            serviceUptime = null,
             iptablesActive = false,
             nfqueueRulesCount = 0,
             processStats = ProcessStats(),
@@ -484,7 +485,7 @@ class ModulePurgeTerminalSessionTest {
         val source = productionFile("viewmodel/ControlViewModel.kt").readText()
         val refreshStatus = source
             .sourceRegion(
-                after = "private suspend fun refreshStatus(): ServiceSnapshot {",
+                after = "    ): ServiceSnapshot {",
                 before = "\n    fun refreshStatusManually()",
             )
 
@@ -520,7 +521,7 @@ class ModulePurgeTerminalSessionTest {
     private fun installedControlState() = ControlUiState(
         isRunning = true,
         status = ControlStatus.RUNNING,
-        uptime = "3:12:44",
+        serviceUptime = ServiceUptimeAnchor(startElapsedRealtimeMillis = 1_000L),
         autostart = true,
         moduleVersion = "2.1.5",
         canStopService = true,
@@ -531,7 +532,6 @@ class ModulePurgeTerminalSessionTest {
             pid = "4242",
             memory = "8192 KB",
             threads = "3",
-            uptime = "3:12:44",
         ),
         moduleDiagnostic = "FIREWALL/POSTCONDITION_FAILED: stale diagnostic from the erased module",
         hasRootAccess = true,

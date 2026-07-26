@@ -2192,14 +2192,25 @@ uninstall_tombstone_allows_stop() {
     return 0
 }
 
-proc_cmdline_sha256() {
+# proc_cmdline_sha256_read is the fork-free form, in the same shape as
+# proc_starttime_read: hot call sites consume the global instead of paying a
+# command-substitution fork on top of the one sha256sum already costs. The
+# printf wrapper below stays for captures that want a value.
+PROC_CMDLINE_SHA256=""
+proc_cmdline_sha256_read() {
     local pid="$1" value
+    PROC_CMDLINE_SHA256=""
     is_decimal "$pid" || return 1
     [ -r "/proc/$pid/cmdline" ] || return 1
     value="$(sha256sum "/proc/$pid/cmdline" 2>/dev/null)" || return 1
     value="${value%% *}"
     is_lower_sha256 "$value" || return 1
-    printf '%s\n' "$value"
+    PROC_CMDLINE_SHA256="$value"
+}
+
+proc_cmdline_sha256() {
+    proc_cmdline_sha256_read "$1" || return 1
+    printf '%s\n' "$PROC_CMDLINE_SHA256"
 }
 
 # Exact argv0 needs the NUL separators tr restores; the first line of that
@@ -2771,7 +2782,8 @@ verify_nfqws_pid() {
         esac
     fi
     if [ -n "$expected_argv_sha256" ] || [ "$capture_argv" = capture-argv ]; then
-        actual_argv_sha256="$(proc_cmdline_sha256 "$pid")" || return 1
+        proc_cmdline_sha256_read "$pid" || return 1
+        actual_argv_sha256="$PROC_CMDLINE_SHA256"
     fi
     if [ -n "$expected_argv_sha256" ]; then
         is_lower_sha256 "$expected_argv_sha256" || return 1
@@ -2861,7 +2873,7 @@ read_verified_pidfile() {
 }
 
 verify_status_snapshot_pid() {
-    local candidate before after actual_argv_sha256 cmd_identity binary_identity
+    local candidate before after identity cmd_identity binary_identity
     local runtime_nfqws2="${AUDIT_NFQWS2_OVERRIDE:-$NFQWS2}"
     VERIFIED_PID=""
     VERIFIED_PID_START=""
@@ -2877,14 +2889,28 @@ verify_status_snapshot_pid() {
     before="$PROC_STARTTIME"
     [ "$before" = "$STATUS_FILE_OWN_PID_STARTTIME" ] || return 1
     kill -0 "$candidate" 2>/dev/null || return 1
-    proc_cmdline_may_match_nfqws "$candidate" || return 1
-    actual_argv_sha256="$(proc_cmdline_sha256 "$candidate")" || return 1
-    [ "$actual_argv_sha256" = "$STATUS_FILE_OWN_ARGV_SHA256" ] || return 1
+    # No argv0 prefilter here. proc_cmdline_may_match_nfqws is a fork-free
+    # *screening* probe for candidates nothing has authenticated yet — the
+    # recovery scan over the whole process table, and the stop wait loop that
+    # must also witness a zombie transition. This path already knows which
+    # process it is asking about, and the next line authenticates the complete
+    # argv against the digest the lifecycle owner published, which is strictly
+    # stronger than any prefix of it. The prefilter only re-read the same file
+    # first, and a shell `read` from a proc file is byte-at-a-time: on this
+    # module's own 21 KB nfqws2 cmdline that screening cost ~35 ms — four times
+    # the digest it was screening for — on every status observation.
+    proc_cmdline_sha256_read "$candidate" || return 1
+    [ "$PROC_CMDLINE_SHA256" = "$STATUS_FILE_OWN_ARGV_SHA256" ] || return 1
     if [ "$Z2_HAVE_STAT" = 1 ]; then
-        cmd_identity="$(stat -Lc '%d:%i' "/proc/$candidate/exe" 2>/dev/null)" ||
+        # One stat covers both paths: the frontend is the same, and a device
+        # where either path is unreadable fails the call as a whole.
+        identity="$(stat -Lc '%d:%i' "/proc/$candidate/exe" "$runtime_nfqws2" 2>/dev/null)" ||
             return 1
-        binary_identity="$(stat -Lc '%d:%i' "$runtime_nfqws2" 2>/dev/null)" ||
-            return 1
+        cmd_identity="${identity%%"$Z2_NL"*}"
+        binary_identity="${identity#*"$Z2_NL"}"
+        # A single line means stat answered for only one path; comparing it
+        # against itself would pass an identity that was never established.
+        [ "$cmd_identity" != "$identity" ] || return 1
         [ "$cmd_identity" = "$binary_identity" ] || return 1
     fi
     proc_starttime_read "$candidate" || return 1
@@ -2892,7 +2918,7 @@ verify_status_snapshot_pid() {
     [ "$before" = "$after" ] || return 1
     VERIFIED_PID="$candidate"
     VERIFIED_PID_START="$after"
-    VERIFIED_PID_ARGV_SHA256="$actual_argv_sha256"
+    VERIFIED_PID_ARGV_SHA256="$PROC_CMDLINE_SHA256"
     VERIFIED_PID_QNUM="$STATUS_FILE_QNUM"
     return 0
 }
@@ -3142,7 +3168,8 @@ preflight_owned_process_cleanup() {
         pid="$OWNED_SCAN_PIDS"
         proc_starttime_read "$pid" || return 1
         start="$PROC_STARTTIME"
-        argv_sha256="$(proc_cmdline_sha256 "$pid")" || return 1
+        proc_cmdline_sha256_read "$pid" || return 1
+        argv_sha256="$PROC_CMDLINE_SHA256"
         if [ "$pidfile_present" = 1 ]; then
             read_verified_pidfile || {
                 PROCESS_CLEANUP_PREFLIGHT_ERROR="live PID publication is corrupt or unverified"

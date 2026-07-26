@@ -92,10 +92,18 @@ internal data class ModuleEnvironmentSnapshot(
         }
 }
 
+/**
+ * What `/proc/<pid>` can say about the module's process that the status payload does not already
+ * carry.
+ *
+ * Uptime is deliberately absent: the payload publishes the process' own start time
+ * (`Z2_PID_STARTTIME`), and [ServiceUptimeAnchor] projects it into a counter the screen advances
+ * itself. Sampling it here would re-measure a fact the lifecycle boundary already owns, and would
+ * publish it as a string that nothing ever refreshes.
+ */
 internal data class RuntimeProcessMetrics(
     val memoryKb: String = "",
     val threads: String = "",
-    val uptime: String = "",
 )
 
 /**
@@ -276,21 +284,17 @@ class Zapret2ModuleRepository @Inject constructor() {
                 [ -d /proc/$pid ] || exit 1
                 z2_mem=${'$'}(awk '/^VmRSS:/ { print ${'$'}2; exit }' /proc/$pid/status 2>/dev/null)
                 z2_threads=${'$'}(awk '/^Threads:/ { print ${'$'}2; exit }' /proc/$pid/status 2>/dev/null)
-                z2_uptime=${'$'}(ps -o etime= -p $pid 2>/dev/null | head -n 1)
-                printf 'Z2_MEM=%s\nZ2_THREADS=%s\nZ2_UPTIME=%s\n' "${'$'}z2_mem" "${'$'}z2_threads" "${'$'}z2_uptime"
+                printf 'Z2_MEM=%s\nZ2_THREADS=%s\n' "${'$'}z2_mem" "${'$'}z2_threads"
             """.trimIndent(),
         )
         if (!result.success) return RuntimeProcessMetrics()
         val values = parseExactKeyValues(
             result.stdout,
-            setOf("Z2_MEM", "Z2_THREADS", "Z2_UPTIME"),
+            setOf("Z2_MEM", "Z2_THREADS"),
         ) ?: return RuntimeProcessMetrics()
         val memory = values.getValue("Z2_MEM").takeIf(::canonicalDecimal).orEmpty()
         val threads = values.getValue("Z2_THREADS").takeIf(::canonicalDecimal).orEmpty()
-        val uptime = values.getValue("Z2_UPTIME").trim().takeIf {
-            it.length <= 64 && it.none { character -> character.isISOControl() }
-        }.orEmpty()
-        return RuntimeProcessMetrics(memory, threads, uptime)
+        return RuntimeProcessMetrics(memory, threads)
     }
 
     /**
