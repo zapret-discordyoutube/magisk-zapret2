@@ -715,6 +715,16 @@ write_compiled_validation_receipt() {
 # receipt by a lock holder, so a hit consumes the slot in place — no copy into
 # the canonical path and no receipt recomputation. The launcher still
 # validates every argv line at exec time; anything stale or damaged misses.
+# A restored slot is adopted as the launch artifact, so it must satisfy exactly
+# the binding the launcher re-checks — nothing weaker. Screening it on a subset
+# (logical name, source digest, config signature) accepted a slot compiled by a
+# *previous* installation generation, which zapret-start.sh then refused with
+# "compiled preset source binding changed before launch". That is not a
+# transient disagreement: the cache is keyed by the preset's source digest, so
+# every later start restored the same stale slot and hit the same refusal, and
+# the service could not be started at all until the cache was deleted by hand.
+# The two checks are the same check now, so a slot this accepts cannot be one
+# the launcher rejects.
 compiled_cache_restore() {
     local preset_file="$1" logical_name="$2" slot
     COMPILED_CACHE_SOURCE_SHA="$(sha256sum "$preset_file" 2>/dev/null)" || return 1
@@ -722,11 +732,8 @@ compiled_cache_restore() {
     is_lower_sha256 "$COMPILED_CACHE_SOURCE_SHA" || return 1
     slot="$STATE_DIR/argv-cache.$COMPILED_CACHE_SOURCE_SHA.argv"
     state_file_is_secure "$slot" || return 1
-    read_compiled_artifact_header "$slot" || return 1
-    [ "$COMPILED_PRESET" = "$logical_name" ] &&
-        [ "$COMPILED_SOURCE_SHA256" = "$COMPILED_CACHE_SOURCE_SHA" ] || return 1
-    current_config_signature
-    [ "$COMPILED_CONFIG_SIG" = "$CONFIG_SIG_CURRENT" ] || return 1
+    compiled_artifact_binding_current "$slot" "$preset_file" "$logical_name" || return 1
+    [ "$COMPILED_SOURCE_SHA256" = "$COMPILED_CACHE_SOURCE_SHA" ] || return 1
     COMPILED_ARGV_FILE="$slot"
     COMPILED_METADATA_FOR="$slot"
     return 0
