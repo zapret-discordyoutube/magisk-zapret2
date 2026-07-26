@@ -46,8 +46,21 @@ package_contract_safe_relative_path() {
 
 package_contract_safe_file_name_byte_length() {
     local value="$1"
-    local LC_ALL=C
-    [ "${#value}" -le 255 ] 2>/dev/null
+    local byte_length LC_ALL=C
+
+    # BusyBox ash on Android counts characters rather than bytes in ${#value},
+    # even with LC_ALL=C. Keep the common printable-ASCII path shell-native;
+    # only names that can have a different character and byte length need wc.
+    case "$value" in
+        *[!\ -~]*)
+            byte_length="$(printf '%s' "$value" | LC_ALL=C wc -c)" || return 1
+            ;;
+        *) byte_length="${#value}" ;;
+    esac
+    case "$byte_length" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$byte_length" -le 255 ] 2>/dev/null
 }
 
 package_contract_safe_path_component_lengths() {
@@ -332,9 +345,11 @@ package_contract_validate_manifest() {
         "immutable-exec|0755|zapret2/scripts/firewall-reconciler.sh" \
         "immutable-exec|0755|zapret2/scripts/command-builder.sh" \
         "immutable-exec|0755|zapret2/scripts/daemon-replace-transaction.sh" \
+        "immutable-exec|0755|zapret2/scripts/topology-replace-transaction.sh" \
         "immutable-exec|0755|zapret2/scripts/package-contract.sh" \
         "immutable-exec|0755|zapret2/scripts/runtime-config.sh" \
         "immutable-exec|0755|zapret2/scripts/runtime-init.sh" \
+        "immutable-exec|0755|zapret2/scripts/lifecycle-lease.sh" \
         "immutable-exec|0755|zapret2/scripts/zapret-start.sh" \
         "immutable-exec|0755|zapret2/scripts/zapret-stop.sh" \
         "immutable-exec|0755|zapret2/scripts/zapret-restart.sh" \
@@ -726,6 +741,7 @@ package_contract_compare_release() {
         zapret2/lifecycle-contract.version \
         zapret2/scripts/common.sh zapret2/scripts/command-builder.sh \
         zapret2/scripts/daemon-replace-transaction.sh \
+        zapret2/scripts/topology-replace-transaction.sh \
         zapret2/scripts/package-contract.sh zapret2/scripts/runtime-config.sh \
         zapret2/scripts/runtime-init.sh zapret2/scripts/zapret-start.sh \
         zapret2/scripts/zapret-stop.sh zapret2/scripts/zapret-status.sh

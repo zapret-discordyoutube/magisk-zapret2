@@ -11,9 +11,18 @@ import java.security.MessageDigest
 import javax.inject.Inject
 import javax.inject.Singleton
 
-interface PresetRepository {
-    suspend fun loadCatalog(): PresetCatalog?
+/**
+ * Bounded read surface for consumers that only project the selected preset.
+ *
+ * This path reads runtime.ini and one TXT file. It intentionally cannot enumerate or qualify the
+ * preset catalog, invoke nfqws2 dry-run, or inspect immutable package contents.
+ */
+interface ActivePresetReader {
     suspend fun readActive(): ActivePresetSource?
+}
+
+interface PresetRepository : ActivePresetReader {
+    suspend fun loadCatalog(): PresetCatalog?
     suspend fun readCompatible(fileName: String): String?
     suspend fun preview(fileName: String, content: String): PresetPreviewOutcome
     suspend fun apply(fileName: String): PresetMutationOutcome
@@ -694,6 +703,7 @@ internal class RootPresetRunner @Inject constructor() : PresetRunner {
 internal class TransactionalPresetRepository @Inject constructor(
     private val runner: PresetRunner,
     private val mutationGate: PresetMutationGate,
+    private val presetStateRevision: PresetStateRevision,
 ) : PresetRepository {
 
     override suspend fun loadCatalog(): PresetCatalog? = withContext(Dispatchers.IO) {
@@ -764,16 +774,19 @@ internal class TransactionalPresetRepository @Inject constructor(
      * flow below survives for one reason: a module generation installed before that entry point
      * existed cannot grow it, and a preset must still be applicable on it.
      */
-    override suspend fun apply(fileName: String): PresetMutationOutcome = safelyMutate {
-        if (!PresetNamePolicy.isValid(fileName)) {
-            return@safelyMutate PresetMutationOutcome.Rejected(PresetIssue.UNSAFE_PRESET_NAME)
-        }
-        when (val transaction = applyTransaction(fileName)) {
-            PresetApplyTransaction.Unsupported -> applyStepwise(fileName)
-            PresetApplyTransaction.Indeterminate -> resolveIndeterminateApply(fileName)
-            is PresetApplyTransaction.Reported -> transaction.outcome
-        }
-    }
+    override suspend fun apply(fileName: String): PresetMutationOutcome =
+        publishCommittedMutation(
+            safelyMutate {
+                if (!PresetNamePolicy.isValid(fileName)) {
+                    return@safelyMutate PresetMutationOutcome.Rejected(PresetIssue.UNSAFE_PRESET_NAME)
+                }
+                when (val transaction = applyTransaction(fileName)) {
+                    PresetApplyTransaction.Unsupported -> applyStepwise(fileName)
+                    PresetApplyTransaction.Indeterminate -> resolveIndeterminateApply(fileName)
+                    is PresetApplyTransaction.Reported -> transaction.outcome
+                }
+            },
+        )
 
     private suspend fun applyTransaction(fileName: String): PresetApplyTransaction = try {
         runner.applyPresetTransaction(fileName)
@@ -841,41 +854,50 @@ internal class TransactionalPresetRepository @Inject constructor(
         expectedContent: String?,
         content: String,
         applyAfterSave: Boolean,
-    ): PresetMutationOutcome = safelyMutate {
-        if (!PresetNamePolicy.isValid(fileName)) {
-            return@safelyMutate PresetMutationOutcome.Rejected(PresetIssue.UNSAFE_PRESET_NAME)
-        }
-        val normalized = PresetContentPolicy.normalizedForWrite(content)
-        if (!PresetContentPolicy.isAllowed(normalized)) {
-            return@safelyMutate PresetMutationOutcome.Rejected(PresetIssue.PRESET_TOO_LARGE)
-        }
-        val candidate = candidateName(fileName)
-        if (!booleanResult { runner.writeCandidate(candidate, normalized) }) {
-            return@safelyMutate cleanupCandidate(candidate, PresetMutationOutcome.IoFailed)
-        }
-        val transaction = saveTransaction(
-            fileName = fileName,
-            candidateFileName = candidate,
-            expectedDigest = expectedContent?.let(::canonicalContentDigest),
-            applyAfterSave = applyAfterSave,
-        )
-        when (transaction) {
-            // The module consumed or discarded the candidate itself; nothing here may clean up
-            // after a transaction that already reported what it left behind.
-            is PresetApplyTransaction.Reported -> transaction.outcome
-            PresetApplyTransaction.Unsupported -> if (removeOrFalse(candidate)) {
-                saveStepwise(fileName, expectedContent, normalized, applyAfterSave)
-            } else {
-                PresetMutationOutcome.RollbackFailed
+    ): PresetMutationOutcome = publishCommittedMutation(
+        safelyMutate {
+            if (!PresetNamePolicy.isValid(fileName)) {
+                return@safelyMutate PresetMutationOutcome.Rejected(PresetIssue.UNSAFE_PRESET_NAME)
             }
-            PresetApplyTransaction.Indeterminate -> {
-                // The candidate name belongs to this attempt alone, so discarding it can never
-                // touch what the module published. Whether it is still there says nothing about
-                // the transaction, so the resolution below is read from the target instead.
-                removeOrFalse(candidate)
-                resolveIndeterminateSave(fileName, expectedContent, normalized, applyAfterSave)
+            val normalized = PresetContentPolicy.normalizedForWrite(content)
+            if (!PresetContentPolicy.isAllowed(normalized)) {
+                return@safelyMutate PresetMutationOutcome.Rejected(PresetIssue.PRESET_TOO_LARGE)
             }
+            val candidate = candidateName(fileName)
+            if (!booleanResult { runner.writeCandidate(candidate, normalized) }) {
+                return@safelyMutate cleanupCandidate(candidate, PresetMutationOutcome.IoFailed)
+            }
+            val transaction = saveTransaction(
+                fileName = fileName,
+                candidateFileName = candidate,
+                expectedDigest = expectedContent?.let(::canonicalContentDigest),
+                applyAfterSave = applyAfterSave,
+            )
+            when (transaction) {
+                // The module consumed or discarded the candidate itself; nothing here may clean up
+                // after a transaction that already reported what it left behind.
+                is PresetApplyTransaction.Reported -> transaction.outcome
+                PresetApplyTransaction.Unsupported -> if (removeOrFalse(candidate)) {
+                    saveStepwise(fileName, expectedContent, normalized, applyAfterSave)
+                } else {
+                    PresetMutationOutcome.RollbackFailed
+                }
+                PresetApplyTransaction.Indeterminate -> {
+                    // The candidate name belongs to this attempt alone, so discarding it can never
+                    // touch what the module published. Whether it is still there says nothing about
+                    // the transaction, so the resolution below is read from the target instead.
+                    removeOrFalse(candidate)
+                    resolveIndeterminateSave(fileName, expectedContent, normalized, applyAfterSave)
+                }
+            }
+        },
+    )
+
+    private fun publishCommittedMutation(outcome: PresetMutationOutcome): PresetMutationOutcome {
+        if (outcome.durable in COMMITTED_PRESET_OUTCOMES) {
+            presetStateRevision.publishCommittedMutation()
         }
+        return outcome
     }
 
     private suspend fun saveTransaction(
@@ -1127,6 +1149,14 @@ internal class TransactionalPresetRepository @Inject constructor(
 
     private fun previewCandidateName(fileName: String): String =
         "_${fileName.removeSuffix(".txt").take(180)}.preview.${System.nanoTime()}.txt"
+
+    private companion object {
+        val COMMITTED_PRESET_OUTCOMES = setOf(
+            PresetDurableOutcome.APPLIED,
+            PresetDurableOutcome.SAVED,
+            PresetDurableOutcome.SAVED_AND_APPLIED,
+        )
+    }
 }
 
 @Module
@@ -1134,6 +1164,9 @@ internal class TransactionalPresetRepository @Inject constructor(
 internal abstract class PresetRepositoryModule {
     @Binds
     abstract fun bindPresetRepository(implementation: TransactionalPresetRepository): PresetRepository
+
+    @Binds
+    abstract fun bindActivePresetReader(implementation: TransactionalPresetRepository): ActivePresetReader
 
     @Binds
     abstract fun bindPresetRunner(implementation: RootPresetRunner): PresetRunner

@@ -6,6 +6,12 @@
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)"
 ZAPRET_DIR="$(dirname "$SCRIPT_DIR")"
 
+# Sourced before any argument parsing on purpose: common.sh may re-exec this
+# script under the standalone-ash interpreter with the original "$@", so the
+# argument vector must still be intact when that happens.
+ZAPRET2_LAZY_FIREWALL_RECONCILER=1
+. "$SCRIPT_DIR/common.sh"
+
 runtime_canonical_sha256() {
     awk '
         {
@@ -51,7 +57,6 @@ output_dir="$(dirname "$output_path")"
 case "$output_path" in "$output_dir/runtime.ini") ;; *) echo "ERROR: unsafe runtime path" >&2; exit 1 ;; esac
 
 if [ "$mode" = commit-candidate ]; then
-    . "$SCRIPT_DIR/common.sh"
     commit_error() {
         z2_error_set CONFIG "$1" RUNTIME_COMMIT "$2" ||
             z2_error_set CONFIG RUNTIME_COMMIT_FAILED RUNTIME_COMMIT \
@@ -156,7 +161,6 @@ if [ "$mode" = inspect-machine ]; then
     # Reuse the exact lifecycle parser. This entry point is read-only. The
     # envelope fields are opaque to the APK; only their shape and bounds are
     # stable.
-    . "$SCRIPT_DIR/common.sh"
     RUNTIME_CONFIG="$output_path"
     if ! runtime_config_exists; then
         if [ ! -e "$RUNTIME_CONFIG" ] && [ ! -L "$RUNTIME_CONFIG" ]; then

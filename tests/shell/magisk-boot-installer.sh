@@ -11,8 +11,11 @@ ARCHIVE="$CASE/module.zip"
 PACKAGE="$CASE/package"
 SOURCE="$CASE/source"
 OWNED=0
+ARM64_FIXTURE_BINARY="${Z2_TEST_EXECUTABLE_SHELL:-/bin/true}"
+ARM_FIXTURE_BINARY="${Z2_TEST_ALTERNATE_BINARY:-/bin/false}"
 
 fail() { echo "FAIL: Magisk boot installer: $*" >&2; exit 1; }
+. "$ROOT/tests/shell/zip-fixture.sh"
 
 cleanup() {
     [ "$OWNED" = 1 ] || return 0
@@ -32,15 +35,16 @@ cp "$ROOT/module.prop" "$ROOT/customize.sh" "$ROOT/service.sh" \
     "$ROOT/uninstall.sh" "$ROOT/action.sh" "$SOURCE/"
 cp -R "$ROOT/system" "$ROOT/zapret2" "$SOURCE/"
 mkdir -p "$SOURCE/zapret2/bin/arm64-v8a" "$SOURCE/zapret2/bin/armeabi-v7a"
-cp /bin/true "$SOURCE/zapret2/bin/arm64-v8a/nfqws2"
-cp /bin/false "$SOURCE/zapret2/bin/armeabi-v7a/nfqws2"
+cp "$ARM64_FIXTURE_BINARY" "$SOURCE/zapret2/bin/arm64-v8a/nfqws2"
+cp "$ARM_FIXTURE_BINARY" "$SOURCE/zapret2/bin/armeabi-v7a/nfqws2"
 printf '%s\n' b78b52c4cd7f843da3ff0848a3430afbd401bdf2 > "$SOURCE/zapret2/upstream-zapret2.commit"
 printf '%s\n' v0.8.1 > "$SOURCE/zapret2/upstream-zapret2.release"
 printf '%064d\n' 0 > "$SOURCE/zapret2/upstream-zapret2.archive.sha256"
 . "$SOURCE/zapret2/scripts/package-contract.sh"
 package_contract_assemble_package "$SOURCE" "$PACKAGE" ||
     fail "cannot assemble installer fixture: $PACKAGE_CONTRACT_CODE $PACKAGE_CONTRACT_DETAIL"
-(cd "$PACKAGE" && zip -qr "$ARCHIVE" module.prop customize.sh service.sh uninstall.sh action.sh system zapret2)
+(cd "$PACKAGE" && z2_test_create_zip "$ARCHIVE" \
+    module.prop customize.sh service.sh uninstall.sh action.sh system zapret2)
 
 prepare_magisk_stage() {
     rm -rf "$UPDATE"
@@ -88,7 +92,8 @@ grep -Fq 'Extracting a fresh Zapret2 generation' "$CASE/fresh.log" ||
 if grep -Fq 'chown: unknown user/group' "$CASE/fresh.log"; then fail "space-bearing paths reached Magisk chown"; fi
 [ ! -e "$UPDATE/customize.sh" ] || fail "installer-only customize.sh remained installed"
 [ -x "$UPDATE/zapret2/nfqws2" ] || fail "selected runtime binary is not executable"
-cmp -s /bin/true "$UPDATE/zapret2/nfqws2" || fail "Magisk ARCH was not used to select arm64"
+cmp -s "$ARM64_FIXTURE_BINARY" "$UPDATE/zapret2/nfqws2" ||
+    fail "Magisk ARCH was not used to select arm64"
 [ -f "$UPDATE/zapret2/install-generation.meta" ] || fail "install generation is missing"
 expected_sha=$(sha256sum "$ARCHIVE" | awk 'NR == 1 { print $1 }')
 grep -Fxq "archive_sha256=$expected_sha" "$UPDATE/zapret2/install-generation.meta" ||

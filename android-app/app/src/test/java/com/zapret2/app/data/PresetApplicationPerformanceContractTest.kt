@@ -64,13 +64,17 @@ class PresetApplicationPerformanceContractTest {
             1,
             Regex("^\\. \"\\\$SCRIPT_DIR/common\\.sh\"$", RegexOption.MULTILINE).findAll(script).count(),
         )
-        assertTrue(script.contains("zapret-start.sh\" --replace"))
-        assertTrue(script.contains("--commit-candidate"))
-        // The only privileged children are the two boundaries that already own the replacement and
-        // the runtime.ini publication; the running-service answer is read from the committed
-        // receipt in process rather than by launching another status observer.
+        assertTrue(script.contains("topology-replace-transaction.sh"))
+        assertTrue(script.contains("replace_topology_in_locked_transaction"))
+        assertFalse(script.contains("zapret-start.sh\" --replace"))
+        // The lock-owning transaction publishes runtime.ini in process and spawns no privileged
+        // children at all: daemon-only and topology-changing replacement consume the current
+        // transaction proofs in process, the selection commit is a staged sibling renamed into
+        // place under the same lock, and the running-service answer is read from the committed
+        // receipt rather than by launching another status observer or a second lifecycle shell.
+        assertTrue(script.contains("commit_runtime_candidate"))
         assertEquals(
-            setOf("runtime-config.sh", "zapret-start.sh"),
+            emptySet<String>(),
             Regex("sh \"\\\$SCRIPT_DIR/([A-Za-z0-9._-]+)\"").findAll(script)
                 .map { it.groupValues[1] }
                 .toSet(),

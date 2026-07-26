@@ -12,10 +12,10 @@ fail() { echo "FAIL: status-snapshot-fast-path: $*" >&2; exit 1; }
 mkdir -p "$STATE" "$MODULE"
 chmod 0700 "$STATE"
 cp "$ROOT/zapret2/runtime.ini" "$MODULE/runtime.ini"
-cp "$(command -v sleep)" "$MODULE/nfqws2"
+cp "${Z2_TEST_EXECUTABLE_SHELL:-$(command -v sh)}" "$MODULE/nfqws2"
 chmod 0755 "$MODULE/nfqws2"
 
-"$MODULE/nfqws2" 30 &
+"$MODULE/nfqws2" -c 'trap "exit 0" TERM INT; while :; do sleep 1; done' &
 NFQWS_PID=$!
 trap 'kill "$NFQWS_PID" 2>/dev/null || true; wait "$NFQWS_PID" 2>/dev/null || true' EXIT
 
@@ -108,6 +108,18 @@ mv "$STATE/status.snapshot.legacy" "$STATE/status.snapshot"
 chmod 0600 "$STATE/status.snapshot"
 run_status
 grep -Fxq 'Z2_STATUS=ok' "$OUTPUT" && fail "an unbound legacy snapshot was accepted"
+
+# A process in another mount namespace, or a replaced package path, can retain
+# the same argv[0] and canonical pathname while executing an older inode.
+# Textual path equality must not authenticate that foreign generation.
+write_snapshot "$NFQWS_ARGV_SHA"
+cp "${Z2_TEST_EXECUTABLE_SHELL:-$(command -v sh)}" "$MODULE/nfqws2.next"
+chmod 0755 "$MODULE/nfqws2.next"
+mv "$MODULE/nfqws2.next" "$MODULE/nfqws2"
+run_status
+[ "$rc" -eq 2 ] || fail "same-path foreign executable inode returned $rc"
+grep -Fxq 'Z2_PID_VERIFIED=0' "$OUTPUT" ||
+    fail "same-path foreign executable inode retained verified process state"
 
 # A teardown that could not read one firewall family commits a stopped receipt
 # that deliberately withholds its verification claim. By then nothing of ours

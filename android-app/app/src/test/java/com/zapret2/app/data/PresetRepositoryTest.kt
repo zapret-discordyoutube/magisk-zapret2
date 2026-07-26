@@ -630,7 +630,7 @@ class PresetRepositoryTest {
     fun preview_stagesDraftUnderMutationGateAndAlwaysRemovesIt() = runBlocking {
         val runner = FakePresetRunner(validation = PresetValidation.Compatible)
         val gate = RecordingGate()
-        val repository = TransactionalPresetRepository(runner, gate)
+        val repository = testRepository(runner, gate)
 
         val outcome = repository.preview("custom.txt", "unsaved draft")
 
@@ -644,7 +644,7 @@ class PresetRepositoryTest {
     fun applyTrustsAlreadyQualifiedPresetAndDoesNotRepeatDeepValidation() = runBlocking {
         val runner = FakePresetRunner(validation = PresetValidation.Quarantined(PresetIssue.DEPENDENCY_MISSING))
         val gate = RecordingGate()
-        val repository = TransactionalPresetRepository(runner, gate)
+        val repository = testRepository(runner, gate)
 
         val result = repository.apply("published.txt")
 
@@ -656,10 +656,34 @@ class PresetRepositoryTest {
     }
 
     @Test
+    fun repositoryPublishesRevisionOnlyAfterACommittedPresetMutation() = runBlocking {
+        val revision = PresetStateRevision()
+        val runner = FakePresetRunner(validation = PresetValidation.Compatible)
+        val repository = testRepository(runner, RecordingGate(), revision)
+
+        assertEquals(0L, revision.revision.value)
+        assertEquals(PresetMutationOutcome.Applied, repository.apply("published.txt"))
+        assertEquals(1L, revision.revision.value)
+
+        assertEquals(
+            PresetMutationOutcome.Rejected(PresetIssue.UNSAFE_PRESET_NAME),
+            repository.apply("../unsafe.txt"),
+        )
+        assertEquals(1L, revision.revision.value)
+
+        runner.saveTransaction = PresetApplyTransaction.Reported(PresetMutationOutcome.Saved)
+        assertEquals(
+            PresetMutationOutcome.Saved,
+            repository.save("inactive.txt", null, "content", applyAfterSave = false),
+        )
+        assertEquals(2L, revision.revision.value)
+    }
+
+    @Test
     fun save_rejectsCandidateBeforeAtomicReplaceAndLeavesTargetUntouched() = runBlocking {
         val runner = FakePresetRunner(validation = PresetValidation.Quarantined(PresetIssue.NO_VALID_OPTIONS))
         runner.files["custom.txt"] = "old"
-        val repository = TransactionalPresetRepository(runner, RecordingGate())
+        val repository = testRepository(runner, RecordingGate())
 
         val result = repository.save("custom.txt", "old", "invalid", applyAfterSave = true)
 
@@ -685,7 +709,7 @@ class PresetRepositoryTest {
     @Test
     fun save_rejectsOversizedContentBeforeSnapshotOrWrite() = runBlocking {
         val runner = FakePresetRunner(validation = PresetValidation.Compatible)
-        val repository = TransactionalPresetRepository(runner, RecordingGate())
+        val repository = testRepository(runner, RecordingGate())
 
         val result = repository.save(
             "custom.txt",
@@ -703,7 +727,7 @@ class PresetRepositoryTest {
         val runner = FakePresetRunner(validation = PresetValidation.Compatible, restartSucceeds = false)
         runner.config = ActivePresetConfig("old.txt")
         runner.files["custom.txt"] = "old content"
-        val repository = TransactionalPresetRepository(runner, RecordingGate())
+        val repository = testRepository(runner, RecordingGate())
 
         val result = repository.save("custom.txt", "old content", "new content", applyAfterSave = true)
 
@@ -722,7 +746,7 @@ class PresetRepositoryTest {
             restartFailure = IllegalStateException("restart failed"),
         )
         runner.config = ActivePresetConfig("old.txt")
-        val repository = TransactionalPresetRepository(runner, RecordingGate())
+        val repository = testRepository(runner, RecordingGate())
 
         val result = repository.apply("good.txt")
 
@@ -739,7 +763,7 @@ class PresetRepositoryTest {
         )
         runner.config = ActivePresetConfig("old.txt")
         runner.files["custom.txt"] = "old content"
-        val repository = TransactionalPresetRepository(runner, RecordingGate())
+        val repository = testRepository(runner, RecordingGate())
 
         val result = repository.save("custom.txt", "old content", "new content", applyAfterSave = true)
 
@@ -751,7 +775,7 @@ class PresetRepositoryTest {
     @Test
     fun saveAndApply_newFileRestartFailureRestoresNonExistence() = runBlocking {
         val runner = FakePresetRunner(validation = PresetValidation.Compatible, restartSucceeds = false)
-        val repository = TransactionalPresetRepository(runner, RecordingGate())
+        val repository = testRepository(runner, RecordingGate())
 
         val result = repository.save("new.txt", null, "valid", applyAfterSave = true)
 
@@ -766,7 +790,7 @@ class PresetRepositoryTest {
             replaceReturns = false,
         )
         runner.files["custom.txt"] = "old content"
-        val repository = TransactionalPresetRepository(runner, RecordingGate())
+        val repository = testRepository(runner, RecordingGate())
 
         val result = repository.save("custom.txt", "old content", "new content", applyAfterSave = false)
 
@@ -782,7 +806,7 @@ class PresetRepositoryTest {
             restoreSucceeds = false,
         )
         runner.files["custom.txt"] = "old content"
-        val repository = TransactionalPresetRepository(runner, RecordingGate())
+        val repository = testRepository(runner, RecordingGate())
 
         val result = repository.save("custom.txt", "old content", "new content", applyAfterSave = false)
 
@@ -797,7 +821,7 @@ class PresetRepositoryTest {
             writeCandidateFailure = IllegalStateException("write result lost"),
         )
         runner.files["custom.txt"] = "old content"
-        val repository = TransactionalPresetRepository(runner, RecordingGate())
+        val repository = testRepository(runner, RecordingGate())
 
         val result = repository.save("custom.txt", "old content", "new content", applyAfterSave = false)
 
@@ -813,7 +837,7 @@ class PresetRepositoryTest {
             validationFailure = IllegalStateException("validator unavailable"),
         )
         runner.files["custom.txt"] = "old content"
-        val repository = TransactionalPresetRepository(runner, RecordingGate())
+        val repository = testRepository(runner, RecordingGate())
 
         val result = repository.save("custom.txt", "old content", "new content", applyAfterSave = false)
 
@@ -829,7 +853,7 @@ class PresetRepositoryTest {
             replaceFailure = IllegalStateException("replace result lost"),
         )
         runner.files["custom.txt"] = "old content"
-        val repository = TransactionalPresetRepository(runner, RecordingGate())
+        val repository = testRepository(runner, RecordingGate())
 
         val result = repository.save("custom.txt", "old content", "new content", applyAfterSave = false)
 
@@ -844,7 +868,7 @@ class PresetRepositoryTest {
             snapshotFileFailureOnCall = 2,
         )
         runner.files["custom.txt"] = "old content"
-        val repository = TransactionalPresetRepository(runner, RecordingGate())
+        val repository = testRepository(runner, RecordingGate())
 
         val result = repository.save("custom.txt", "old content", "new content", applyAfterSave = false)
 
@@ -860,7 +884,7 @@ class PresetRepositoryTest {
         )
         runner.config = ActivePresetConfig("old.txt")
         runner.files["custom.txt"] = "old content"
-        val repository = TransactionalPresetRepository(runner, RecordingGate())
+        val repository = testRepository(runner, RecordingGate())
 
         val result = repository.save("custom.txt", "old content", "new content", applyAfterSave = true)
 
@@ -878,7 +902,7 @@ class PresetRepositoryTest {
         )
         runner.config = ActivePresetConfig("old.txt")
         runner.files["custom.txt"] = "old content"
-        val repository = TransactionalPresetRepository(runner, RecordingGate())
+        val repository = testRepository(runner, RecordingGate())
 
         val result = repository.save("custom.txt", "old content", "new content", applyAfterSave = true)
 
@@ -891,7 +915,7 @@ class PresetRepositoryTest {
     fun save_rejectsChangedSourceBeforeCandidatePublication() = runBlocking {
         val runner = FakePresetRunner(validation = PresetValidation.Compatible)
         runner.files["custom.txt"] = "changed externally"
-        val repository = TransactionalPresetRepository(runner, RecordingGate())
+        val repository = testRepository(runner, RecordingGate())
 
         val result = repository.save(
             fileName = "custom.txt",
@@ -908,7 +932,7 @@ class PresetRepositoryTest {
     @Test
     fun olderModuleWithoutTheTransactionStillAppliesThroughTheStepwiseFallback() = runBlocking {
         val runner = FakePresetRunner(validation = PresetValidation.Compatible, restartSucceeds = true)
-        val repository = TransactionalPresetRepository(runner, RecordingGate())
+        val repository = testRepository(runner, RecordingGate())
 
         val result = repository.apply("good.txt")
 
@@ -927,7 +951,7 @@ class PresetRepositoryTest {
             applyTransaction = PresetApplyTransaction.Reported(PresetMutationOutcome.Applied),
         )
         val gate = RecordingGate()
-        val repository = TransactionalPresetRepository(runner, gate)
+        val repository = testRepository(runner, gate)
 
         val result = repository.apply("good.txt")
 
@@ -956,7 +980,7 @@ class PresetRepositoryTest {
                 validation = PresetValidation.Compatible,
                 applyTransaction = PresetApplyTransaction.Reported(outcome),
             )
-            val repository = TransactionalPresetRepository(runner, RecordingGate())
+            val repository = testRepository(runner, RecordingGate())
 
             assertEquals(outcome, repository.apply("good.txt"))
             assertEquals(listOf("apply-transaction"), runner.events)
@@ -978,13 +1002,13 @@ class PresetRepositoryTest {
 
         assertEquals(
             PresetMutationOutcome.RollbackFailed,
-            TransactionalPresetRepository(committed, RecordingGate()).apply("good.txt"),
+            testRepository(committed, RecordingGate()).apply("good.txt"),
         )
         assertEquals(0, committed.configWrites)
         assertEquals(0, committed.restartCalls)
         assertEquals(
             PresetMutationOutcome.IoFailed,
-            TransactionalPresetRepository(untouched, RecordingGate()).apply("good.txt"),
+            testRepository(untouched, RecordingGate()).apply("good.txt"),
         )
         assertEquals(0, untouched.configWrites)
     }
@@ -997,7 +1021,7 @@ class PresetRepositoryTest {
             applyIsProven = true,
         )
         runner.config = ActivePresetConfig("good.txt")
-        val repository = TransactionalPresetRepository(runner, RecordingGate())
+        val repository = testRepository(runner, RecordingGate())
 
         val result = repository.apply("good.txt")
 
@@ -1014,7 +1038,7 @@ class PresetRepositoryTest {
             applyTransactionFailure = IllegalStateException("root transport died"),
         )
         runner.config = ActivePresetConfig("good.txt")
-        val repository = TransactionalPresetRepository(runner, RecordingGate())
+        val repository = testRepository(runner, RecordingGate())
 
         val result = repository.apply("good.txt")
 
@@ -1027,7 +1051,7 @@ class PresetRepositoryTest {
     @Test
     fun apply_rejectsAnUnsafeNameBeforeReachingTheModule() = runBlocking {
         val runner = FakePresetRunner(validation = PresetValidation.Compatible)
-        val repository = TransactionalPresetRepository(runner, RecordingGate())
+        val repository = testRepository(runner, RecordingGate())
 
         val result = repository.apply("../escape.txt")
 
@@ -1044,7 +1068,7 @@ class PresetRepositoryTest {
         )
         runner.files["custom.txt"] = "old content"
         val gate = RecordingGate()
-        val repository = TransactionalPresetRepository(runner, gate)
+        val repository = testRepository(runner, gate)
 
         val result = repository.save("custom.txt", "old content", "new content", applyAfterSave = true)
 
@@ -1073,9 +1097,9 @@ class PresetRepositoryTest {
             saveTransaction = PresetApplyTransaction.Reported(PresetMutationOutcome.Saved),
         )
 
-        TransactionalPresetRepository(digested, RecordingGate())
+        testRepository(digested, RecordingGate())
             .save("custom.txt", "old content\r\n\r\n", "new content", applyAfterSave = false)
-        TransactionalPresetRepository(created, RecordingGate())
+        testRepository(created, RecordingGate())
             .save("new.txt", null, "fresh content", applyAfterSave = false)
 
         // Trailing blank lines and CRLF are the same content generation on both sides of the wire.
@@ -1105,7 +1129,7 @@ class PresetRepositoryTest {
                 saveTransaction = PresetApplyTransaction.Reported(outcome),
             )
             runner.files["custom.txt"] = "old content"
-            val repository = TransactionalPresetRepository(runner, RecordingGate())
+            val repository = testRepository(runner, RecordingGate())
 
             val result = repository.save("custom.txt", "old content", "new", applyAfterSave = true)
 
@@ -1120,7 +1144,7 @@ class PresetRepositoryTest {
         val runner = FakePresetRunner(validation = PresetValidation.Compatible)
         runner.config = ActivePresetConfig("old.txt")
         runner.files["custom.txt"] = "old content"
-        val repository = TransactionalPresetRepository(runner, RecordingGate())
+        val repository = testRepository(runner, RecordingGate())
 
         val result = repository.save("custom.txt", "old content", "new content", applyAfterSave = false)
 
@@ -1150,7 +1174,7 @@ class PresetRepositoryTest {
         val untouched = indeterminateSaveRunner(target = "old content")
         assertEquals(
             PresetMutationOutcome.IoFailed,
-            TransactionalPresetRepository(untouched, RecordingGate())
+            testRepository(untouched, RecordingGate())
                 .save("custom.txt", "old content", "new content", applyAfterSave = true),
         )
         assertEquals(0, untouched.configWrites)
@@ -1160,7 +1184,7 @@ class PresetRepositoryTest {
         val foreign = indeterminateSaveRunner(target = "somebody else's edit")
         assertEquals(
             PresetMutationOutcome.RollbackFailed,
-            TransactionalPresetRepository(foreign, RecordingGate())
+            testRepository(foreign, RecordingGate())
                 .save("custom.txt", "old content", "new content", applyAfterSave = true),
         )
 
@@ -1168,7 +1192,7 @@ class PresetRepositoryTest {
         val unselected = indeterminateSaveRunner(target = "new content")
         assertEquals(
             PresetMutationOutcome.Saved,
-            TransactionalPresetRepository(unselected, RecordingGate())
+            testRepository(unselected, RecordingGate())
                 .save("custom.txt", "old content", "new content", applyAfterSave = false),
         )
 
@@ -1176,7 +1200,7 @@ class PresetRepositoryTest {
         val uncommitted = indeterminateSaveRunner(target = "new content")
         assertEquals(
             PresetMutationOutcome.RollbackFailed,
-            TransactionalPresetRepository(uncommitted, RecordingGate())
+            testRepository(uncommitted, RecordingGate())
                 .save("custom.txt", "old content", "new content", applyAfterSave = true),
         )
         assertEquals(0, uncommitted.configWrites)
@@ -1187,14 +1211,14 @@ class PresetRepositoryTest {
         val unproven = indeterminateSaveRunner(target = "new content", selected = true)
         assertEquals(
             PresetMutationOutcome.RollbackFailed,
-            TransactionalPresetRepository(unproven, RecordingGate())
+            testRepository(unproven, RecordingGate())
                 .save("custom.txt", "old content", "new content", applyAfterSave = true),
         )
 
         val applied = indeterminateSaveRunner(target = "new content", selected = true, proven = true)
         assertEquals(
             PresetMutationOutcome.SavedAndApplied,
-            TransactionalPresetRepository(applied, RecordingGate())
+            testRepository(applied, RecordingGate())
                 .save("custom.txt", "old content", "new content", applyAfterSave = true),
         )
         assertEquals(
@@ -1217,7 +1241,7 @@ class PresetRepositoryTest {
         val autoApplied = indeterminateSaveRunner(target = "new content", selected = true, proven = true)
         assertEquals(
             PresetMutationOutcome.Applied,
-            TransactionalPresetRepository(autoApplied, RecordingGate())
+            testRepository(autoApplied, RecordingGate())
                 .save("custom.txt", "old content", "new content", applyAfterSave = false),
         )
     }
@@ -1229,7 +1253,7 @@ class PresetRepositoryTest {
             saveTransactionFailure = IllegalStateException("root transport died"),
         )
         runner.files["custom.txt"] = "old content"
-        val repository = TransactionalPresetRepository(runner, RecordingGate())
+        val repository = testRepository(runner, RecordingGate())
 
         val result = repository.save("custom.txt", "old content", "new content", applyAfterSave = true)
 
@@ -1244,7 +1268,7 @@ class PresetRepositoryTest {
     @Test
     fun save_rejectsAnUnsafeNameBeforeStagingAnythingForTheModule() = runBlocking {
         val runner = FakePresetRunner(validation = PresetValidation.Compatible)
-        val repository = TransactionalPresetRepository(runner, RecordingGate())
+        val repository = testRepository(runner, RecordingGate())
 
         val result = repository.save("../escape.txt", null, "content", applyAfterSave = false)
 
@@ -1272,6 +1296,12 @@ class PresetRepositoryTest {
         MessageDigest.getInstance("SHA-256")
             .digest(content.toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it) }
+
+    private fun testRepository(
+        runner: PresetRunner,
+        gate: PresetMutationGate,
+        revision: PresetStateRevision = PresetStateRevision(),
+    ): TransactionalPresetRepository = TransactionalPresetRepository(runner, gate, revision)
 
     private data class SaveRequest(
         val fileName: String,

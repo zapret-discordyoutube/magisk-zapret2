@@ -12,8 +12,20 @@ STRATEGY_CATALOG_MAX_BYTES=1048576
 COMPILED_ARGV_MAX_BYTES=2097152
 
 command_builder_safe_file_name_byte_length() {
-    local value="$1" LC_ALL=C
-    [ "${#value}" -le 255 ] 2>/dev/null
+    local value="$1" byte_length LC_ALL=C
+
+    # BusyBox ash on Android counts characters rather than bytes in ${#value},
+    # even with LC_ALL=C. Keep the common printable-ASCII path shell-native.
+    case "$value" in
+        *[!\ -~]*)
+            byte_length="$(printf '%s' "$value" | LC_ALL=C wc -c)" || return 1
+            ;;
+        *) byte_length="${#value}" ;;
+    esac
+    case "$byte_length" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$byte_length" -le 255 ] 2>/dev/null
 }
 
 is_safe_preset_file_name() {
@@ -510,8 +522,16 @@ collect_capture_ports() {
     }
 }
 
+# The exact configuration surface the compiled argv consumes. Binding the
+# artifact to this signature instead of the runtime.ini byte identity keeps a
+# compiled preset current across every runtime edit that does not change these
+# scalars — in particular a selection change, which only moves active_preset.
+current_config_signature() {
+    CONFIG_SIG_CURRENT="qnum=${QNUM:-200};mark=${DESYNC_MARK:-0x40000000};uid=${NFQWS_UID:-0:0};log=${LOG_MODE:-none}"
+}
+
 compile_preset_artifact() {
-    local preset_file="$1" logical_name="$2" artifact="$3" tmp source_sha runtime_sha size hashes rest
+    local preset_file="$1" logical_name="$2" artifact="$3" tmp source_sha size
     local install_generation=unbound
     local install_archive_sha256=0000000000000000000000000000000000000000000000000000000000000000
     # Retire any previous artifact's metadata proof first: an early failure
@@ -520,16 +540,10 @@ compile_preset_artifact() {
     COMPILED_METADATA_FOR=""
     validate_preset_file "$preset_file" "$logical_name" || return 1
     collect_capture_ports "$preset_file" || return 1
-    hashes="$(sha256sum "$preset_file" "$RUNTIME_CONFIG" 2>/dev/null)" || return 1
-    case "$hashes" in *"$Z2_NL"*) ;; *) return 1;; esac
-    source_sha="${hashes%%"$Z2_NL"*}"
+    source_sha="$(sha256sum "$preset_file" 2>/dev/null)" || return 1
     source_sha="${source_sha%% *}"
-    case "$source_sha" in [0-9a-f][0-9a-f]*) [ "${#source_sha}" -eq 64 ] || return 1 ;; *) return 1 ;; esac
-    rest="${hashes#*"$Z2_NL"}"
-    case "$rest" in *"$Z2_NL"*) return 1;; esac
-    runtime_sha="${rest%% *}"
-    runtime_sha="${runtime_sha%% *}"
-    case "$runtime_sha" in [0-9a-f][0-9a-f]*) [ "${#runtime_sha}" -eq 64 ] || return 1 ;; *) return 1 ;; esac
+    is_lower_sha256 "$source_sha" || return 1
+    current_config_signature
     # Offline preview/qualification may compile outside an installed
     # generation; such an artifact is deliberately never reusable by a live
     # launcher. Installed callers bind both immutable generation dimensions.
@@ -541,9 +555,9 @@ compile_preset_artifact() {
     [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || return 1
     umask 077
     {
-        printf 'Z2_ARGV\t3\n'
-        printf 'PRESET\t%s\nSHA256\t%s\nRUNTIME_SHA256\t%s\nINSTALL_GENERATION\t%s\nINSTALL_ARCHIVE_SHA256\t%s\nTCP\t%s\nUDP\t%s\n' \
-            "$logical_name" "$source_sha" "$runtime_sha" "$install_generation" \
+        printf 'Z2_ARGV\t4\n'
+        printf 'PRESET\t%s\nSHA256\t%s\nCONFIG_SIG\t%s\nINSTALL_GENERATION\t%s\nINSTALL_ARCHIVE_SHA256\t%s\nTCP\t%s\nUDP\t%s\n' \
+            "$logical_name" "$source_sha" "$CONFIG_SIG_CURRENT" "$install_generation" \
             "$install_archive_sha256" "$COMPILED_TCP_PORTS" "$COMPILED_UDP_PORTS"
         printf 'TCP_PKT_OUT\t%s\nTCP_PKT_IN\t%s\nUDP_PKT_OUT\t%s\nUDP_PKT_IN\t%s\nARGS\n' \
             "$COMPILED_TCP_PKT_OUT" "$COMPILED_TCP_PKT_IN" \
@@ -583,7 +597,7 @@ compile_preset_artifact() {
     # carries; publishing them here lets callers skip a full re-parse.
     COMPILED_PRESET="$logical_name"
     COMPILED_SOURCE_SHA256="$source_sha"
-    COMPILED_RUNTIME_SHA256="$runtime_sha"
+    COMPILED_CONFIG_SIG="$CONFIG_SIG_CURRENT"
     COMPILED_INSTALL_GENERATION="$install_generation"
     COMPILED_INSTALL_ARCHIVE_SHA256="$install_archive_sha256"
     COMPILED_METADATA_FOR="$artifact"
@@ -591,19 +605,18 @@ compile_preset_artifact() {
 
 compiled_artifact_binding_current() {
     local artifact="$1" preset_file="$2" logical_name="$3"
-    local current_source_sha current_runtime_sha
+    local current_source_sha
     read_compiled_artifact_metadata "$artifact" || return 1
     [ "$COMPILED_PRESET" = "$logical_name" ] || return 1
     read_install_generation_meta || return 1
     [ "$COMPILED_INSTALL_GENERATION" = "$INSTALL_META_GENERATION" ] &&
         [ "$COMPILED_INSTALL_ARCHIVE_SHA256" = "$INSTALL_META_ARCHIVE_SHA256" ] ||
         return 1
+    current_config_signature
+    [ "$COMPILED_CONFIG_SIG" = "$CONFIG_SIG_CURRENT" ] || return 1
     current_source_sha="$(sha256sum "$preset_file" 2>/dev/null)" || return 1
     current_source_sha="${current_source_sha%% *}"
-    [ "$current_source_sha" = "$COMPILED_SOURCE_SHA256" ] || return 1
-    current_runtime_sha="$(sha256sum "$RUNTIME_CONFIG" 2>/dev/null)" || return 1
-    current_runtime_sha="${current_runtime_sha%% *}"
-    [ "$current_runtime_sha" = "$COMPILED_RUNTIME_SHA256" ]
+    [ "$current_source_sha" = "$COMPILED_SOURCE_SHA256" ]
 }
 
 COMPILED_VALIDATION_RECEIPT_VERSION=1
@@ -644,10 +657,23 @@ read_compiled_validation_receipt() {
         is_lower_sha256 "$VALIDATED_ARGV_SHA256"
 }
 
+# A cache slot carries its receipt as a sibling; every other artifact uses the
+# canonical receipt slot.
+validation_receipt_path_for() {
+    case "$1" in
+        "$STATE_DIR"/argv-cache.*.argv) Z2_RECEIPT_PATH="$1.validated" ;;
+        *) Z2_RECEIPT_PATH="$COMPILED_VALIDATION_RECEIPT" ;;
+    esac
+}
+
 compiled_validation_receipt_current() {
-    local artifact="$1" argv_sha256
+    local artifact="$1" receipt="${2:-}" argv_sha256
+    [ -n "$receipt" ] || {
+        validation_receipt_path_for "$artifact"
+        receipt="$Z2_RECEIPT_PATH"
+    }
     read_install_generation_meta || return 1
-    read_compiled_validation_receipt || return 1
+    read_compiled_validation_receipt "$receipt" || return 1
     [ "$VALIDATED_INSTALL_GENERATION" = "$INSTALL_META_GENERATION" ] &&
         [ "$VALIDATED_INSTALL_ARCHIVE_SHA256" = "$INSTALL_META_ARCHIVE_SHA256" ] ||
         return 1
@@ -657,12 +683,17 @@ compiled_validation_receipt_current() {
 }
 
 write_compiled_validation_receipt() {
-    local artifact="$1" argv_sha256 tmp="$COMPILED_VALIDATION_RECEIPT.tmp.$$"
+    local artifact="$1" receipt="${2:-}" argv_sha256 tmp
+    [ -n "$receipt" ] || {
+        validation_receipt_path_for "$artifact"
+        receipt="$Z2_RECEIPT_PATH"
+    }
+    tmp="$receipt.tmp.$$"
     read_install_generation_meta || return 1
     argv_sha256="$(sha256sum "$artifact" 2>/dev/null)" || return 1
     argv_sha256="${argv_sha256%% *}"
     is_lower_sha256 "$argv_sha256" || return 1
-    state_file_target_is_safe "$COMPILED_VALIDATION_RECEIPT" || return 1
+    state_file_target_is_safe "$receipt" || return 1
     state_path_is_managed_file "$tmp" || return 1
     [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || return 1
     umask 077
@@ -672,10 +703,60 @@ write_compiled_validation_receipt() {
         printf 'install_archive_sha256=%s\n' "$INSTALL_META_ARCHIVE_SHA256"
         printf 'argv_sha256=%s\n' "$argv_sha256"
     } > "$tmp" || { rm -f "$tmp"; return 1; }
-    mv -f "$tmp" "$COMPILED_VALIDATION_RECEIPT" || {
+    mv -f "$tmp" "$receipt" || {
             rm -f "$tmp"
             return 1
         }
+}
+
+# Validated-artifact cache: one flat STATE_DIR slot per exact preset content
+# identity, so the managed-file policy applies unchanged. STATE_DIR is a
+# root-owned 0700 directory and slots are only ever written with their dry-run
+# receipt by a lock holder, so a hit consumes the slot in place — no copy into
+# the canonical path and no receipt recomputation. The launcher still
+# validates every argv line at exec time; anything stale or damaged misses.
+compiled_cache_restore() {
+    local preset_file="$1" logical_name="$2" slot
+    COMPILED_CACHE_SOURCE_SHA="$(sha256sum "$preset_file" 2>/dev/null)" || return 1
+    COMPILED_CACHE_SOURCE_SHA="${COMPILED_CACHE_SOURCE_SHA%% *}"
+    is_lower_sha256 "$COMPILED_CACHE_SOURCE_SHA" || return 1
+    slot="$STATE_DIR/argv-cache.$COMPILED_CACHE_SOURCE_SHA.argv"
+    state_file_is_secure "$slot" || return 1
+    read_compiled_artifact_header "$slot" || return 1
+    [ "$COMPILED_PRESET" = "$logical_name" ] &&
+        [ "$COMPILED_SOURCE_SHA256" = "$COMPILED_CACHE_SOURCE_SHA" ] || return 1
+    current_config_signature
+    [ "$COMPILED_CONFIG_SIG" = "$CONFIG_SIG_CURRENT" ] || return 1
+    COMPILED_ARGV_FILE="$slot"
+    COMPILED_METADATA_FOR="$slot"
+    return 0
+}
+
+compiled_cache_store() {
+    local artifact="$1" source_sha="$2" slot tmp keep
+    is_lower_sha256 "$source_sha" || return 1
+    slot="$STATE_DIR/argv-cache.$source_sha.argv"
+    # A slot pinned as the live rollback source must survive both the
+    # overflow sweep and an aliasing overwrite.
+    keep="${Z2_DAEMON_REPLACE_ROLLBACK_ARTIFACT:-}"
+    [ "$slot" != "$keep" ] || return 0
+    # Crude, self-healing bound: a full sweep on overflow beats bookkeeping.
+    set -- "$STATE_DIR"/argv-cache.*.argv
+    if [ "$#" -gt 16 ]; then
+        for tmp in "$STATE_DIR"/argv-cache.*.argv; do
+            [ "$tmp" != "$keep" ] || continue
+            rm -f "$tmp" "$tmp.validated" 2>/dev/null
+        done
+    fi
+    state_file_target_is_safe "$slot" || return 1
+    tmp="$slot.tmp.$$"
+    rm -f "$tmp" 2>/dev/null
+    umask 077
+    cp "$artifact" "$tmp" && mv -f "$tmp" "$slot" || {
+        rm -f "$tmp" 2>/dev/null
+        return 1
+    }
+    write_compiled_validation_receipt "$slot" "$slot.validated"
 }
 
 ensure_compiled_artifact() {
@@ -684,15 +765,25 @@ ensure_compiled_artifact() {
         COMPILED_ARGV_FILE="$artifact"
         return 0
     fi
+    compiled_cache_restore "$preset_file" "$logical_name" && return 0
     compile_preset_artifact "$preset_file" "$logical_name" "$artifact"
 }
 
+# Header-only projection of read_compiled_artifact_metadata for callers that
+# already hold a content proof (the dry-run receipt pins the artifact's exact
+# sha256): every metadata field lives before ARGS, and the launcher re-checks
+# each argv line itself, so re-walking the argv body here proves nothing.
+read_compiled_artifact_header() {
+    local artifact="$1" mode=header
+    read_compiled_artifact_metadata "$artifact" "$mode"
+}
+
 read_compiled_artifact_metadata() {
-    local artifact="$1" line stage=0 seen_preset=0 seen_sha=0 seen_runtime_sha=0 seen_tcp=0 seen_udp=0
+    local artifact="$1" mode="${2:-full}" line stage=0 seen_preset=0 seen_sha=0 seen_config_sig=0 seen_tcp=0 seen_udp=0
     local seen_install_generation=0 seen_install_archive=0
     local seen_tcp_out=0 seen_tcp_in=0 seen_udp_out=0 seen_udp_in=0 size tab key value
     COMPILED_METADATA_FOR=""
-    COMPILED_PRESET=; COMPILED_SOURCE_SHA256=; COMPILED_RUNTIME_SHA256=; COMPILED_TCP_PORTS=; COMPILED_UDP_PORTS=
+    COMPILED_PRESET=; COMPILED_SOURCE_SHA256=; COMPILED_CONFIG_SIG=; COMPILED_TCP_PORTS=; COMPILED_UDP_PORTS=
     COMPILED_INSTALL_GENERATION=; COMPILED_INSTALL_ARCHIVE_SHA256=
     COMPILED_TCP_PKT_OUT=; COMPILED_TCP_PKT_IN=; COMPILED_UDP_PKT_OUT=; COMPILED_UDP_PKT_IN=
     [ -f "$artifact" ] && [ ! -L "$artifact" ] && [ -r "$artifact" ] || return 1
@@ -702,18 +793,22 @@ read_compiled_artifact_metadata() {
     tab='	'
     while IFS= read -r line || [ -n "$line" ]; do
         if [ "$stage" -eq 0 ]; then
-            [ "$line" = "Z2_ARGV${tab}3" ] || return 1
+            [ "$line" = "Z2_ARGV${tab}4" ] || return 1
             stage=1
             continue
         fi
         if [ "$stage" -eq 1 ]; then
-            [ "$line" != ARGS ] || { stage=2; continue; }
+            [ "$line" != ARGS ] || {
+                stage=2
+                [ "$mode" = full ] || break
+                continue
+            }
             case "$line" in *"$tab"*) ;; *) return 1 ;; esac
             key="${line%%"$tab"*}"; value="${line#*"$tab"}"
             case "$key" in
                 PRESET) [ "$seen_preset" -eq 0 ] || return 1; COMPILED_PRESET="$value"; seen_preset=1 ;;
                 SHA256) [ "$seen_sha" -eq 0 ] || return 1; COMPILED_SOURCE_SHA256="$value"; seen_sha=1 ;;
-                RUNTIME_SHA256) [ "$seen_runtime_sha" -eq 0 ] || return 1; COMPILED_RUNTIME_SHA256="$value"; seen_runtime_sha=1 ;;
+                CONFIG_SIG) [ "$seen_config_sig" -eq 0 ] || return 1; COMPILED_CONFIG_SIG="$value"; seen_config_sig=1 ;;
                 INSTALL_GENERATION) [ "$seen_install_generation" -eq 0 ] || return 1; COMPILED_INSTALL_GENERATION="$value"; seen_install_generation=1 ;;
                 INSTALL_ARCHIVE_SHA256) [ "$seen_install_archive" -eq 0 ] || return 1; COMPILED_INSTALL_ARCHIVE_SHA256="$value"; seen_install_archive=1 ;;
                 TCP) [ "$seen_tcp" -eq 0 ] || return 1; COMPILED_TCP_PORTS="$value"; seen_tcp=1 ;;
@@ -729,13 +824,14 @@ read_compiled_artifact_metadata() {
         case "$line" in --*) ;; *) return 1 ;; esac
     done < "$artifact"
     [ "$stage" -eq 2 ] &&
-        [ "$seen_preset$seen_sha$seen_runtime_sha$seen_install_generation$seen_install_archive$seen_tcp$seen_udp$seen_tcp_out$seen_tcp_in$seen_udp_out$seen_udp_in" = 11111111111 ] ||
+        [ "$seen_preset$seen_sha$seen_config_sig$seen_install_generation$seen_install_archive$seen_tcp$seen_udp$seen_tcp_out$seen_tcp_in$seen_udp_out$seen_udp_in" = 11111111111 ] ||
         return 1
     is_safe_preset_file_name "$COMPILED_PRESET" || return 1
     case "$COMPILED_SOURCE_SHA256" in *[!0-9a-f]*|'') return 1 ;; esac
     [ "${#COMPILED_SOURCE_SHA256}" -eq 64 ] || return 1
-    case "$COMPILED_RUNTIME_SHA256" in *[!0-9a-f]*|'') return 1 ;; esac
-    [ "${#COMPILED_RUNTIME_SHA256}" -eq 64 ] || return 1
+    case "$COMPILED_CONFIG_SIG" in qnum=*";mark="*";uid="*";log="*) ;; *) return 1 ;; esac
+    [ "${#COMPILED_CONFIG_SIG}" -le 160 ] || return 1
+    case "$COMPILED_CONFIG_SIG" in *[[:cntrl:]]*) return 1 ;; esac
     is_safe_token "$COMPILED_INSTALL_GENERATION" || return 1
     is_lower_sha256 "$COMPILED_INSTALL_ARCHIVE_SHA256" || return 1
     [ -z "$COMPILED_TCP_PORTS" ] ||

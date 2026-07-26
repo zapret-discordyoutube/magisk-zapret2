@@ -81,7 +81,15 @@ if [ "${Z2_SAVE_TEST_RUNNING:-1}" = 1 ]; then
 else
     service_process_is_running() { return 1; }
 fi
+prepare_running_rollback_artifact() { return 0; }
 replace_daemon_in_locked_transaction() {
+    [ "$ACTIVE_PRESET" = "$APPLY_REQUESTED_PRESET" ] || {
+        Z2_DAEMON_REPLACE_ERROR_DOMAIN=CONFIG
+        Z2_DAEMON_REPLACE_ERROR_CODE=CONFIG_GENERATION_MISMATCH
+        Z2_DAEMON_REPLACE_ERROR_STAGE=APPLY_REPLACE
+        Z2_DAEMON_REPLACE_ERROR_DETAIL="the in-process selection projection is stale"
+        return 1
+    }
     printf 'replace:in-process\n' >> "${Z2_SAVE_TEST_LOG:?}"
     if [ "${Z2_SAVE_TEST_REPLACE_FAILS:-0}" = 1 ]; then
         Z2_DAEMON_REPLACE_CONTROLLED=1

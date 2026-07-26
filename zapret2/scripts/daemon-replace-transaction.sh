@@ -17,6 +17,8 @@ Z2_DAEMON_REPLACE_NEW_PID=0
 Z2_DAEMON_REPLACE_LAUNCHED_PID=
 Z2_DAEMON_REPLACE_LAUNCHED_START=
 Z2_DAEMON_REPLACE_LAUNCHED_ARGV_SHA256=
+Z2_DAEMON_REPLACE_TOPOLOGY_CHANGED=0
+Z2_DAEMON_REPLACE_STATUS_DIAGNOSTICS=
 
 daemon_replace_set_error() {
     Z2_DAEMON_REPLACE_ERROR_DOMAIN="$1"
@@ -76,14 +78,17 @@ daemon_replace_prepare() {
         return 1
 
     previous_fingerprint="$OWNER_STATE_FIREWALL_FINGERPRINT"
-    [ "$PORTS_TCP" = "$OWNER_STATE_PORTS_TCP" ] &&
-        [ "$PORTS_UDP" = "$OWNER_STATE_PORTS_UDP" ] &&
-        [ "$TCP_PKT_OUT" = "$OWNER_STATE_TCP_PKT_OUT" ] &&
-        [ "$TCP_PKT_IN" = "$OWNER_STATE_TCP_PKT_IN" ] &&
-        [ "$UDP_PKT_OUT" = "$OWNER_STATE_UDP_PKT_OUT" ] &&
-        [ "$UDP_PKT_IN" = "$OWNER_STATE_UDP_PKT_IN" ] &&
-        canonical_mark "$DESYNC_MARK" &&
-        [ "$MARK_CANONICAL" = "$OWNER_STATE_DESYNC_MARK" ] || return 1
+    canonical_mark "$DESYNC_MARK" || return 1
+    if [ "$PORTS_TCP" != "$OWNER_STATE_PORTS_TCP" ] ||
+       [ "$PORTS_UDP" != "$OWNER_STATE_PORTS_UDP" ] ||
+       [ "$TCP_PKT_OUT" != "$OWNER_STATE_TCP_PKT_OUT" ] ||
+       [ "$TCP_PKT_IN" != "$OWNER_STATE_TCP_PKT_IN" ] ||
+       [ "$UDP_PKT_OUT" != "$OWNER_STATE_UDP_PKT_OUT" ] ||
+       [ "$UDP_PKT_IN" != "$OWNER_STATE_UDP_PKT_IN" ] ||
+       [ "$MARK_CANONICAL" != "$OWNER_STATE_DESYNC_MARK" ]; then
+        Z2_DAEMON_REPLACE_TOPOLOGY_CHANGED=1
+        return 2
+    fi
     IPV4_CONNBYTES="$OWNER_STATE_IPV4_CONNBYTES"
     IPV4_MULTIPORT="$OWNER_STATE_IPV4_MULTIPORT"
     IPV4_MARK="$OWNER_STATE_IPV4_MARK"
@@ -190,7 +195,7 @@ daemon_replace_write_ok_status() {
     fi
     STATUS_ERROR_STATUS=OK; STATUS_ERROR_DOMAIN=NONE; STATUS_ERROR_CODE=NONE
     STATUS_ERROR_STAGE=NONE; STATUS_ERROR_DETAIL=
-    STATUS_DIAGNOSTICS="validated daemon-only replacement; authenticated firewall generation retained"
+    STATUS_DIAGNOSTICS="${Z2_DAEMON_REPLACE_STATUS_DIAGNOSTICS:-validated daemon-only replacement; authenticated firewall generation retained}"
     write_iptables_status ok
 }
 
@@ -245,11 +250,24 @@ replace_daemon_in_locked_transaction() {
     Z2_DAEMON_REPLACE_ERROR_DETAIL=
     Z2_DAEMON_REPLACE_CONTROLLED=0
     Z2_DAEMON_REPLACE_NEW_PID=0
+    Z2_DAEMON_REPLACE_TOPOLOGY_CHANGED=0
+    Z2_DAEMON_REPLACE_STATUS_DIAGNOSTICS=
 
-    daemon_replace_prepare ||
-        daemon_replace_set_error PROCESS PROCESS_STOP_FAILED START_CLEANUP \
-            "the running daemon or retained firewall receipt is not eligible for in-transaction replacement" ||
-        return 1
+    daemon_replace_prepare
+    case $? in
+        0) ;;
+        2)
+            # A changed capture topology is a typed routing result, not a
+            # failure: the lock-owning caller loads the topology replacement
+            # layer and re-enters with the same proofs.
+            return 2
+            ;;
+        *)
+            daemon_replace_set_error PROCESS PROCESS_STOP_FAILED START_CLEANUP \
+                "the running daemon or retained firewall receipt is not eligible for in-transaction replacement" || :
+            return 1
+            ;;
+    esac
 
     Z2_DAEMON_REPLACE_CONTROLLED=1
     stop_pidfile_process || {

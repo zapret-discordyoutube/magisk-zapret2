@@ -2,11 +2,18 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
-FIXTURES="$ROOT/tests/fixtures/runtime-config"
+FIXTURE_SOURCE="$ROOT/tests/fixtures/runtime-config"
 TMP_ROOT="${Z2_TEST_TMP:-$(mktemp -d "${TMPDIR:-/tmp}/zapret2-runtime-contract.XXXXXX")}"
 if [ -z "${Z2_TEST_TMP:-}" ]; then
     trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
 fi
+FIXTURES="$TMP_ROOT/runtime-config-fixtures"
+mkdir -p "$FIXTURES"
+cp "$FIXTURE_SOURCE"/* "$FIXTURES/"
+# adb push commonly materializes files as 0666.  These are content fixtures,
+# so give their private copies a deterministic safe mode before exercising the
+# runtime parser's real ownership/mode checks.
+chmod 0600 "$FIXTURES"/*
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 

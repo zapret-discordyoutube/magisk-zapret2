@@ -85,6 +85,31 @@ class RuntimeCostBoundaryTest {
     }
 
     @Test
+    fun profileProjectionHasOnlyTheBoundedActivePresetReadSurface() {
+        val presets = repositoryFile(
+            "android-app/app/src/main/java/com/zapret2/app/data/PresetRepository.kt",
+        ).readText()
+        val activeReader = presets
+            .substringAfter("interface ActivePresetReader")
+            .substringBefore("interface PresetRepository")
+        val activeRead = presets
+            .substringAfter("override suspend fun readActive()")
+            .substringBefore("override suspend fun readCompatible(")
+        val profiles = repositoryFile(
+            "android-app/app/src/main/java/com/zapret2/app/data/ProfileRepository.kt",
+        ).readText()
+
+        assertTrue(activeReader.contains("suspend fun readActive()"))
+        assertFalse(activeReader.contains("loadCatalog"))
+        assertFalse(activeReader.contains("preview"))
+        assertFalse(activeRead.contains("listPresets"))
+        assertFalse(activeRead.contains("validatePreset"))
+        assertFalse(activeRead.contains("previewPreset"))
+        assertTrue(profiles.contains("private val activePresetReader: ActivePresetReader"))
+        assertTrue(profiles.contains("activePresetReader.readActive()"))
+    }
+
+    @Test
     fun profileRead_usesOnlyActiveSelectionAndNeverEnumeratesThePresetCatalog() {
         val profiles = repositoryFile(
             "android-app/app/src/main/java/com/zapret2/app/data/ProfileRepository.kt",
@@ -93,7 +118,7 @@ class RuntimeCostBoundaryTest {
             .substringAfter("override suspend fun loadActive()")
             .substringBefore("override suspend fun loadStrategies(")
 
-        assertTrue(loadActive.contains("presets.readActive()"))
+        assertTrue(loadActive.contains("activePresetReader.readActive()"))
         assertFalse(loadActive.contains("loadCatalog"))
         assertFalse(loadActive.contains("listPresets"))
     }
@@ -130,7 +155,7 @@ class RuntimeCostBoundaryTest {
     }
 
     @Test
-    fun successfulPresetAndProfileMutations_projectVerifiedResultsWithoutCatalogReloads() {
+    fun successfulPresetAndProfileMutations_refreshOnlyTheBoundedActiveProjection() {
         val presets = repositoryFile(
             "android-app/app/src/main/java/com/zapret2/app/viewmodel/PresetsViewModel.kt",
         ).readText()
@@ -149,8 +174,9 @@ class RuntimeCostBoundaryTest {
 
         assertFalse(apply.contains("loadPresetsNow()"))
         assertFalse(save.contains("loadPresetsNow()"))
-        assertTrue(mutate.contains("result.publishedDocument"))
-        assertTrue(mutate.contains("outcome == PresetMutationOutcome.SourceChanged -> repository.loadActive()"))
+        assertTrue(mutate.contains("reloadPending = true"))
+        assertFalse(mutate.contains("loadCatalog"))
+        assertFalse(mutate.contains("loadStrategies"))
     }
 
     @Test

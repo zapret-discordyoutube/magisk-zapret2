@@ -209,7 +209,7 @@ z2_fw_run_restore() {
         return 1
     }
     umask 077
-    if ! : > "$capture" || ! chmod 0600 "$capture" 2>/dev/null; then
+    if ! : > "$capture"; then
         rm -f "$capture" 2>/dev/null
         Z2_FW_LAST_FAILURE_CLASS=STATE_UNAVAILABLE
         Z2_FW_LAST_RESTORE_DETAIL="cannot create private firewall diagnostic capture"
@@ -507,6 +507,98 @@ z2_fw_write_batch() {
     z2_emit_line "$batch" > "$path"
 }
 
+# A running generation already owns exactly one stable chain/anchor topology.
+# A preset whose capture ports change does not need that namespace torn down
+# and rediscovered: flush only the authenticated private chains and repopulate
+# them in one iptables-restore COMMIT. The built-in anchors never move, so the
+# kernel transition is atomic for this family and cannot expose a duplicate or
+# half-authored chain.
+z2_fw_write_reconfigure_batch() {
+    local path="$1" connbytes="$2" multiport="${3:-1}" batch nl='
+'
+    batch="*mangle$nl-F $Z2_FW_OUT_CHAIN"
+    [ "$connbytes" != 1 ] || batch="$batch$nl-F $Z2_FW_IN_CHAIN"
+    z2_fw_build_batch_rules "$Z2_FW_OUT_CHAIN" tcp out "$PORTS_TCP" "$TCP_PKT_OUT" original "$connbytes" "$multiport" || return 1
+    [ -z "$Z2_FW_BUILT_RULES" ] || batch="$batch$nl$Z2_FW_BUILT_RULES"
+    z2_fw_build_batch_rules "$Z2_FW_OUT_CHAIN" udp out "$PORTS_UDP" "$UDP_PKT_OUT" original "$connbytes" "$multiport" || return 1
+    [ -z "$Z2_FW_BUILT_RULES" ] || batch="$batch$nl$Z2_FW_BUILT_RULES"
+    if [ "$connbytes" = 1 ]; then
+        z2_fw_build_batch_rules "$Z2_FW_IN_CHAIN" tcp in "$PORTS_TCP" "$TCP_PKT_IN" reply 1 "$multiport" || return 1
+        [ -z "$Z2_FW_BUILT_RULES" ] || batch="$batch$nl$Z2_FW_BUILT_RULES"
+        z2_fw_build_batch_rules "$Z2_FW_IN_CHAIN" udp in "$PORTS_UDP" "$UDP_PKT_IN" reply 1 "$multiport" || return 1
+        [ -z "$Z2_FW_BUILT_RULES" ] || batch="$batch$nl$Z2_FW_BUILT_RULES"
+    fi
+    batch="$batch${nl}COMMIT"
+    z2_emit_line "$batch" > "$path"
+}
+
+# Hot replacement consumes capabilities already authenticated in owner.meta.
+# The deterministic rule vocabulary therefore needs one atomic COMMIT, not a
+# speculative --test plus a second COMMIT. A rejected COMMIT leaves the family
+# unchanged; exact post-publication verification still gates success.
+z2_fw_reconfigure_family() {
+    local tool="$1" connbytes="$2" multiport="${3:-1}" restore batch
+    Z2_FW_BACKEND=""; Z2_FW_CONNBYTES=0; Z2_FW_MULTIPORT="$multiport"
+    Z2_FW_RULES=0; Z2_FW_CHAINS=0; Z2_FW_ANCHORS=0
+    Z2_FW_FAILURE_CLASS=""; Z2_FW_ERROR_DETAIL=""
+    case "$connbytes:$multiport" in [01]:[01]) ;; *) return 2;; esac
+    z2_fw_restore_command_read "$tool" || return 2
+    restore="$Z2_FW_RESTORE_COMMAND"
+    command -v "$restore" >/dev/null 2>&1 || return 3
+    batch="$STATE_DIR/tmp/firewall-reconfigure.${tool}.$$"
+    z2_fw_ensure_scratch_dir || {
+        Z2_FW_FAILURE_CLASS=STATE_UNAVAILABLE
+        Z2_FW_ERROR_DETAIL="unavailable firewall scratch directory"
+        return 1
+    }
+    state_path_is_managed_file "$batch" || {
+        Z2_FW_FAILURE_CLASS=STATE_UNAVAILABLE
+        Z2_FW_ERROR_DETAIL="unsafe firewall reconfiguration path"
+        return 1
+    }
+    z2_fw_claim_scratch_path "$batch" || {
+        Z2_FW_FAILURE_CLASS=STATE_UNAVAILABLE
+        Z2_FW_ERROR_DETAIL="firewall reconfiguration path already exists"
+        return 1
+    }
+    umask 077
+    z2_fw_write_reconfigure_batch "$batch" "$connbytes" "$multiport" || {
+        rm -f "$batch" 2>/dev/null
+        Z2_FW_FAILURE_CLASS=STATE_UNAVAILABLE
+        Z2_FW_ERROR_DETAIL="cannot create firewall reconfiguration batch"
+        return 1
+    }
+    if ! z2_fw_run_restore "$restore" "$tool" commit "$batch"; then
+        z2_fw_set_restore_failure "$restore" commit "$connbytes"
+        rm -f "$batch" 2>/dev/null || {
+            Z2_FW_FAILURE_CLASS=STATE_UNAVAILABLE
+            Z2_FW_ERROR_DETAIL="cannot remove failed firewall reconfiguration batch"
+            return 1
+        }
+        return 1
+    fi
+    rm -f "$batch" 2>/dev/null || {
+        Z2_FW_FAILURE_CLASS=STATE_UNAVAILABLE
+        Z2_FW_ERROR_DETAIL="cannot remove committed firewall reconfiguration batch"
+        return 1
+    }
+    # A zero restore exit is necessary but has been observed insufficient on
+    # real kernels: a family commit can succeed while the published table does
+    # not carry the authored topology, and a silent divergence here survives
+    # daemon-only replacements untouched until a later audit refuses to work
+    # on it. The canonical-signature comparison is the only detector for that
+    # class, so it stays on the mutation path.
+    if ! z2_fw_verify_family "$tool" "$connbytes" "$multiport"; then
+        Z2_FW_FAILURE_CLASS=POSTCONDITION_FAILED
+        Z2_FW_ERROR_DETAIL="$Z2_FW_VERIFY_DETAIL"
+        return 1
+    fi
+    Z2_FW_BACKEND=restore
+    Z2_FW_CONNBYTES="$connbytes"
+    Z2_FW_MULTIPORT="$multiport"
+    return 0
+}
+
 z2_fw_write_cleanup_batch() {
     local path="$1" batch nl='
 '
@@ -628,26 +720,32 @@ z2_fw_verify_family() {
     # compares canonical rule signatures built from the closed module
     # vocabulary, never the authored batch text. Anything outside that
     # vocabulary inside the owned namespace is a foreign rule.
-    verification="$(printf '%s\n' "$listing" | awk \
+    # Android awk rejects newlines inside -v assignments. Feed the authored
+    # rule sets and the backend snapshot as distinct stdin sections instead;
+    # only bounded, single-line scalar identities remain command arguments.
+    verification="$({
+        printf '%s\n' 'Z2_EXPECTED_OUT_BEGIN'
+        printf '%s\n' "$out_tcp"
+        printf '%s\n' "$out_udp"
+        printf '%s\n' 'Z2_EXPECTED_IN_BEGIN'
+        printf '%s\n' "$in_tcp"
+        printf '%s\n' "$in_udp"
+        printf '%s\n' 'Z2_LISTING_BEGIN'
+        printf '%s\n' "$listing"
+    } | awk \
         -v out="$Z2_FW_OUT_CHAIN" -v inchain="$Z2_FW_IN_CHAIN" \
-        -v connbytes="$connbytes" \
-        -v out_tcp="$out_tcp" -v out_udp="$out_udp" \
-        -v in_tcp="$in_tcp" -v in_udp="$in_udp" '
+        -v connbytes="$connbytes" '
         # Without multiport a port list becomes one rule per interval, so a
         # single expected signature per chain and protocol is no longer the
         # shape to compare against. Expectations are loaded as a multiset of
         # canonical signatures: every published rule must match one, and every
         # expected one must appear exactly as often as it was authored.
-        function load_expected(rules, chainkey,    n, lines, i, sig) {
-            if (rules == "") return
-            n = split(rules, lines, "\n")
-            for (i = 1; i <= n; i++) {
-                if (lines[i] == "") continue
-                sig = canon(lines[i])
-                if (sig == "") { expected_bad = 1; return }
-                exp_count[sig]++
-                exp_total[chainkey]++
-            }
+        function load_expected_line(line, chainkey,    sig) {
+            if (line == "") return
+            sig = canon(line)
+            if (sig == "") { expected_bad = 1; return }
+            exp_count[sig]++
+            exp_total[chainkey]++
         }
         function expectations_met(chainkey,    sig) {
             for (sig in exp_count)
@@ -730,17 +828,11 @@ z2_fw_verify_family() {
             if (bypass) sig = sig " bypass"
             return sig
         }
-        BEGIN {
-            load_expected(out_tcp, out)
-            load_expected(out_udp, out)
-            load_expected(in_tcp, inchain)
-            load_expected(in_udp, inchain)
-            if (expected_bad) {
-                print "EXPECTED_RULE_UNPARSEABLE"
-                bail = 1
-                exit 1
-            }
-        }
+        $0 == "Z2_EXPECTED_OUT_BEGIN" { input_section="out"; next }
+        $0 == "Z2_EXPECTED_IN_BEGIN" { input_section="in"; next }
+        $0 == "Z2_LISTING_BEGIN" { input_section="listing"; next }
+        input_section == "out" { load_expected_line($0, out); next }
+        input_section == "in" { load_expected_line($0, inchain); next }
         $1 == "-N" && $2 == out { out_chain++ }
         $1 == "-N" && $2 == inchain { in_chain++ }
         $1 == "-A" && $2 == out {
@@ -770,7 +862,10 @@ z2_fw_verify_family() {
             }
         }
         END {
-            if (bail) exit 1
+            if (expected_bad) {
+                print "EXPECTED_RULE_UNPARSEABLE"
+                exit 1
+            }
             expected_out=exp_total[out]
             expected_in=exp_total[inchain]
             if (bad) reason="FOREIGN_OR_UNEXPECTED_RULE"

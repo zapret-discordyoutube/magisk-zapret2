@@ -128,6 +128,7 @@ class ModulePackageContractTest {
             "immutable-exec|0755|zapret2/scripts/firewall-reconciler.sh",
             "immutable-exec|0755|zapret2/scripts/command-builder.sh",
             "immutable-exec|0755|zapret2/scripts/daemon-replace-transaction.sh",
+            "immutable-exec|0755|zapret2/scripts/topology-replace-transaction.sh",
             "immutable-exec|0755|zapret2/scripts/package-contract.sh",
             "immutable-exec|0755|zapret2/scripts/runtime-config.sh",
             "immutable-exec|0755|zapret2/scripts/runtime-init.sh",

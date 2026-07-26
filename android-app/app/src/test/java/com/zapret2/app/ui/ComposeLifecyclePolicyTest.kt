@@ -31,7 +31,8 @@ class ComposeLifecyclePolicyTest {
             )
         }
 
-        val passiveScreens = statefulScreens - setOf("ControlScreen.kt", "LogsScreen.kt")
+        val lifecycleRefreshScreens = setOf("ControlScreen.kt", "ProfilesScreen.kt", "LogsScreen.kt")
+        val passiveScreens = statefulScreens - lifecycleRefreshScreens
         passiveScreens.forEach { fileName ->
             val source = productionFile("ui/screen/$fileName").readText()
             assertFalse(
@@ -47,7 +48,7 @@ class ComposeLifecyclePolicyTest {
             productionFile("ui/screen/ControlScreen.kt").readText()
                 .contains("activeViewModel?.ensureInitialized()"),
         )
-        listOf("ControlScreen.kt", "LogsScreen.kt").forEach { fileName ->
+        lifecycleRefreshScreens.forEach { fileName ->
             val source = productionFile("ui/screen/$fileName").readText()
             assertTrue(source.contains("LifecycleStartEffect(activeViewModel)"))
             assertTrue(source.contains("onStopOrDispose { activeViewModel?.onScreenStopped() }"))
@@ -64,6 +65,7 @@ class ComposeLifecyclePolicyTest {
     fun destinations_haveNoRecurringPrivilegedPollingLoops() {
         val control = productionFile("viewmodel/ControlViewModel.kt").readText()
         val logs = productionFile("viewmodel/LogsViewModel.kt").readText()
+        val profiles = productionFile("viewmodel/ProfilesViewModel.kt").readText()
         listOf(control, logs).forEach { source ->
             assertFalse(source.contains("while (isActive)"))
             assertFalse(source.contains("pollingJob"))
@@ -71,6 +73,9 @@ class ComposeLifecyclePolicyTest {
         }
         assertTrue(control.contains("serviceEventBus.serviceRestarted.collect"))
         assertTrue(logs.contains("serviceEventBus.serviceRestarted.collect"))
+        assertTrue(profiles.contains("presetStateRevision.revision.collect"))
+        assertFalse(profiles.contains("while (isActive)"))
+        assertFalse(profiles.contains("startPolling("))
         val logRefresh = logs
             .substringAfter("fun refresh()")
             .substringBefore("fun clearMessage()")

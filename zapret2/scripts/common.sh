@@ -12,6 +12,33 @@
 # Persistent package, runtime-configuration, rollback, and purge transactions
 # own their durability barriers in their dedicated mutation scripts.
 
+# Interpreter shim: Android's mksh pays 100-200 ms for every fork because the
+# loaded lifecycle library makes the process image large, and a transaction
+# forks dozens of times. The root manager's busybox in standalone-ash mode
+# runs most of those helpers as in-process applets, which cuts a preset
+# switch from ~8 s to ~2 s on the same code. Re-exec once, before anything
+# heavy is defined; without a usable busybox the script simply continues
+# under the invoking shell.
+# The re-exec is only valid when $0 is one of the packaged entry scripts
+# invoked by path: the app also sources this library from inline root-shell
+# commands, where $0 is the interactive shell's own name and an exec here
+# would kill the app's persistent root shell instead of re-running a script.
+if [ -z "${Z2_RESHELLED:-}" ]; then
+    case "$0" in
+        */zapret2/scripts/*.sh)
+            if [ -f "$0" ] && [ ! -L "$0" ]; then
+                for Z2_BB in /data/adb/magisk/busybox /data/adb/ksu/bin/busybox \
+                    /data/adb/ap/bin/busybox; do
+                    if [ -x "$Z2_BB" ] && [ ! -L "$Z2_BB" ]; then
+                        Z2_RESHELLED=1 ASH_STANDALONE=1 exec "$Z2_BB" sh "$0" "$@"
+                    fi
+                done
+            fi
+            ;;
+    esac
+    Z2_RESHELLED=fallback
+fi
+
 ZAPRET_DIR="${ZAPRET_DIR:-$(dirname "$SCRIPT_DIR")}"
 MODDIR="${MODDIR:-$(dirname "$ZAPRET_DIR")}"
 FIREWALL_RECONCILER="$SCRIPT_DIR/firewall-reconciler.sh"
@@ -1422,8 +1449,20 @@ apply_core_config_key() {
 
 is_safe_file_name_byte_length() {
     local value="$1"
-    local LC_ALL=C
-    [ "${#value}" -le 255 ] 2>/dev/null
+    local byte_length LC_ALL=C
+
+    # BusyBox ash on Android counts characters rather than bytes in ${#value},
+    # even with LC_ALL=C. Keep the common printable-ASCII path shell-native.
+    case "$value" in
+        *[!\ -~]*)
+            byte_length="$(printf '%s' "$value" | LC_ALL=C wc -c)" || return 1
+            ;;
+        *) byte_length="${#value}" ;;
+    esac
+    case "$byte_length" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$byte_length" -le 255 ] 2>/dev/null
 }
 
 is_safe_runtime_file_name() {
@@ -2035,30 +2074,28 @@ abort_lifecycle_lock_acquire() {
 }
 
 release_lifecycle_lock() {
-    local self_start token quarantine
+    local quarantine
     # Past this point other writers may mutate publications again.
     retire_owner_read_cache
     retire_state_dir_proof
     retire_proven_process_fact
     meta_cache_retire_all
     [ "$LOCK_HELD" = 1 ] || { LOCK_HELD=0; return 0; }
-    proc_starttime_read "$$" || return 1
-    self_start="$PROC_STARTTIME"
-    token="$LOCK_OWNER_TOKEN"
-    claim_lifecycle_gate "$self_start" "$token" || return 1
+    # The reaper protocol only ever quarantines a lock whose recorded owner is
+    # dead across a double observation. This owner is alive and releasing its
+    # own record, so no gate is needed: verify the record is still ours and
+    # retire it with one atomic rename.
     if read_lock_owner &&
        [ "$LOCK_FILE_PID" = "$LOCK_OWNER_PID" ] &&
        [ "$LOCK_FILE_START" = "$LOCK_OWNER_START" ] &&
        [ "$LOCK_FILE_TOKEN" = "$LOCK_OWNER_TOKEN" ]; then
-        quarantine="$LIFECYCLE_LOCK_QUARANTINE.release.$$.$token"
+        quarantine="$LIFECYCLE_LOCK_QUARANTINE.release.$$.$LOCK_OWNER_TOKEN"
         if [ ! -e "$quarantine" ] && mv "$LIFECYCLE_LOCK" "$quarantine" 2>/dev/null; then
-            release_lifecycle_gate "$token" >/dev/null 2>&1 || true
             rm -rf "$quarantine" 2>/dev/null || true
             LOCK_HELD=0
             return 0
         fi
     fi
-    release_lifecycle_gate "$token" >/dev/null 2>&1 || true
     # Preserve ownership state on failure so the caller's EXIT trap can retry
     # exact cleanup. Forgetting a still-published owner turns a recoverable
     # release error into a persistent lifecycle barrier.
@@ -2709,7 +2746,8 @@ reverify_published_nfqws_pid() {
 
 verify_nfqws_pid() {
     local pid="$1" expected_start="${2:-}" expected_argv_sha256="${3:-}" expected_qnum="${4:-}"
-    local capture_argv="${5:-}" before after cmd_exe binary_exe actual_argv_sha256="" argv0 runtime_nfqws2
+    local capture_argv="${5:-}" before after cmd_exe binary_exe cmd_identity binary_identity
+    local actual_argv_sha256="" argv0 runtime_nfqws2
     runtime_nfqws2="${AUDIT_NFQWS2_OVERRIDE:-$NFQWS2}"
     VERIFIED_STARTTIME=""
     VERIFIED_ARGV_SHA256=""
@@ -2757,6 +2795,17 @@ verify_nfqws_pid() {
     # Android kernels must not weaken or disable the exact argv0 check above.
     if [ -n "$cmd_exe" ] && [ -n "$binary_exe" ]; then
         [ "$cmd_exe" = "$binary_exe" ] || return 1
+        # A process in another mount namespace can expose the same textual
+        # path while executing a different generation inode. The procfs magic
+        # link resolves the live executable object, so compare its stable
+        # device/inode identity with the expected module binary as well.
+        if [ "$Z2_HAVE_STAT" = 1 ]; then
+            cmd_identity="$(stat -Lc '%d:%i' "/proc/$pid/exe" 2>/dev/null)" ||
+                return 1
+            binary_identity="$(stat -Lc '%d:%i' "$runtime_nfqws2" 2>/dev/null)" ||
+                return 1
+            [ "$cmd_identity" = "$binary_identity" ] || return 1
+        fi
     fi
     proc_starttime_read "$pid" || return 1
     after="$PROC_STARTTIME"
@@ -2812,7 +2861,8 @@ read_verified_pidfile() {
 }
 
 verify_status_snapshot_pid() {
-    local candidate before after actual_argv_sha256
+    local candidate before after actual_argv_sha256 cmd_identity binary_identity
+    local runtime_nfqws2="${AUDIT_NFQWS2_OVERRIDE:-$NFQWS2}"
     VERIFIED_PID=""
     VERIFIED_PID_START=""
     VERIFIED_PID_ARGV_SHA256=""
@@ -2830,6 +2880,13 @@ verify_status_snapshot_pid() {
     proc_cmdline_may_match_nfqws "$candidate" || return 1
     actual_argv_sha256="$(proc_cmdline_sha256 "$candidate")" || return 1
     [ "$actual_argv_sha256" = "$STATUS_FILE_OWN_ARGV_SHA256" ] || return 1
+    if [ "$Z2_HAVE_STAT" = 1 ]; then
+        cmd_identity="$(stat -Lc '%d:%i' "/proc/$candidate/exe" 2>/dev/null)" ||
+            return 1
+        binary_identity="$(stat -Lc '%d:%i' "$runtime_nfqws2" 2>/dev/null)" ||
+            return 1
+        [ "$cmd_identity" = "$binary_identity" ] || return 1
+    fi
     proc_starttime_read "$candidate" || return 1
     after="$PROC_STARTTIME"
     [ "$before" = "$after" ] || return 1

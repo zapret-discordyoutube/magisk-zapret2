@@ -165,9 +165,17 @@ if printf '%s\n' "$payload" | grep -F -- ':ZAPRET2_OUT ' >/dev/null; then
     : > "$state/chain.out"
     printf '%s\n' "$payload" | grep -F -- '-A ZAPRET2_OUT ' |
         "$Z2_MOCK_RENDER" > "$state/rules.out" || :
+elif printf '%s\n' "$payload" | grep -Fx -- '-F ZAPRET2_OUT' >/dev/null; then
+    : > "$state/rules.out"
+    printf '%s\n' "$payload" | grep -F -- '-A ZAPRET2_OUT ' |
+        "$Z2_MOCK_RENDER" > "$state/rules.out" || :
 fi
 if printf '%s\n' "$payload" | grep -F -- ':ZAPRET2_IN ' >/dev/null; then
     : > "$state/chain.in"
+    printf '%s\n' "$payload" | grep -F -- '-A ZAPRET2_IN ' |
+        "$Z2_MOCK_RENDER" > "$state/rules.in" || :
+elif printf '%s\n' "$payload" | grep -Fx -- '-F ZAPRET2_IN' >/dev/null; then
+    : > "$state/rules.in"
     printf '%s\n' "$payload" | grep -F -- '-A ZAPRET2_IN ' |
         "$Z2_MOCK_RENDER" > "$state/rules.in" || :
 fi
@@ -177,7 +185,8 @@ if printf '%s\n' "$payload" | grep -Fx -- '-A INPUT -j ZAPRET2_IN' >/dev/null; t
     : > "$state/anchor.in"
 fi
 if [ "${Z2_CORRUPT_AFTER_COMMIT:-0}" = 1 ] &&
-   printf '%s\n' "$payload" | grep -F -- ':ZAPRET2_OUT ' >/dev/null; then
+   { printf '%s\n' "$payload" | grep -F -- ':ZAPRET2_OUT ' >/dev/null ||
+     printf '%s\n' "$payload" | grep -Fx -- '-F ZAPRET2_OUT' >/dev/null; }; then
     sed '$d' "$state/rules.out" > "$state/rules.out.corrupt"
     mv "$state/rules.out.corrupt" "$state/rules.out"
 fi
@@ -256,6 +265,42 @@ for command in \
     grep -Fqx -- "$command" "$FW/restore.payload.4" ||
         fail "atomic replacement batch omitted: $command"
 done
+PORTS_TCP=80,443
+
+# A running generation changes only its authenticated private chain contents:
+# one COMMIT, no test pass, no chain/anchor deletion, and one exact snapshot
+# verification after publication.
+z2_fw_reconfigure_family iptables 1 1 ||
+    fail "in-place topology reconfiguration failed"
+[ "$(cat "$FW/restore.count")" = 5 ] ||
+    fail "in-place topology reconfiguration did not use exactly one COMMIT"
+for command in '-F ZAPRET2_OUT' '-F ZAPRET2_IN'; do
+    grep -Fqx -- "$command" "$FW/restore.payload.5" ||
+        fail "in-place topology batch omitted: $command"
+done
+for forbidden in '-D OUTPUT -j ZAPRET2_OUT' '-X ZAPRET2_OUT' ':ZAPRET2_OUT - [0:0]' '-A OUTPUT -j ZAPRET2_OUT'; do
+    ! grep -Fqx -- "$forbidden" "$FW/restore.payload.5" ||
+        fail "in-place topology batch rebuilt stable ownership: $forbidden"
+done
+[ -f "$FW/anchor.out" ] && [ -f "$FW/anchor.in" ] ||
+    fail "in-place topology reconfiguration disturbed stable anchors"
+z2_fw_verify_family iptables 1 1 ||
+    fail "in-place topology result did not verify"
+
+# A rejected COMMIT is atomic and leaves the previous chain bytes intact.
+cp "$FW/rules.out" "$FW/rules.out.before-reject"
+cp "$FW/rules.in" "$FW/rules.in.before-reject"
+PORTS_TCP=80,443,6568
+Z2_RESTORE_FAIL_COMMIT=1
+export Z2_RESTORE_FAIL_COMMIT
+if z2_fw_reconfigure_family iptables 1 1; then
+    fail "rejected in-place topology COMMIT reported success"
+fi
+cmp -s "$FW/rules.out" "$FW/rules.out.before-reject" &&
+    cmp -s "$FW/rules.in" "$FW/rules.in.before-reject" ||
+    fail "rejected in-place topology COMMIT changed published rules"
+unset Z2_RESTORE_FAIL_COMMIT
+rm -f "$FW/rules.out.before-reject" "$FW/rules.in.before-reject"
 PORTS_TCP=80,443
 
 z2_fw_cleanup_family iptables || fail "stable namespace cleanup failed"

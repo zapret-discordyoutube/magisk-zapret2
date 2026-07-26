@@ -18,6 +18,7 @@ FIXTURE_OWNED=0
 LIVE_TEST_PID=""
 
 fail() { echo "FAIL: packaging recovery: $*" >&2; exit 1; }
+. "$ROOT/tests/shell/zip-fixture.sh"
 
 cleanup() {
     [ "$FIXTURE_OWNED" = 1 ] || return 0
@@ -154,7 +155,7 @@ cp "$ROOT/module.prop" "$ROOT/customize.sh" "$ROOT/service.sh" "$ROOT/uninstall.
     "$ROOT/action.sh" "$PACKAGE_SOURCE/"
 cp -R "$ROOT/system" "$ROOT/zapret2" "$PACKAGE_SOURCE/"
 mkdir -p "$PACKAGE_SOURCE/zapret2/bin/arm64-v8a" "$PACKAGE_SOURCE/zapret2/bin/armeabi-v7a"
-cp /bin/true "$PACKAGE_SOURCE/zapret2/bin/arm64-v8a/nfqws2"
+cp "${Z2_TEST_EXECUTABLE_SHELL:-/bin/true}" "$PACKAGE_SOURCE/zapret2/bin/arm64-v8a/nfqws2"
 cp "$PACKAGE_SOURCE/zapret2/bin/arm64-v8a/nfqws2" "$PACKAGE_SOURCE/zapret2/bin/armeabi-v7a/nfqws2"
 printf '%s\n' b78b52c4cd7f843da3ff0848a3430afbd401bdf2 > "$PACKAGE_SOURCE/zapret2/upstream-zapret2.commit"
 printf '%s\n' v0.8.1 > "$PACKAGE_SOURCE/zapret2/upstream-zapret2.release"
@@ -162,7 +163,8 @@ printf '%064d\n' 0 > "$PACKAGE_SOURCE/zapret2/upstream-zapret2.archive.sha256"
 . "$PACKAGE_SOURCE/zapret2/scripts/package-contract.sh"
 package_contract_assemble_package "$PACKAGE_SOURCE" "$FIXTURE" ||
     fail "cannot assemble installer fixture: $PACKAGE_CONTRACT_CODE $PACKAGE_CONTRACT_DETAIL"
-(cd "$FIXTURE" && zip -qr "$ARCHIVE" module.prop customize.sh service.sh uninstall.sh action.sh system zapret2)
+(cd "$FIXTURE" && z2_test_create_zip "$ARCHIVE" \
+    module.prop customize.sh service.sh uninstall.sh action.sh system zapret2)
 
 run_installer() {
     rm -rf "$UPDATE"
@@ -282,7 +284,7 @@ chmod 0700 "$LIVE_STATE"
 # installer must neither stop nor rewrite that live publication.
 rm -f "$LIVE/disable"
 cp "$LIVE/zapret2/nfqws2" "$CASE/nfqws2.packaged"
-cp /bin/sh "$LIVE/zapret2/nfqws2"
+cp "${Z2_TEST_EXECUTABLE_SHELL:-/bin/sh}" "$LIVE/zapret2/nfqws2"
 chmod 0755 "$LIVE/zapret2/nfqws2"
 "$LIVE/zapret2/nfqws2" -c 'while :; do sleep 1; done' --qnum=200 &
 LIVE_TEST_PID=$!
@@ -334,7 +336,11 @@ esac
 EOF
 cp "$MOCK/iptables" "$MOCK/ip6tables"
 chmod 0755 "$MOCK/iptables" "$MOCK/ip6tables"
-PATH="$MOCK:$PATH" STATE_DIR="$LIVE_STATE" sh "$LIVE/zapret2/scripts/zapret-full-rollback.sh" --machine > "$CASE/rollback.out" || fail "full rollback failed"
+if ! PATH="$MOCK:$PATH" STATE_DIR="$LIVE_STATE" \
+    sh "$LIVE/zapret2/scripts/zapret-full-rollback.sh" --machine > "$CASE/rollback.out"; then
+    sed -n '1,40p' "$CASE/rollback.out" >&2
+    fail "full rollback failed"
+fi
 grep -Fxq 'Z2_RB_STATUS=complete' "$CASE/rollback.out" || fail "rollback did not complete"
 [ -f "$LIVE_STATE/full-rollback.meta" ] && [ -f "$LIVE_STATE/hosts.rollback.backup" ] || fail "rollback evidence missing"
 

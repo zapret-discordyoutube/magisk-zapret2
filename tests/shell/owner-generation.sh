@@ -12,6 +12,7 @@ command -v chmod >/dev/null 2>&1 || chmod() { :; }
 command -v sync >/dev/null 2>&1 || sync() { :; }
 
 mkdir -p "$MOD/zapret2/scripts" "$STATE" "$MOCK"
+chmod 0700 "$STATE"
 cp "$ROOT/zapret2/scripts/common.sh" "$MOD/zapret2/scripts/common.sh"
 cp "$ROOT/zapret2/scripts/firewall-reconciler.sh" "$MOD/zapret2/scripts/firewall-reconciler.sh"
 : > "$MOD/zapret2/nfqws2"
@@ -85,6 +86,28 @@ esac
 EOF
 cp "$MOCK/iptables" "$MOCK/ip6tables"
 chmod 0755 "$MOCK/iptables" "$MOCK/ip6tables"
+
+Z2_REAL_AWK="$(command -v awk)" || fail "awk is unavailable"
+export Z2_REAL_AWK
+cat > "$MOCK/awk" <<'EOF'
+#!/bin/sh
+previous=""
+newline='
+'
+for argument in "$@"; do
+    if [ "$previous" = -v ]; then
+        case "$argument" in
+            *"$newline"*)
+                echo "test awk: newline in -v assignment" >&2
+                exit 97
+                ;;
+        esac
+    fi
+    previous="$argument"
+done
+exec "$Z2_REAL_AWK" "$@"
+EOF
+chmod 0755 "$MOCK/awk"
 
 export STATE_DIR="$STATE" SCRIPT_DIR="$MOD/zapret2/scripts" ZAPRET_DIR="$MOD/zapret2" MODDIR="$MOD" PATH="$MOCK:$PATH"
 . "$SCRIPT_DIR/common.sh"

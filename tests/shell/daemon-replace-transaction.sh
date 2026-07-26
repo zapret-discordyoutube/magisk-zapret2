@@ -81,10 +81,38 @@ daemon_replace_prepare ||
     fail "the retained firewall identity was not captured"
 
 COMPILED_TCP_PORTS=81
-if daemon_replace_prepare; then
-    fail "a changed firewall topology entered daemon-only replacement"
-fi
+set +e
+daemon_replace_prepare
+prepare_rc=$?
+set -e
+[ "$prepare_rc" -eq 2 ] ||
+    fail "a changed firewall topology did not return the topology result"
+[ "$Z2_DAEMON_REPLACE_TOPOLOGY_CHANGED" = 1 ] ||
+    fail "a changed firewall topology was not classified for in-process replacement"
 COMPILED_TCP_PORTS=80
+
+# The typed topology result must leave the transaction unentered and reach the
+# lock-owning caller as exit 2, not collapse into the generic ineligibility
+# error that would keep the topology layer permanently unreachable.
+calls=
+daemon_replace_prepare() {
+    calls="${calls}prepare "
+    Z2_DAEMON_REPLACE_TOPOLOGY_CHANGED=1
+    return 2
+}
+stop_pidfile_process() { calls="${calls}stop "; return 0; }
+set +e
+replace_daemon_in_locked_transaction
+topology_rc=$?
+set -e
+[ "$topology_rc" -eq 2 ] ||
+    fail "a changed topology did not propagate the typed result to the caller"
+[ "$calls" = "prepare " ] ||
+    fail "a changed topology still entered the daemon-only mutation: $calls"
+[ -z "$Z2_DAEMON_REPLACE_ERROR_CODE" ] ||
+    fail "a changed topology was misreported as a typed failure"
+[ "$Z2_DAEMON_REPLACE_CONTROLLED" = 0 ] ||
+    fail "a changed topology fenced the transaction as controlled"
 
 # Pin the transaction state machine separately from the proof constructor.
 calls=

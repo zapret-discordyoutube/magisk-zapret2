@@ -66,48 +66,54 @@ for preset in "$ROOT"/zapret2/presets/*.txt; do
     fi
 done
 
-import_source="$TMP_ROOT/import-source"
-import_destination="$TMP_ROOT/import-package/presets"
-mkdir -p "$import_source" "$import_destination"
-printf '%s\n' \
-    '--lua-init=@lua/fakemultisplit.lua' \
-    '--lua-init=@lua/fakemultidisorder.lua' \
-    '--name=Профиль с пробелом' \
-    '--skip' \
-    '--ipcache-hostname=0' \
-    '--ipset=lists/russia-youtube-rtmps.txt' \
-    '--lua-desync=pass' > "$import_source/Fixture.txt"
-printf '%s\n' \
-    '--blob=a:0x00' \
-    '--name=Blob A' \
-    '--filter-tcp=443' \
-    '--lua-desync=fake:blob=a' > "$import_source/BlobA.txt"
-printf '%s\n' \
-    '--blob=b:0x01' \
-    '--name=Blob B' \
-    '--filter-udp=443' \
-    '--lua-desync=fake:blob=b' > "$import_source/BlobB.txt"
-python3 "$ROOT/zapret2/scripts/sync-winws2-presets.py" \
-    "$import_source" --destination "$import_destination" >/dev/null
-grep -Fxq -- '--name=Профиль с пробелом' "$import_destination/Fixture.txt" || fail "importer removed profile name"
-grep -Fxq -- '--skip' "$import_destination/Fixture.txt" || fail "importer removed profile skip"
-grep -Fxq -- '--lua-init=@lua/fakemultisplit.lua' "$import_destination/Fixture.txt" || fail "importer removed Android fakemultisplit"
-grep -Fxq -- '--lua-init=@lua/fakemultidisorder.lua' "$import_destination/Fixture.txt" || fail "importer removed Android fakemultidisorder"
-if grep -Fq -- '--ipcache' "$import_destination/Fixture.txt"; then fail "importer preserved ipcache"; fi
-grep -Fxq -- '--ipset=lists/ipset-russia-youtube-rtmps.txt' \
-    "$import_destination/Fixture.txt" || fail "importer did not normalize Android list name"
-for imported_preset in "$import_destination"/*.txt; do
-    grep -Fxq -- '--blob=a:0x00' "$imported_preset" || fail "importer did not propagate common blob a"
-    grep -Fxq -- '--blob=b:0x01' "$imported_preset" || fail "importer did not propagate common blob b"
-done
-conflict_source="$TMP_ROOT/import-conflict"
-conflict_destination="$TMP_ROOT/import-conflict-package/presets"
-mkdir -p "$conflict_source" "$conflict_destination"
-printf '%s\n' '--blob=same:0x00' '--name=One' '--filter-tcp=443' '--lua-desync=pass' > "$conflict_source/One.txt"
-printf '%s\n' '--blob=same:0x01' '--name=Two' '--filter-tcp=443' '--lua-desync=pass' > "$conflict_source/Two.txt"
-if python3 "$ROOT/zapret2/scripts/sync-winws2-presets.py" \
-    "$conflict_source" --destination "$conflict_destination" >/dev/null 2>&1; then
-    fail "importer accepted conflicting common blob definitions"
+if command -v python3 >/dev/null 2>&1; then
+    import_source="$TMP_ROOT/import-source"
+    import_destination="$TMP_ROOT/import-package/presets"
+    mkdir -p "$import_source" "$import_destination"
+    printf '%s\n' \
+        '--lua-init=@lua/fakemultisplit.lua' \
+        '--lua-init=@lua/fakemultidisorder.lua' \
+        '--name=Профиль с пробелом' \
+        '--skip' \
+        '--ipcache-hostname=0' \
+        '--ipset=lists/russia-youtube-rtmps.txt' \
+        '--lua-desync=pass' > "$import_source/Fixture.txt"
+    printf '%s\n' \
+        '--blob=a:0x00' \
+        '--name=Blob A' \
+        '--filter-tcp=443' \
+        '--lua-desync=fake:blob=a' > "$import_source/BlobA.txt"
+    printf '%s\n' \
+        '--blob=b:0x01' \
+        '--name=Blob B' \
+        '--filter-udp=443' \
+        '--lua-desync=fake:blob=b' > "$import_source/BlobB.txt"
+    python3 "$ROOT/zapret2/scripts/sync-winws2-presets.py" \
+        "$import_source" --destination "$import_destination" >/dev/null
+    grep -Fxq -- '--name=Профиль с пробелом' "$import_destination/Fixture.txt" || fail "importer removed profile name"
+    grep -Fxq -- '--skip' "$import_destination/Fixture.txt" || fail "importer removed profile skip"
+    grep -Fxq -- '--lua-init=@lua/fakemultisplit.lua' "$import_destination/Fixture.txt" || fail "importer removed Android fakemultisplit"
+    grep -Fxq -- '--lua-init=@lua/fakemultidisorder.lua' "$import_destination/Fixture.txt" || fail "importer removed Android fakemultidisorder"
+    if grep -Fq -- '--ipcache' "$import_destination/Fixture.txt"; then fail "importer preserved ipcache"; fi
+    grep -Fxq -- '--ipset=lists/ipset-russia-youtube-rtmps.txt' \
+        "$import_destination/Fixture.txt" || fail "importer did not normalize Android list name"
+    for imported_preset in "$import_destination"/*.txt; do
+        grep -Fxq -- '--blob=a:0x00' "$imported_preset" || fail "importer did not propagate common blob a"
+        grep -Fxq -- '--blob=b:0x01' "$imported_preset" || fail "importer did not propagate common blob b"
+    done
+    conflict_source="$TMP_ROOT/import-conflict"
+    conflict_destination="$TMP_ROOT/import-conflict-package/presets"
+    mkdir -p "$conflict_source" "$conflict_destination"
+    printf '%s\n' '--blob=same:0x00' '--name=One' '--filter-tcp=443' '--lua-desync=pass' > "$conflict_source/One.txt"
+    printf '%s\n' '--blob=same:0x01' '--name=Two' '--filter-tcp=443' '--lua-desync=pass' > "$conflict_source/Two.txt"
+    if python3 "$ROOT/zapret2/scripts/sync-winws2-presets.py" \
+        "$conflict_source" --destination "$conflict_destination" >/dev/null 2>&1; then
+        fail "importer accepted conflicting common blob definitions"
+    fi
+elif [ -x /system/bin/getprop ]; then
+    echo "Preset importer contract skipped on Android (python3 host tool)"
+else
+    fail "python3 is required for the preset importer contract"
 fi
 
 scan="$TMP_ROOT/repository-preset-scan"

@@ -2,13 +2,67 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
-TMP=$(mktemp -d "${TMPDIR:-/tmp}/zapret2-shell-tests.XXXXXX")
+if [ -n "${Z2_TEST_WORKDIR:-}" ]; then
+    TMP="$Z2_TEST_WORKDIR"
+else
+    test_tmp_base="${Z2_TEST_TMP:-${TMPDIR:-/tmp}}"
+    mkdir -p "$test_tmp_base"
+    TMP=$(mktemp -d "$test_tmp_base/zapret2-shell-tests.XXXXXX")
+fi
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 assert_contains() { grep -Fq -- "$2" "$1" || fail "$1 does not contain: $2"; }
 assert_not_contains() { ! grep -Fq -- "$2" "$1" || fail "$1 unexpectedly contains: $2"; }
 assert_fails() { "$@" >/dev/null 2>&1 && fail "command unexpectedly succeeded: $*"; return 0; }
+
+# Android's platform tools are not a GNU userland, while ASH_STANDALONE bypasses
+# PATH and makes command mocks ineffective. Run the suite under the root
+# manager's ash with its applets exposed as ordinary PATH entries. The marker
+# also prevents common.sh from re-executing a test that sources it.
+if [ "${Z2_TEST_BUSYBOX_READY:-0}" != 1 ]; then
+    test_busybox=""
+    for candidate in /data/adb/magisk/busybox /data/adb/ksu/bin/busybox \
+        /data/adb/ap/bin/busybox; do
+        if [ -x "$candidate" ] && [ ! -L "$candidate" ]; then
+            test_busybox="$candidate"
+            break
+        fi
+    done
+    if [ -n "$test_busybox" ]; then
+        test_busybox_runtime="$TMP/busybox-runtime"
+        test_busybox_path="$TMP/busybox-applets"
+        mkdir -p "$test_busybox_runtime" "$test_busybox_path"
+        cp "$test_busybox" "$test_busybox_runtime/busybox"
+        chmod 0755 "$test_busybox_runtime/busybox"
+        "$test_busybox_runtime/busybox" --install -s "$test_busybox_path" ||
+            fail "could not expose busybox applets for Android tests"
+        unset ASH_STANDALONE
+        Z2_TEST_BUSYBOX_READY=1 Z2_TEST_WORKDIR="$TMP" Z2_RESHELLED=1 \
+            Z2_TEST_BUSYBOX_BINARY="$test_busybox_runtime/busybox" \
+            PATH="$test_busybox_path:$PATH" \
+            exec "$test_busybox_runtime/busybox" sh "$0" "$@"
+    fi
+fi
+unset ASH_STANDALONE
+Z2_RESHELLED=1
+export Z2_RESHELLED
+
+# Process-identity fixtures need a normal executable shell. A copied busybox
+# multicall binary dispatches on the synthetic "nfqws2" argv[0] and exits
+# before the identity checks can run.
+if [ -z "${Z2_TEST_EXECUTABLE_SHELL:-}" ]; then
+    if [ -x /system/bin/sh ]; then
+        Z2_TEST_EXECUTABLE_SHELL=/system/bin/sh
+    else
+        Z2_TEST_EXECUTABLE_SHELL="$(command -v sh)"
+    fi
+fi
+export Z2_TEST_EXECUTABLE_SHELL
+if [ -z "${Z2_TEST_ALTERNATE_BINARY:-}" ] && [ -x /system/bin/toybox ]; then
+    Z2_TEST_ALTERNATE_BINARY=/system/bin/toybox
+    export Z2_TEST_ALTERNATE_BINARY
+fi
 
 assert_unsafe_machine_root() {
     operation="$1" expected="$2" output="" rc=0
@@ -30,7 +84,13 @@ assert_unsafe_machine_root --validate-strategies-machine Z2_STRATEGIES_ERROR
 for script in "$ROOT"/*.sh "$ROOT"/zapret2/scripts/*.sh \
     "$ROOT"/zapret2/scripts/lifecycle/*.sh "$ROOT"/tests/shell/*.sh; do
     case "$(sed -n '1p' "$script")" in
-        *bash*) bash -n "$script" || fail "syntax: $script" ;;
+        *bash*)
+            if command -v bash >/dev/null 2>&1; then
+                bash -n "$script" || fail "syntax: $script"
+            elif [ "$script" != "$ROOT/build.sh" ]; then
+                fail "bash is required for syntax check: $script"
+            fi
+            ;;
         *) sh -n "$script" || fail "syntax: $script" ;;
     esac
 done
@@ -56,9 +116,12 @@ for retired in \
     [ ! -e "$retired" ] && [ ! -L "$retired" ] || fail "retired file remains: $retired"
 done
 
-if grep -R --include='*.txt' -n -- '--ipcache' "$ROOT/zapret2/presets" "$ROOT/zapret2/strategy-catalogs" >/dev/null; then
-    fail "forbidden Android ipcache option remains"
-fi
+for text_file in "$ROOT"/zapret2/presets/*.txt \
+    "$ROOT"/zapret2/strategy-catalogs/*.txt; do
+    if grep -n -- '--ipcache' "$text_file" >/dev/null; then
+        fail "forbidden Android ipcache option remains: $text_file"
+    fi
+done
 
 STRATEGY_OUTPUT="$(sh "$ROOT/zapret2/scripts/command-builder.sh" \
     --validate-strategies-machine "$ROOT/zapret2")" || fail "strategy catalogs were rejected"
@@ -283,11 +346,36 @@ Z2_TEST_TMP="$TMP" sh "$ROOT/tests/shell/runtime-config-contract.sh"
 Z2_TEST_TMP="$TMP" sh "$ROOT/tests/shell/release-generation.sh"
 Z2_TEST_TMP="$TMP" sh "$ROOT/tests/shell/transactional-start.sh"
 Z2_TEST_TMP="$TMP" sh "$ROOT/tests/shell/firewall-reconciler.sh"
-Z2_TEST_TMP="$TMP" sh "$ROOT/tests/shell/magisk-boot-installer.sh"
-Z2_TEST_TMP="$TMP" sh "$ROOT/tests/shell/packaging-recovery-flow.sh"
+
+run_android_storage_test() {
+    storage_test_script="$1"
+    storage_test_name="$2"
+    if [ -z "${Z2_TEST_BUSYBOX_BINARY:-}" ] || [ ! -d /data/adb ]; then
+        Z2_TEST_TMP="$TMP" sh "$storage_test_script"
+        return
+    fi
+    # This test must exercise the literal root-manager paths required by the
+    # installer contract. Hide the phone's real module storage behind a
+    # private bind mount; the namespace disappears with the child process.
+    test_data_adb="$TMP/android-data-adb-$storage_test_name"
+    mkdir -p "$test_data_adb/modules" "$test_data_adb/modules_update"
+    "$Z2_TEST_BUSYBOX_BINARY" unshare -m "$Z2_TEST_BUSYBOX_BINARY" sh -c '
+        test_data_adb="$1"
+        test_tmp="$2"
+        test_script="$3"
+        "$Z2_TEST_BUSYBOX_BINARY" mount --make-rprivate / || exit 1
+        "$Z2_TEST_BUSYBOX_BINARY" mount --bind "$test_data_adb" /data/adb ||
+            exit 1
+        Z2_TEST_TMP="$test_tmp" sh "$test_script"
+    ' sh "$test_data_adb" "$TMP" "$storage_test_script"
+}
+
+run_android_storage_test "$ROOT/tests/shell/magisk-boot-installer.sh" magisk-installer
+run_android_storage_test "$ROOT/tests/shell/packaging-recovery-flow.sh" packaging-recovery
 Z2_TEST_TMP="$TMP" sh "$ROOT/tests/shell/preset-contract.sh"
 Z2_TEST_TMP="$TMP" sh "$ROOT/tests/shell/preset-apply-transaction.sh"
 Z2_TEST_TMP="$TMP" sh "$ROOT/tests/shell/preset-save-transaction.sh"
 Z2_TEST_TMP="$TMP" sh "$ROOT/tests/shell/daemon-replace-transaction.sh"
+Z2_TEST_TMP="$TMP" sh "$ROOT/tests/shell/topology-replace-transaction.sh"
 
 echo "Shell integration tests passed"

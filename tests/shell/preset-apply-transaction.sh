@@ -88,7 +88,18 @@ if [ "${Z2_APPLY_TEST_RUNNING:-1}" = 1 ]; then
 else
     service_process_is_running() { return 1; }
 fi
+# A portable fixture cannot own a real published daemon/argv generation.
+# Production tests cover that proof; this transaction suite isolates the
+# selection state machine after the proof has succeeded.
+prepare_running_rollback_artifact() { return 0; }
 replace_daemon_in_locked_transaction() {
+    [ "$ACTIVE_PRESET" = "$APPLY_REQUESTED_PRESET" ] || {
+        Z2_DAEMON_REPLACE_ERROR_DOMAIN=CONFIG
+        Z2_DAEMON_REPLACE_ERROR_CODE=CONFIG_GENERATION_MISMATCH
+        Z2_DAEMON_REPLACE_ERROR_STAGE=APPLY_REPLACE
+        Z2_DAEMON_REPLACE_ERROR_DETAIL="the in-process selection projection is stale"
+        return 1
+    }
     printf 'replace:in-process\n' >> "${Z2_APPLY_TEST_LOG:?}"
     printf 'replace-token:%s\n' "${ZAPRET2_LIFECYCLE_TOKEN:-none}" >> "$Z2_APPLY_TEST_LOG"
     if [ "${Z2_APPLY_TEST_REPLACE_FAILS:-0}" = 1 ]; then
@@ -316,8 +327,13 @@ grep -Fq 'replace_daemon_in_locked_transaction' "$ROOT/zapret2/scripts/zapret-ap
     fail "the apply transaction does not use in-process daemon replacement"
 grep -Fq 'Z2_DAEMON_REPLACE_CONTROLLED' "$ROOT/zapret2/scripts/zapret-apply-preset.sh" ||
     fail "the full replacement fallback is not fenced before process teardown"
-grep -Fq -- '--commit-candidate' "$ROOT/zapret2/scripts/zapret-apply-preset.sh" ||
-    fail "the apply transaction does not reuse the runtime.ini commit boundary"
+# The lock-owning transaction publishes runtime.ini in process; spawning the
+# runtime-config.sh commit child would re-prove facts this shell established.
+grep -Fq 'commit_runtime_candidate' "$ROOT/zapret2/scripts/zapret-apply-preset.sh" ||
+    fail "the apply transaction does not own runtime.ini publication"
+! grep -Eq 'sh +"?\$SCRIPT_DIR/runtime-config\.sh' \
+    "$ROOT/zapret2/scripts/zapret-apply-preset.sh" ||
+    fail "the apply transaction re-enters a second lifecycle shell for the runtime commit"
 [ "$(grep -c 'immutable-exec|0755|zapret2/scripts/zapret-apply-preset.sh' \
     "$ROOT/zapret2/runtime-manifest.tsv")" = 1 ] ||
     fail "the apply transaction is not declared exactly once in the runtime manifest"

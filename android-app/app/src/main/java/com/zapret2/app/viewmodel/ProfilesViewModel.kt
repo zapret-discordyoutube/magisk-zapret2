@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.zapret2.app.data.PresetDurableOutcome
 import com.zapret2.app.data.PresetMutationOutcome
 import com.zapret2.app.data.PresetProfileDocument
+import com.zapret2.app.data.PresetStateRevision
 import com.zapret2.app.data.ProfileListEntry
 import com.zapret2.app.data.ProfileMutationResult
 import com.zapret2.app.data.ProfileRepository
@@ -66,31 +67,90 @@ data class ProfilesUiState(
 class ProfilesViewModel @Inject constructor(
     private val repository: ProfileRepository,
     private val serviceEventBus: ServiceEventBus,
+    private val presetStateRevision: PresetStateRevision,
 ) : ViewModel() {
     private val busy = AtomicBoolean(false)
-    private val initialLoadRequested = AtomicBoolean(false)
     private val _uiState = MutableStateFlow(ProfilesUiState())
     val uiState: StateFlow<ProfilesUiState> = _uiState.asStateFlow()
+    private var screenStarted = false
+    private var reloadPending = false
+    private var observedPresetRevision = presetStateRevision.revision.value
 
-    fun ensureLoaded() {
-        if (initialLoadRequested.compareAndSet(false, true)) load()
+    init {
+        viewModelScope.launch {
+            presetStateRevision.revision.collect { revision ->
+                if (revision != observedPresetRevision) {
+                    observedPresetRevision = revision
+                    invalidateProjection()
+                }
+            }
+        }
+    }
+
+    /**
+     * A restored navigation destination is not an authoritative cache boundary.
+     *
+     * Every visible entry reads runtime.ini and the selected TXT again through the repository's
+     * bounded active-snapshot path. No catalog enumeration or preset qualification is involved.
+     */
+    fun onScreenStarted() {
+        if (screenStarted) return
+        screenStarted = true
+        invalidateProjection()
+    }
+
+    fun onScreenStopped() {
+        screenStarted = false
     }
 
     fun load() {
-        if (!busy.compareAndSet(false, true)) return
+        invalidateProjection(loadWhileStopped = true)
+    }
+
+    private fun invalidateProjection(loadWhileStopped: Boolean = false) {
+        reloadPending = true
+        _uiState.update {
+            it.copy(
+                document = null,
+                operation = if (screenStarted || loadWhileStopped) ProfilesOperation.LOAD else null,
+                error = false,
+                strategyProfileIndex = null,
+                strategies = emptyList(),
+                renameProfileIndex = null,
+                renameDraft = "",
+                selectorTarget = null,
+                listEntries = emptyList(),
+            )
+        }
+        if (screenStarted || loadWhileStopped) startProjectionRead()
+    }
+
+    private fun startProjectionRead() {
+        if (!reloadPending || !busy.compareAndSet(false, true)) return
+        reloadPending = false
         _uiState.update { it.copy(operation = ProfilesOperation.LOAD, error = false) }
         viewModelScope.launch {
+            val revisionAtReadStart = presetStateRevision.revision.value
             try {
                 val document = repository.loadActive()
-                _uiState.update {
-                    it.copy(document = document, operation = null, error = document == null)
+                if (revisionAtReadStart == presetStateRevision.revision.value) {
+                    _uiState.update {
+                        it.copy(document = document, operation = null, error = document == null)
+                    }
+                } else {
+                    reloadPending = true
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                _uiState.update { it.copy(operation = null, error = true) }
+                if (revisionAtReadStart == presetStateRevision.revision.value) {
+                    _uiState.update { it.copy(document = null, operation = null, error = true) }
+                } else {
+                    reloadPending = true
+                }
             } finally {
                 busy.set(false)
+                if (reloadPending && screenStarted) startProjectionRead()
             }
         }
     }
@@ -241,27 +301,41 @@ class ProfilesViewModel @Inject constructor(
                 if (outcome.durable in setOf(PresetDurableOutcome.APPLIED, PresetDurableOutcome.SAVED_AND_APPLIED)) {
                     serviceEventBus.notifyServiceRestarted(ServiceEventSource.PROFILES)
                 }
-                val refreshed = when {
-                    outcome.durable in SUCCESS_OUTCOMES -> result.publishedDocument
-                    outcome == PresetMutationOutcome.SourceChanged -> repository.loadActive()
-                    else -> document
-                }
-                _uiState.update {
-                    it.copy(
-                        document = refreshed,
-                        operation = null,
-                        error = refreshed == null,
-                        message = outcomeMessage(outcome),
-                    )
+                if (outcome.durable in OUTCOMES_REQUIRING_AUTHORITATIVE_READ) {
+                    reloadPending = true
+                    _uiState.update {
+                        it.copy(
+                            document = null,
+                            operation = ProfilesOperation.LOAD,
+                            error = false,
+                            message = outcomeMessage(outcome),
+                        )
+                    }
+                } else {
+                    _uiState.update {
+                        it.copy(
+                            document = document,
+                            operation = null,
+                            error = false,
+                            message = outcomeMessage(outcome),
+                        )
+                    }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
+                reloadPending = true
                 _uiState.update {
-                    it.copy(operation = null, message = UiText.resource(R.string.profiles_save_failed))
+                    it.copy(
+                        document = null,
+                        operation = ProfilesOperation.LOAD,
+                        error = false,
+                        message = UiText.resource(R.string.profiles_save_failed),
+                    )
                 }
             } finally {
                 busy.set(false)
+                if (reloadPending && screenStarted) startProjectionRead()
             }
         }
     }
@@ -284,10 +358,13 @@ class ProfilesViewModel @Inject constructor(
 
     private companion object {
         const val MAX_PROFILE_NAME_CHARS = 200
-        val SUCCESS_OUTCOMES = setOf(
+        val OUTCOMES_REQUIRING_AUTHORITATIVE_READ = setOf(
             PresetDurableOutcome.SAVED,
             PresetDurableOutcome.SAVED_AND_APPLIED,
             PresetDurableOutcome.APPLIED,
+            PresetDurableOutcome.SOURCE_CHANGED,
+            PresetDurableOutcome.IO_FAILED,
+            PresetDurableOutcome.ROLLBACK_FAILED,
         )
     }
 }

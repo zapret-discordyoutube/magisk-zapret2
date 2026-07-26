@@ -1,8 +1,9 @@
 # Zapret2 2.2.x — Architecture Redesign
 
 Status: the foundation shipped in 2.2.0; the lifecycle hot-path and the two
-remaining storage contracts are completed in 2.2.1. This document records the
-analysis findings, the adopted invariants, and the concrete changes.
+remaining storage contracts were completed in 2.2.1; topology-changing preset
+replacement is completed in 2.2.2. This document records the analysis findings,
+the adopted invariants, and the concrete changes.
 
 ## 1. Why
 
@@ -249,6 +250,50 @@ was verified, and the lifecycle log recorded `firewall retained`. This is a
 61% reduction for the paired operation and brings both profile enable/disable
 and strategy changes, which share this transaction, below the five-second
 module target.
+
+## 3b. Completion in 2.2.2
+
+- **Topology replacement remains one transaction.** A preset whose TCP/UDP
+  capture union or packet limits change no longer launches a second
+  `zapret-start.sh`. The lock owner authenticates the current daemon and owner
+  receipt once, then lazily loads `topology-replace-transaction.sh` and the
+  firewall layer in the same process.
+- **Stable private-chain identity.** The authenticated `ZAPRET2_OUT` and
+  `ZAPRET2_IN` chains and their built-in anchors remain installed. Each active
+  address family is repopulated through one `iptables-restore`/`ip6tables-restore`
+  commit that flushes only those private chains and writes the complete
+  candidate rule multiset. There is no cleanup/recreate window, duplicate
+  anchor, or speculative test commit. A rejected restore commit leaves that
+  family byte-for-byte unchanged; exact canonical post-publication
+  verification still gates success.
+- **Capabilities are inherited, never guessed.** Connbytes, mark and IPv6
+  availability come from the authenticated owner generation. Multiport can
+  only be retained or conservatively downgraded when the candidate port union
+  exceeds its deterministic 15-value grammar limit; the hot transaction never
+  probes a new kernel capability.
+- **Old daemon argv is part of rollback state.** Before the compiler replaces
+  the canonical argv cache, the transaction proves its binding to the active
+  preset, runtime generation and installed package, then preserves a private
+  0600 copy. If either family publication, candidate launch, or owner receipt
+  publication fails after the old daemon stops, rollback removes any partial
+  candidate, restores the old rules, relaunches that exact preserved argv, and
+  republishes a healthy old owner/status generation. If restoration cannot be
+  proved complete, the transaction converges to the existing verified-stopped
+  failure state rather than claiming either generation active.
+- **One mutation boundary remains visible to Android.** The preset endpoint
+  has exactly one privileged child: the compare-and-swap commit of
+  `runtime.ini`. Unchanged-topology daemon replacement, changed-topology
+  firewall replacement, failure convergence, and rollback all consume the
+  current lock owner's proofs in process.
+
+### Device result
+
+The release gate measures both directions between `Default v1 (game filter)`
+and `Default v2 (game filter)` on the Pixel 9 Pro XL because the first preset
+adds TCP ports and therefore forces the topology-changing path. The pre-2.2.2
+baseline was 15–16 seconds per switch and re-entered the complete lifecycle
+transaction. The 2.2.2 result is recorded here from the exact qualified
+release candidate before publication.
 
 ## 4. Changes in 2.2.0 (app)
 

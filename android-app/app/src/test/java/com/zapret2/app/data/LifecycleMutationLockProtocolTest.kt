@@ -6,6 +6,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 
 class LifecycleMutationLockProtocolTest {
 
@@ -13,19 +14,62 @@ class LifecycleMutationLockProtocolTest {
     private val token = "app.0123456789abcdef"
     private val boot = "01234567-89ab-4def-8abc-0123456789ab"
 
-    @Test
-    fun acquire_usesSharedGateAndOnlyReapsStableExactBootBoundAndroidOwner() {
-        val command = requireNotNull(LifecycleMutationLockProtocol.buildAcquireCommand(pid, token))
+    private val leaseScript = "sh '${RootModuleContract.SCRIPTS_DIR}/lifecycle-lease.sh'"
 
-        assertTrue(command.contains("claim_lifecycle_gate"))
-        assertTrue(command.contains("kind=android-mutation"))
-        assertTrue(command.contains("boot_id=%s"))
-        assertTrue(command.contains("z2_owner_state=ambiguous"))
-        assertTrue(command.contains("[ \"\$z2_owner_state\" = stale ]"))
-        assertTrue(command.contains("sleep 1"))
-        assertTrue(command.contains("foreign, malformed, or unknown lifecycle owner was preserved"))
-        assertTrue(command.contains("entries=\$(find \"\$LIFECYCLE_LOCK\" -mindepth 1 -maxdepth 1"))
-        assertFalse(command.contains("rm -rf"))
+    /**
+     * The ceremony itself lives in the packaged entry script so the module's
+     * interpreter shim applies to it; these commands only select a mode and
+     * bind the caller's exact identity as positional arguments.
+     */
+    @Test
+    fun commandsInvokeThePackagedLeaseScriptWithExactIdentity() {
+        assertEquals(
+            "$leaseScript acquire '$pid' '$token'",
+            LifecycleMutationLockProtocol.buildAcquireCommand(pid, token),
+        )
+        assertEquals(
+            "$leaseScript probe '$pid' '$token'",
+            LifecycleMutationLockProtocol.buildOwnedLeaseProbeCommand(pid, token),
+        )
+        val lease = LifecycleMutationLockProtocol.Lease(pid.toString(), "987654321", boot, token)
+        assertEquals(
+            "$leaseScript release '$pid' '987654321' '$boot' '$token' 'release0123456789'",
+            LifecycleMutationLockProtocol.buildReleaseCommand(lease, "release0123456789"),
+        )
+    }
+
+    /**
+     * The protocol invariants formerly pinned on the inline command text are
+     * pinned on the packaged script: shared gate, exact-owner-only reaping,
+     * boot binding, read-only probe, and no recursive removal anywhere.
+     */
+    @Test
+    fun packagedLeaseScriptKeepsTheOwnershipInvariants() {
+        val script = File("../../zapret2/scripts/lifecycle-lease.sh")
+        assertTrue("Missing packaged lease script: ${script.absolutePath}", script.isFile)
+        val text = script.readText()
+
+        assertTrue(text.contains("claim_lifecycle_gate"))
+        assertTrue(text.contains("Z2_LEASE_KIND=android-mutation"))
+        assertTrue(text.contains("z2_owner_state=ambiguous"))
+        assertTrue(text.contains("[ \"\$z2_owner_state\" = stale ]"))
+        assertTrue(text.contains("sleep 1"))
+        assertTrue(text.contains("foreign, malformed, or unknown lifecycle owner was preserved"))
+        assertTrue(text.contains("entries=\$(find \"\$LIFECYCLE_LOCK\" -mindepth 1 -maxdepth 1"))
+        assertTrue(text.contains("[ \"\$pid\" = \"\$expected_pid\" ]"))
+        assertTrue(text.contains("[ \"\$start\" = \"\$expected_start\" ]"))
+        assertTrue(text.contains("[ \"\$boot\" = \"\$expected_boot\" ]"))
+        assertTrue(text.contains("[ \"\$token\" = \"\$expected_token\" ]"))
+        assertTrue(text.contains("rm -f \"\$quarantine/owner\""))
+        assertTrue(text.contains("rmdir \"\$quarantine\""))
+        assertTrue(text.contains("[ \"\$current_boot\" = \"\$boot\" ]"))
+        assertTrue(text.contains("[ \"\$after\" = \"\$before\" ]"))
+        assertTrue(text.contains("Z2_MUTATION_LOCK_ABSENT=1"))
+        assertFalse(text.contains("rm -rf"))
+
+        // The lease script is a packaged executable, so the shim can re-exec it.
+        val manifest = File("../../zapret2/runtime-manifest.tsv").readText()
+        assertTrue(manifest.contains("immutable-exec|0755|zapret2/scripts/lifecycle-lease.sh"))
     }
 
     @Test
@@ -52,37 +96,9 @@ class LifecycleMutationLockProtocolTest {
     }
 
     @Test
-    fun release_comparesEveryLeaseFieldAndRemovesOnlyExactOwnerDirectory() {
-        val lease = LifecycleMutationLockProtocol.Lease(pid.toString(), "987654321", boot, token)
-        val command = requireNotNull(
-            LifecycleMutationLockProtocol.buildReleaseCommand(lease, "release0123456789")
-        )
-
-        assertTrue(command.contains("[ \"\$pid\" = \"\$expected_pid\" ]"))
-        assertTrue(command.contains("[ \"\$start\" = \"\$expected_start\" ]"))
-        assertTrue(command.contains("[ \"\$boot\" = \"\$expected_boot\" ]"))
-        assertTrue(command.contains("[ \"\$token\" = \"\$expected_token\" ]"))
-        assertTrue(command.contains("rm -f \"\$quarantine/owner\""))
-        assertTrue(command.contains("rmdir \"\$quarantine\""))
-        assertFalse(command.contains("rm -rf"))
+    fun releaseAndProbeOutputsAreExact() {
         assertTrue(LifecycleMutationLockProtocol.parseReleaseOutput(listOf("Z2_MUTATION_LOCK_RELEASED=1")))
         assertFalse(LifecycleMutationLockProtocol.parseReleaseOutput(listOf("noise", "Z2_MUTATION_LOCK_RELEASED=1")))
-    }
-
-    @Test
-    fun ambiguousAcquireProbeCanIdentifyOnlyTheExactStillLivePublisher() {
-        val command = requireNotNull(
-            LifecycleMutationLockProtocol.buildOwnedLeaseProbeCommand(pid, token)
-        )
-
-        assertTrue(command.contains("[ \"\$pid_line\" = \"pid=\$expected_pid\" ]"))
-        assertTrue(command.contains("[ \"\$token_line\" = \"token=\$expected_token\" ]"))
-        assertTrue(command.contains("[ \"\$current_boot\" = \"\$boot\" ]"))
-        assertTrue(command.contains("actual=\$(proc_starttime \"\$expected_pid\")"))
-        assertTrue(command.contains("[ \"\$after\" = \"\$before\" ]"))
-        assertTrue(command.contains("Z2_MUTATION_LOCK_ABSENT=1"))
-        assertFalse(command.contains("rm -"))
-        assertFalse(command.contains("mv "))
         assertTrue(
             LifecycleMutationLockProtocol.isOwnedLeaseAbsentOutput(
                 listOf("Z2_MUTATION_LOCK_ABSENT=1"),

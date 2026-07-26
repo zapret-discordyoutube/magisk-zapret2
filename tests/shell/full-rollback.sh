@@ -241,7 +241,7 @@ sed -i 's/^autostart=0$/autostart=1/' "$MOD/zapret2/runtime.ini"
 # Publish a real exact-path process and matching owner generation. This makes
 # the firewall foreign-reference audit, rather than process preflight, the
 # reason rollback stops.
-cp "$(command -v sh)" "$MOD/zapret2/nfqws2"
+cp "${Z2_TEST_EXECUTABLE_SHELL:-$(command -v sh)}" "$MOD/zapret2/nfqws2"
 chmod 0755 "$MOD/zapret2/nfqws2"
 "$MOD/zapret2/nfqws2" -c 'trap "exit 0" TERM INT; while :; do sleep 1; done' --qnum=200 &
 nf_pid=$!

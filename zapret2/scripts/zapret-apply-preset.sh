@@ -49,6 +49,7 @@ APPLY_SAVE_TARGET_EXISTED=0
 APPLY_SAVE_SHOULD_APPLY=0
 APPLY_SAVE_SELECTION_CHANGE=0
 APPLY_PRESET_REPLACED=0
+APPLY_ROLLBACK_ARGV=""
 RUNTIME_CANONICAL_TEXT=""
 RUNTIME_NEXT_TEXT=""
 RUNTIME_ACTIVE_PRESET_LINES=0
@@ -94,11 +95,40 @@ apply_release_lock() {
 # buffer goes with it. The replaced target itself is restored only by the
 # explicit rollback paths, never here.
 apply_save_cleanup() {
-    [ "$APPLY_SAVE_REQUEST" = 1 ] || return 0
-    if [ "$APPLY_SAVE_CANDIDATE_CONSUMED" = 0 ] && [ -n "$APPLY_SAVE_CANDIDATE" ]; then
+    if [ "$APPLY_SAVE_REQUEST" = 1 ] &&
+       [ "$APPLY_SAVE_CANDIDATE_CONSUMED" = 0 ] &&
+       [ -n "$APPLY_SAVE_CANDIDATE" ]; then
         rm -f "$PRESETS_DIR/$APPLY_SAVE_CANDIDATE" 2>/dev/null
     fi
     [ -z "$APPLY_SAVE_BACKUP" ] || rm -f "$APPLY_SAVE_BACKUP" 2>/dev/null
+    [ -z "$APPLY_ROLLBACK_ARGV" ] || rm -f "$APPLY_ROLLBACK_ARGV" 2>/dev/null
+}
+
+# Pin a validated artifact for the generation that is currently running
+# before the candidate takes over the transaction. A topology-changing
+# transaction can then restore both kernel rules and the proven old daemon if
+# a family commit or candidate launch fails. The active preset's cache slot
+# IS the pin — compiled_cache_store spares it from sweeps and overwrites for
+# the rest of the transaction; only a cold cache pays a compile.
+prepare_running_rollback_artifact() {
+    local canonical="$COMPILED_ARGV_FILE" rc=0
+    [ "$APPLY_SERVICE_WAS_RUNNING" = 1 ] || return 0
+    if compiled_cache_restore "$PRESETS_DIR/$ACTIVE_PRESET" "$ACTIVE_PRESET"; then
+        Z2_DAEMON_REPLACE_ROLLBACK_ARTIFACT="$COMPILED_ARGV_FILE"
+        COMPILED_ARGV_FILE="$canonical"
+        COMPILED_METADATA_FOR=""
+        return 0
+    fi
+    ensure_state_tmp_dir || return 1
+    APPLY_ROLLBACK_ARGV="$Z2_STATE_TMP/compiled-rollback.$$"
+    state_file_target_is_safe "$APPLY_ROLLBACK_ARGV" || return 1
+    rm -f "$APPLY_ROLLBACK_ARGV" 2>/dev/null
+    compile_transaction_artifact "$PRESETS_DIR/$ACTIVE_PRESET" \
+        "$ACTIVE_PRESET" "$APPLY_ROLLBACK_ARGV" || rc=1
+    COMPILED_ARGV_FILE="$canonical"
+    COMPILED_METADATA_FOR=""
+    [ "$rc" -eq 0 ] || return 1
+    Z2_DAEMON_REPLACE_ROLLBACK_ARTIFACT="$APPLY_ROLLBACK_ARGV"
 }
 
 # Restores the save target to its pre-transaction content from the buffered
@@ -129,6 +159,9 @@ apply_report_failure() {
     local domain="$1" code="$2" stage="$3" detail="$4" outcome="$5" issue="${6:-NONE}"
     APPLY_OUTCOME="$outcome"
     APPLY_ISSUE="$issue"
+    # A failed transaction leaves the canonical slot as the refused candidate
+    # on purpose: the still-running old generation replays from its cache
+    # slot, so nothing here needs the canonical bytes restored.
     apply_save_cleanup
     if ! apply_release_lock; then
         detail="$detail; lifecycle ownership release failed"
@@ -183,32 +216,6 @@ apply_interrupted() {
     fi
     apply_report_failure LIFECYCLE LIFECYCLE_FAILED APPLY_SIGNAL \
         "preset application interrupted by $signal before any change" IO_FAILED
-}
-
-# Adopt the exact typed identity a nested module transaction published instead
-# of flattening it into free text. The outcome says what this transaction did
-# about the failure; the envelope says what actually refused.
-parse_typed_error_envelope() {
-    local text="$1" line old_ifs
-    CHILD_ERROR_STATUS=""; CHILD_ERROR_DOMAIN=""; CHILD_ERROR_CODE=""
-    CHILD_ERROR_STAGE=""; CHILD_ERROR_DETAIL=""
-    old_ifs="$IFS"
-    IFS='
-'
-    set -- $text
-    IFS="$old_ifs"
-    for line in "$@"; do
-        case "$line" in
-            Z2_ERROR_STATUS=*) CHILD_ERROR_STATUS="${line#Z2_ERROR_STATUS=}" ;;
-            Z2_ERROR_DOMAIN=*) CHILD_ERROR_DOMAIN="${line#Z2_ERROR_DOMAIN=}" ;;
-            Z2_ERROR_CODE=*) CHILD_ERROR_CODE="${line#Z2_ERROR_CODE=}" ;;
-            Z2_ERROR_STAGE=*) CHILD_ERROR_STAGE="${line#Z2_ERROR_STAGE=}" ;;
-            Z2_ERROR_DETAIL=*) CHILD_ERROR_DETAIL="${line#Z2_ERROR_DETAIL=}" ;;
-        esac
-    done
-    [ "$CHILD_ERROR_STATUS" = ERROR ] || return 1
-    z2_error_fields_are_valid ERROR "$CHILD_ERROR_DOMAIN" "$CHILD_ERROR_STAGE" \
-        "$CHILD_ERROR_CODE" "$CHILD_ERROR_DETAIL"
 }
 
 # Mirrors runtime-config.sh's canonical runtime identity: CR stripped from each
@@ -284,24 +291,29 @@ stage_runtime_candidate() {
     return 0
 }
 
-# runtime-config.sh owns runtime.ini publication for every caller, including
-# this one: the candidate identity policy, the stale-candidate sweep, the
-# compare-and-swap against the expected content, the full core revalidation and
-# the durability barrier live there and are not duplicated here.
+# The lifecycle lock is the transaction boundary: this shell read, validated
+# and canonicalized runtime.ini under the lock, and the candidate text is a
+# projection of exactly those bytes, so publication does not re-prove what
+# this process just established. The candidate is staged as a sibling and
+# renamed into place atomically. runtime-config.sh stays the authority for
+# init/repair and for callers outside a locked transaction (the app's own
+# --commit-candidate edits keep their compare-and-swap there).
 commit_runtime_candidate() {
-    local content="$1" expected="$2" step="$3" candidate output rc=0
+    local content="$1" expected="$2" step="$3" candidate
     candidate="$RUNTIME_CONFIG.candidate.$$.$APPLY_NONCE$step"
-    stage_runtime_candidate "$content" "$candidate" || return 1
-    output="$(ZAPRET2_EMIT_STATUS_V6=0 sh "$SCRIPT_DIR/runtime-config.sh" \
-        --commit-candidate "$candidate" "$expected" "$RUNTIME_CONFIG" 2>&1)" || rc=$?
-    rm -f "$candidate" 2>/dev/null
-    [ "$rc" -eq 0 ] || {
-        parse_typed_error_envelope "$output" || {
-            CHILD_ERROR_DOMAIN=CONFIG
-            CHILD_ERROR_CODE=RUNTIME_COMMIT_FAILED
-            CHILD_ERROR_STAGE=RUNTIME_COMMIT
-            CHILD_ERROR_DETAIL="runtime.ini commit failed without a typed envelope"
-        }
+    stage_runtime_candidate "$content" "$candidate" || {
+        CHILD_ERROR_DOMAIN=CONFIG
+        CHILD_ERROR_CODE=RUNTIME_COMMIT_FAILED
+        CHILD_ERROR_STAGE=RUNTIME_COMMIT
+        CHILD_ERROR_DETAIL="the runtime.ini candidate could not be staged"
+        return 1
+    }
+    mv -f "$candidate" "$RUNTIME_CONFIG" || {
+        rm -f "$candidate" 2>/dev/null
+        CHILD_ERROR_DOMAIN=CONFIG
+        CHILD_ERROR_CODE=RUNTIME_COMMIT_FAILED
+        CHILD_ERROR_STAGE=RUNTIME_COMMIT
+        CHILD_ERROR_DETAIL="the runtime.ini candidate could not be published"
         return 1
     }
     return 0
@@ -339,34 +351,23 @@ rollback_runtime_config() {
     return 0
 }
 
-# One validation compile shared by both transaction flavors. binding selects
-# the runtime.ini identity the artifact is bound to: "live" pins the published
-# file, "next" pins the RUNTIME_NEXT_TEXT candidate this transaction is about
-# to commit verbatim. The candidate differs from the loaded configuration only
-# in its active_preset line, so every config scalar the compiler consumes is
-# already loaded; the swapped path only pins the binding identity.
+# One validation compile shared by both transaction flavors. The artifact is
+# bound to the preset content and the exact configuration surface the compiler
+# consumes, never to the runtime.ini byte identity, so a selection change
+# needs no staged runtime copy and a previously validated generation is
+# replayed from the cache without recompiling or repeating the dry-run.
 compile_transaction_artifact() {
-    local preset_path="$1" logical_name="$2" artifact="$3" binding="$4"
-    local staged_runtime="" saved_runtime_config rc=0
-    if [ "$binding" = next ]; then
-        staged_runtime="$Z2_STATE_TMP/runtime-apply.$$"
-        state_file_target_is_safe "$staged_runtime" || return 1
-        rm -f "$staged_runtime" 2>/dev/null
-        umask 077
-        printf '%s' "$RUNTIME_NEXT_TEXT" > "$staged_runtime" || {
-            rm -f "$staged_runtime" 2>/dev/null
-            return 1
-        }
-        saved_runtime_config="$RUNTIME_CONFIG"
-        RUNTIME_CONFIG="$staged_runtime"
+    local preset_path="$1" logical_name="$2" artifact="$3"
+    COMPILED_TRANSACTION_REPLAYED=0
+    if compiled_cache_restore "$preset_path" "$logical_name"; then
+        COMPILED_TRANSACTION_REPLAYED=1
+        return 0
     fi
     compile_preset_artifact "$preset_path" "$logical_name" "$artifact" &&
-        run_compiled_artifact "$artifact" dry-run >/dev/null 2>&1 || rc=1
-    if [ "$binding" = next ]; then
-        RUNTIME_CONFIG="$saved_runtime_config"
-        rm -f "$staged_runtime" 2>/dev/null
-    fi
-    return "$rc"
+        run_compiled_artifact "$artifact" dry-run >/dev/null 2>&1 || return 1
+    compiled_cache_store "$artifact" "$COMPILED_SOURCE_SHA256" ||
+        log_msg "Validated artifact cache slot could not be written; the next switch recompiles"
+    return 0
 }
 
 # The same compatibility qualification the app used to request through
@@ -374,12 +375,12 @@ compile_transaction_artifact() {
 # is touched, so an incompatible preset is refused with the live selection
 # untouched instead of being written, failed and rolled back.
 #
-# The artifact is compiled into the canonical slot and bound to the runtime.ini
-# candidate this transaction commits verbatim: the replacement child then finds
-# the binding current and the validation receipt fresh, so the compile and the
-# nfqws2 dry-run below are paid once per transaction instead of being repeated
-# from scratch after the commit. An abandoned artifact is harmless — its
-# binding no longer matches the live runtime.ini, so the next start recompiles.
+# The artifact lands in the canonical slot, bound to the preset content and
+# the compiler's configuration surface: the replacement finds the binding
+# current and the validation receipt fresh, so the compile and the nfqws2
+# dry-run are paid at most once per preset generation — a switch back to an
+# already validated preset replays its cache slot. An abandoned artifact is
+# harmless — its binding no longer matches, so the next start recompiles.
 validate_requested_preset() {
     PRESET_VALIDATION_CODE=OK
     ensure_state_tmp_dir &&
@@ -388,14 +389,15 @@ validate_requested_preset() {
         return 1
     }
     if ! compile_transaction_artifact "$PRESETS_DIR/$APPLY_REQUESTED_PRESET" \
-        "$APPLY_REQUESTED_PRESET" "$COMPILED_ARGV_FILE" next; then
-        rm -f "$COMPILED_ARGV_FILE" 2>/dev/null
+        "$APPLY_REQUESTED_PRESET" "$COMPILED_ARGV_FILE"; then
         [ "$PRESET_VALIDATION_CODE" != OK ] || PRESET_VALIDATION_CODE=NFQWS_DRY_RUN_FAILED
         return 1
     fi
     # The receipt is an optimization, never a gate: if it cannot be written,
-    # the replacement child simply re-runs its own dry-run as before.
-    write_compiled_validation_receipt "$COMPILED_ARGV_FILE" ||
+    # the replacement simply re-runs its own dry-run as before. A cache
+    # replay already carries its receipt.
+    [ "$COMPILED_TRANSACTION_REPLAYED" = 1 ] ||
+        write_compiled_validation_receipt "$COMPILED_ARGV_FILE" ||
         log_msg "Preset validation receipt could not be written; the replacement will revalidate"
     return 0
 }
@@ -458,25 +460,25 @@ service_process_is_running() {
 # generation receipts.  Replace the daemon in this process so none of those
 # facts are re-proven by a second fully loaded lifecycle shell.
 run_replace_transaction() {
-    local output rc
+    local rc
     trap '' HUP INT TERM
     replace_daemon_in_locked_transaction
     rc=$?
-    # A changed port/capture topology is not eligible for daemon-only
-    # replacement. Nothing below the process boundary has been touched yet, so
-    # hand that uncommon case to the complete firewall transaction. Failures
-    # after the old daemon was stopped never enter a second transaction.
-    if [ "$rc" -ne 0 ] && [ "${Z2_DAEMON_REPLACE_CONTROLLED:-0}" = 0 ]; then
-        output=
-        rc=0
-        output="$(ZAPRET2_EMIT_STATUS_V6=0 sh "$SCRIPT_DIR/zapret-start.sh" --replace 2>&1)" || rc=$?
-        if [ "$rc" -ne 0 ]; then
-            parse_typed_error_envelope "$output" || {
-                CHILD_ERROR_DOMAIN=LIFECYCLE
-                CHILD_ERROR_CODE=LIFECYCLE_FAILED
-                CHILD_ERROR_STAGE=APPLY_REPLACE
-                CHILD_ERROR_DETAIL="the full replacement transaction failed without a typed envelope"
-            }
+    # A changed port/capture topology stays in this lock-owning process. Load
+    # the firewall layer only for that case, then atomically reconfigure the
+    # stable private chains and replace the daemon as one transaction.
+    if [ "$rc" -eq 2 ] &&
+       [ "${Z2_DAEMON_REPLACE_TOPOLOGY_CHANGED:-0}" = 1 ] &&
+       [ "${Z2_DAEMON_REPLACE_CONTROLLED:-0}" = 0 ]; then
+        if . "$SCRIPT_DIR/topology-replace-transaction.sh"; then
+            replace_topology_in_locked_transaction
+            rc=$?
+        else
+            rc=1
+            Z2_DAEMON_REPLACE_ERROR_DOMAIN=FIREWALL
+            Z2_DAEMON_REPLACE_ERROR_CODE=FIREWALL_BACKEND_UNAVAILABLE
+            Z2_DAEMON_REPLACE_ERROR_STAGE=START_FIREWALL_BACKEND
+            Z2_DAEMON_REPLACE_ERROR_DETAIL="the topology replacement layer is unavailable"
         fi
     fi
     trap 'apply_interrupted HUP' HUP
@@ -531,7 +533,7 @@ report_save_rollback() {
 run_save_content_transaction() {
     local target="$PRESETS_DIR/$APPLY_REQUESTED_PRESET"
     local candidate="$PRESETS_DIR/$APPLY_SAVE_CANDIDATE"
-    local binding=live disposable
+    local disposable
 
     [ -f "$candidate" ] && [ ! -L "$candidate" ] &&
         path_uid_is_root "$candidate" && path_nlink_is_one "$candidate" ||
@@ -577,25 +579,28 @@ run_save_content_transaction() {
     # Measured before any mutation, exactly like the selection transaction: a
     # service the user had stopped must not be started by a content change.
     if service_process_is_running; then APPLY_SERVICE_WAS_RUNNING=1; fi
+    prepare_running_rollback_artifact ||
+        apply_report_failure STATE STATE_UNAVAILABLE APPLY_ROLLBACK_PREPARE \
+            "the running generation could not be preserved for transactional rollback" \
+            IO_FAILED
 
     PRESET_VALIDATION_CODE=OK
     ensure_state_tmp_dir ||
         apply_report_failure STATE STATE_UNAVAILABLE APPLY_VALIDATE \
             "insecure or unavailable zapret2 scratch directory" IO_FAILED
     if [ "$APPLY_SAVE_SHOULD_APPLY" = 1 ]; then
-        [ "$APPLY_SAVE_SELECTION_CHANGE" = 0 ] || binding=next
         state_path_is_managed_file "$COMPILED_ARGV_FILE" ||
             apply_report_failure STATE STATE_UNAVAILABLE APPLY_VALIDATE \
                 "the compiled artifact slot is unavailable" IO_FAILED
         if ! compile_transaction_artifact "$candidate" "$APPLY_REQUESTED_PRESET" \
-            "$COMPILED_ARGV_FILE" "$binding"; then
-            rm -f "$COMPILED_ARGV_FILE" 2>/dev/null
+            "$COMPILED_ARGV_FILE"; then
             [ "$PRESET_VALIDATION_CODE" != OK ] || PRESET_VALIDATION_CODE=NFQWS_DRY_RUN_FAILED
             apply_report_failure CONFIG "$PRESET_VALIDATION_CODE" APPLY_VALIDATE \
                 "the saved preset content was refused by preset qualification: $PRESET_VALIDATION_CODE" \
                 REJECTED "$PRESET_VALIDATION_CODE"
         fi
-        write_compiled_validation_receipt "$COMPILED_ARGV_FILE" ||
+        [ "$COMPILED_TRANSACTION_REPLAYED" = 1 ] ||
+            write_compiled_validation_receipt "$COMPILED_ARGV_FILE" ||
             log_msg "Preset validation receipt could not be written; the replacement will revalidate"
     else
         disposable="$Z2_STATE_TMP/preset-save.$$"
@@ -604,7 +609,7 @@ run_save_content_transaction() {
                 "the disposable validation artifact path is unsafe" IO_FAILED
         rm -f "$disposable" 2>/dev/null
         if ! compile_transaction_artifact "$candidate" "$APPLY_REQUESTED_PRESET" \
-            "$disposable" live; then
+            "$disposable"; then
             rm -f "$disposable" 2>/dev/null
             [ "$PRESET_VALIDATION_CODE" != OK ] || PRESET_VALIDATION_CODE=NFQWS_DRY_RUN_FAILED
             apply_report_failure CONFIG "$PRESET_VALIDATION_CODE" APPLY_VALIDATE \
@@ -642,6 +647,12 @@ run_save_content_transaction() {
     if [ "$APPLY_SAVE_SELECTION_CHANGE" = 1 ]; then
         if commit_runtime_candidate "$RUNTIME_NEXT_TEXT" "$RUNTIME_PREVIOUS_DIGEST" 1; then
             APPLY_CONFIG_COMMITTED=1
+            # The compare-and-swap child owns durable runtime.ini publication,
+            # but this lock-owning shell owns every later proof. Adopt the
+            # exact field it just committed so the in-process replacement
+            # validates the candidate generation rather than the pre-commit
+            # selection still held in memory.
+            ACTIVE_PRESET="$APPLY_REQUESTED_PRESET"
         else
             classify_published_runtime
             [ "$APPLY_PUBLISHED_GENERATION" = previous ] || APPLY_CONFIG_COMMITTED=1
@@ -749,9 +760,10 @@ main() {
     ensure_state_dir ||
         apply_report_failure STATE STATE_UNAVAILABLE APPLY_STATE \
             "insecure or unavailable zapret2 state directory: $STATE_DIR" IO_FAILED
-    APPLY_NONCE="$(proc_starttime "$$")" ||
+    proc_starttime_read "$$" ||
         apply_report_failure STATE STATE_UNAVAILABLE APPLY_STATE \
             "the transaction identity could not be established" IO_FAILED
+    APPLY_NONCE="$PROC_STARTTIME"
 
     acquire_lifecycle_lock ||
         apply_report_failure LIFECYCLE LIFECYCLE_BUSY APPLY_LOCK \
@@ -833,14 +845,18 @@ main() {
             "the save transaction ended without a report" IO_FAILED
     fi
 
+    # Measure and preserve the old running generation before the compiler
+    # replaces its canonical argv cache with the candidate generation.
+    if service_process_is_running; then APPLY_SERVICE_WAS_RUNNING=1; fi
+    prepare_running_rollback_artifact ||
+        apply_report_failure STATE STATE_UNAVAILABLE APPLY_ROLLBACK_PREPARE \
+            "the running generation could not be preserved for transactional rollback" \
+            IO_FAILED
+
     validate_requested_preset ||
         apply_report_failure CONFIG "$PRESET_VALIDATION_CODE" APPLY_VALIDATE \
             "the requested preset was refused by preset qualification: $PRESET_VALIDATION_CODE" \
             REJECTED "$PRESET_VALIDATION_CODE"
-
-    # Measured before the write, exactly like the flow this replaces: a service
-    # the user had stopped must not be started by a configuration change.
-    if service_process_is_running; then APPLY_SERVICE_WAS_RUNNING=1; fi
 
     log_msg "Applying preset $requested (previous: ${APPLY_PREVIOUS_PRESET:-unknown}, running: $APPLY_SERVICE_WAS_RUNNING)"
 
@@ -873,6 +889,12 @@ main() {
                 ;;
         esac
     fi
+
+    # runtime-config.sh is the durability boundary; the current shell remains
+    # the transaction boundary. Keep its typed projection aligned with the
+    # generation that was just committed before consuming the compiled
+    # candidate and validation receipt in process.
+    ACTIVE_PRESET="$requested"
 
     if [ "$APPLY_SERVICE_WAS_RUNNING" = 0 ]; then
         trap - HUP INT TERM

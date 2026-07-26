@@ -27,7 +27,6 @@ interface ProfileRepository {
 
 data class ProfileMutationResult(
     val outcome: PresetMutationOutcome,
-    val publishedDocument: PresetProfileDocument? = null,
 )
 
 @Module
@@ -39,11 +38,12 @@ internal abstract class ProfileRepositoryModule {
 
 @Singleton
 class DefaultProfileRepository @Inject constructor(
+    private val activePresetReader: ActivePresetReader,
     private val presets: PresetRepository,
     private val hostlists: HostlistRepository,
 ) : ProfileRepository {
     override suspend fun loadActive(): PresetProfileDocument? = withContext(Dispatchers.IO) {
-        val active = presets.readActive() ?: return@withContext null
+        val active = activePresetReader.readActive() ?: return@withContext null
         PresetProfileParser.parse(active.fileName, active.content)
     }
 
@@ -129,17 +129,7 @@ class DefaultProfileRepository @Inject constructor(
             content = updated,
             applyAfterSave = false,
         )
-        val published = if (outcome in setOf(
-                PresetMutationOutcome.Saved,
-                PresetMutationOutcome.SavedAndApplied,
-                PresetMutationOutcome.Applied,
-            )
-        ) {
-            PresetProfileParser.parse(document.fileName, updated)
-        } else {
-            null
-        }
-        return ProfileMutationResult(outcome, published)
+        return ProfileMutationResult(outcome)
     }
 
     private companion object {
