@@ -62,7 +62,7 @@ sed -i "s/^version=.*/version=$VERSION_LABEL/" module.prop
 sed -i "s/^versionCode=.*/versionCode=$VERSION_CODE/" module.prop
 
 # Make scripts executable
-chmod +x customize.sh service.sh uninstall.sh action.sh 2>/dev/null || true
+chmod +x customize.sh service.sh post-fs-data.sh uninstall.sh action.sh 2>/dev/null || true
 chmod +x zapret2/scripts/*.sh 2>/dev/null || true
 chmod +x zapret2/scripts/lifecycle/*.sh 2>/dev/null || true
 chmod 0755 system/bin/zapret2-start system/bin/zapret2-stop system/bin/zapret2-status system/bin/zapret2-restart system/bin/zapret2-full-rollback
@@ -191,7 +191,7 @@ package_contract_assemble_package "$PWD" "$PACKAGE_ASSEMBLY_ROOT" || {
 rm -f "$ZIP_PATH"
 (
     cd "$PACKAGE_ASSEMBLY_ROOT"
-    zip -r "$ZIP_PATH" module.prop customize.sh service.sh uninstall.sh action.sh system zapret2
+    zip -r "$ZIP_PATH" module.prop customize.sh service.sh post-fs-data.sh uninstall.sh action.sh system zapret2
 )
 
 # Fail locally on the same missing/duplicate/type/mode/content regressions that
@@ -247,6 +247,10 @@ for PURGE_SCRIPT_ENTRY in \
 done
 test "$(grep -Fxc 'action.sh' "$ZIP_LIST")" -eq 1
 zipinfo -l "$ZIP_PATH" action.sh | grep -Eq '^-rwxr-xr-x[[:space:]]'
+# The boot-time hosts publication entry point is executed by the root manager,
+# so it ships with the same executable bit the other module scripts get.
+test "$(grep -Fxc 'post-fs-data.sh' "$ZIP_LIST")" -eq 1
+zipinfo -l "$ZIP_PATH" post-fs-data.sh | grep -Eq '^-rwxr-xr-x[[:space:]]'
 if grep -Eq '^META-INF(/|$)' "$ZIP_LIST"; then
     echo "ERROR: recovery flashing metadata must not be published" >&2
     exit 1
