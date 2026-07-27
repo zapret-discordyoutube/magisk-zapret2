@@ -226,7 +226,8 @@ unset PRESET_ALLOWED_DEPENDENCIES_FILE
 source_root="$TMP_ROOT/manifest-source"
 package_root="$TMP_ROOT/manifest-package"
 mkdir -p "$source_root" "$package_root"
-cp "$ROOT/module.prop" "$ROOT/customize.sh" "$ROOT/service.sh" "$ROOT/uninstall.sh" "$ROOT/action.sh" "$source_root/"
+cp "$ROOT/module.prop" "$ROOT/customize.sh" "$ROOT/service.sh" "$ROOT/post-fs-data.sh" \
+    "$ROOT/uninstall.sh" "$ROOT/action.sh" "$source_root/"
 cp -R "$ROOT/system" "$ROOT/zapret2" "$source_root/"
 printf '%064d\n' 0 > "$source_root/zapret2/upstream-zapret2.commit"
 printf '%s\n' v0.0.0 > "$source_root/zapret2/upstream-zapret2.release"
@@ -273,7 +274,7 @@ cp "$TMP_ROOT/command-builder.good" "$package_root/zapret2/scripts/command-build
 
 if command -v zip >/dev/null 2>&1 && command -v zipinfo >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
     archive="$TMP_ROOT/manifest-package.zip"
-    (cd "$package_root" && zip -qr "$archive" module.prop customize.sh service.sh uninstall.sh action.sh system zapret2)
+    (cd "$package_root" && zip -qr "$archive" module.prop customize.sh service.sh post-fs-data.sh uninstall.sh action.sh system zapret2)
     names="$TMP_ROOT/manifest-package.names"
     zipinfo -1 "$archive" > "$names"
     package_contract_validate_zip_names "$package_root" "$names" || fail "fixture ZIP names: $PACKAGE_CONTRACT_CODE $PACKAGE_CONTRACT_DETAIL"

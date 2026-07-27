@@ -9,6 +9,7 @@ import com.zapret2.app.data.HostsIniParser
 import com.zapret2.app.data.HostsOverlayRepository
 import com.zapret2.app.data.HostsOverlayMutationOutcome
 import com.zapret2.app.data.HostsOverlaySnapshot
+import com.zapret2.app.data.HostsPublicationOutcome
 import com.zapret2.app.data.ModuleMutationCoordinator
 import com.zapret2.app.data.RuntimeConfigMutationResult
 import com.zapret2.app.data.RuntimeConfigSectionReadResult
@@ -60,9 +61,28 @@ class DnsManagerViewModel @Inject constructor(
         data object CatalogChanged : ApplyOutcome
         data object SourceChanged : ApplyOutcome
         data object RollbackFailed : ApplyOutcome
+
+        /** Written, and the module put it in effect without a reboot. */
+        data object Applied : ApplyOutcome
+
+        /** Written and durable, but only a reboot will put it in effect. */
         data object SavedForReboot : ApplyOutcome
+
+        /** Written, but another module owns /system/etc/hosts. */
+        data class Conflict(val moduleId: String) : ApplyOutcome
+
+        /** Written, but the installed module generation cannot publish it at all. */
+        data object ModuleTooOld : ApplyOutcome
         data object Blocked : ApplyOutcome
         data class ModuleFailed(val diagnostic: String) : ApplyOutcome
+    }
+
+    /** One translation of the module's publication verdict for both apply and reset. */
+    private fun publicationOutcome(outcome: HostsPublicationOutcome): ApplyOutcome = when (outcome) {
+        HostsPublicationOutcome.Mounted -> ApplyOutcome.Applied
+        is HostsPublicationOutcome.Conflict -> ApplyOutcome.Conflict(outcome.moduleId)
+        HostsPublicationOutcome.ModuleTooOld -> ApplyOutcome.ModuleTooOld
+        HostsPublicationOutcome.PendingReboot -> ApplyOutcome.SavedForReboot
     }
 
     fun ensureLoaded() {
@@ -294,7 +314,9 @@ class DnsManagerViewModel @Inject constructor(
                                 else -> ApplyOutcome.Failed
                             }
                         }
-                        ApplyOutcome.SavedForReboot
+                        // The bytes are durable at this point. Whether the module could also put
+                        // them in effect is a separate fact and never a reason to roll back.
+                        publicationOutcome(publishOrPendingReboot())
                     }
                 }
             } catch (_: ModuleMutationCoordinator.MutationBlockedException) {
@@ -306,7 +328,8 @@ class DnsManagerViewModel @Inject constructor(
             }
             finishOperation(
                 outcome = outcome,
-                successMessage = R.string.dns_saved_reboot,
+                successMessage = R.string.dns_applied,
+                rebootMessage = R.string.dns_saved_reboot,
                 failureMessage = R.string.dns_save_failed,
                 blockedMessage = R.string.dns_apply_blocked,
             )
@@ -374,7 +397,7 @@ class DnsManagerViewModel @Inject constructor(
                                 else -> ApplyOutcome.Failed
                             }
                         }
-                        ApplyOutcome.SavedForReboot
+                        publicationOutcome(publishOrPendingReboot())
                     }
                 }
             } catch (_: ModuleMutationCoordinator.MutationBlockedException) {
@@ -386,12 +409,25 @@ class DnsManagerViewModel @Inject constructor(
             }
             finishOperation(
                 outcome = outcome,
-                successMessage = R.string.dns_reset_saved_reboot,
+                successMessage = R.string.dns_reset_applied,
+                rebootMessage = R.string.dns_reset_saved_reboot,
                 failureMessage = R.string.dns_reset_failed,
                 blockedMessage = R.string.dns_reset_blocked,
                 clearSelectionOnSuccess = true,
             )
         }
+    }
+
+    /**
+     * The written bytes are already durable when this runs, so a publication that throws or
+     * cannot mount degrades to "a reboot will apply it" instead of failing the whole edit.
+     */
+    private fun publishOrPendingReboot(): HostsPublicationOutcome = try {
+        hostsRepository.publish()
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        HostsPublicationOutcome.PendingReboot
     }
 
     private fun restoreHostsOrFalse(snapshot: HostsOverlaySnapshot): Boolean = try {
@@ -405,14 +441,21 @@ class DnsManagerViewModel @Inject constructor(
     private fun finishOperation(
         outcome: ApplyOutcome,
         @StringRes successMessage: Int,
+        @StringRes rebootMessage: Int,
         @StringRes failureMessage: Int,
         @StringRes blockedMessage: Int,
         clearSelectionOnSuccess: Boolean = false,
     ) {
         val stateUncertain = outcome == ApplyOutcome.RollbackFailed
         val catalogChanged = outcome == ApplyOutcome.CatalogChanged
+        // Every one of these wrote the file; they differ only in whether the module could put it
+        // in effect. A reset clears its selection on all of them for that reason.
+        val written = outcome == ApplyOutcome.Applied ||
+            outcome == ApplyOutcome.SavedForReboot ||
+            outcome == ApplyOutcome.ModuleTooOld ||
+            outcome is ApplyOutcome.Conflict
         val clearSelection = stateUncertain || catalogChanged ||
-            clearSelectionOnSuccess && outcome == ApplyOutcome.SavedForReboot
+            clearSelectionOnSuccess && written
         _uiState.update { state ->
             state.copy(
                 hostsData = if (stateUncertain || catalogChanged) null else state.hostsData,
@@ -426,20 +469,30 @@ class DnsManagerViewModel @Inject constructor(
                 } else {
                     state.loadError
                 },
-                message = if (outcome is ApplyOutcome.ModuleFailed) {
-                    // Originates in module stdout/stderr, so it crosses the
-                    // same boundary as any other diagnostic shown to the user.
-                    UiText.Dynamic(sanitizedBoundedUiDiagnostic(outcome.diagnostic))
-                } else {
-                    UiText.resource(
+                message = when (outcome) {
+                    is ApplyOutcome.ModuleFailed ->
+                        // Originates in module stdout/stderr, so it crosses the
+                        // same boundary as any other diagnostic shown to the user.
+                        UiText.Dynamic(sanitizedBoundedUiDiagnostic(outcome.diagnostic))
+                    // The conflicting module's id comes from the device, so it is rendered as a
+                    // bounded dynamic argument rather than baked into the resource.
+                    is ApplyOutcome.Conflict -> UiText.Resource(
+                        R.string.dns_hosts_conflict,
+                        listOf(sanitizedBoundedUiDiagnostic(outcome.moduleId)),
+                    )
+                    else -> UiText.resource(
                         when (outcome) {
-                        ApplyOutcome.SavedForReboot -> successMessage
-                        ApplyOutcome.Failed -> failureMessage
-                        ApplyOutcome.CatalogChanged -> R.string.dns_catalog_changed
-                        ApplyOutcome.SourceChanged -> R.string.dns_hosts_changed
-                        ApplyOutcome.RollbackFailed -> R.string.dns_rollback_failed
-                        ApplyOutcome.Blocked -> blockedMessage
-                            is ApplyOutcome.ModuleFailed -> error("handled above")
+                            ApplyOutcome.Applied -> successMessage
+                            ApplyOutcome.SavedForReboot -> rebootMessage
+                            ApplyOutcome.ModuleTooOld -> R.string.dns_module_outdated
+                            ApplyOutcome.Failed -> failureMessage
+                            ApplyOutcome.CatalogChanged -> R.string.dns_catalog_changed
+                            ApplyOutcome.SourceChanged -> R.string.dns_hosts_changed
+                            ApplyOutcome.RollbackFailed -> R.string.dns_rollback_failed
+                            ApplyOutcome.Blocked -> blockedMessage
+                            is ApplyOutcome.ModuleFailed,
+                            is ApplyOutcome.Conflict,
+                            -> error("handled above")
                         },
                     )
                 },

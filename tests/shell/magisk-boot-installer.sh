@@ -31,7 +31,7 @@ OWNED=1
 trap cleanup EXIT HUP INT TERM
 mkdir -p /data/adb/modules /data/adb/modules_update "$CASE"
 mkdir -p "$PACKAGE" "$SOURCE"
-cp "$ROOT/module.prop" "$ROOT/customize.sh" "$ROOT/service.sh" \
+cp "$ROOT/module.prop" "$ROOT/customize.sh" "$ROOT/service.sh" "$ROOT/post-fs-data.sh" \
     "$ROOT/uninstall.sh" "$ROOT/action.sh" "$SOURCE/"
 cp -R "$ROOT/system" "$ROOT/zapret2" "$SOURCE/"
 mkdir -p "$SOURCE/zapret2/bin/arm64-v8a" "$SOURCE/zapret2/bin/armeabi-v7a"
@@ -44,7 +44,7 @@ printf '%064d\n' 0 > "$SOURCE/zapret2/upstream-zapret2.archive.sha256"
 package_contract_assemble_package "$SOURCE" "$PACKAGE" ||
     fail "cannot assemble installer fixture: $PACKAGE_CONTRACT_CODE $PACKAGE_CONTRACT_DETAIL"
 (cd "$PACKAGE" && z2_test_create_zip "$ARCHIVE" \
-    module.prop customize.sh service.sh uninstall.sh action.sh system zapret2)
+    module.prop customize.sh service.sh post-fs-data.sh uninstall.sh action.sh system zapret2)
 
 prepare_magisk_stage() {
     rm -rf "$UPDATE"

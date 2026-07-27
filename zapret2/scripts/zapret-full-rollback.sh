@@ -281,8 +281,15 @@ arm_disable() {
     regular_root_file "$path"
 }
 
+# Releases the bind mount this module owns so the published file can be
+# unlinked. A hosts mount belonging to another module is never touched.
+release_hosts_mount() {
+    [ -f "$HOSTS_OVERLAY_SCRIPT" ] && [ ! -L "$HOSTS_OVERLAY_SCRIPT" ] || return 0
+    /system/bin/sh "$HOSTS_OVERLAY_SCRIPT" --unmount >/dev/null 2>&1
+}
+
 preflight_hosts() {
-    local hosts="$MODDIR/system/etc/hosts" artifact
+    local hosts="$HOSTS_OVERLAY_FILE" artifact
     if [ -e "$hosts" ] || [ -L "$hosts" ]; then regular_root_file "$hosts" || return 1; fi
     if [ -e "$FULL_ROLLBACK_HOSTS_BACKUP" ] || [ -L "$FULL_ROLLBACK_HOSTS_BACKUP" ]; then
         regular_root_file "$FULL_ROLLBACK_HOSTS_BACKUP" || return 1
@@ -301,7 +308,7 @@ preflight_hosts() {
 }
 
 preserve_hosts() {
-    local hosts="$MODDIR/system/etc/hosts" artifact nonce tmp staged="" staged_count=0
+    local hosts="$HOSTS_OVERLAY_FILE" artifact nonce tmp staged="" staged_count=0
     for artifact in "$FULL_ROLLBACK_HOSTS_BACKUP.tmp.$RB_TOKEN."*; do
         [ -e "$artifact" ] || [ -L "$artifact" ] || continue
         regular_root_file "$artifact" || return 1
@@ -329,6 +336,7 @@ preserve_hosts() {
                 write_transaction hosts-backed-up || return 1
                 durability_sync || return 1
             fi
+            release_hosts_mount
             rm -f "$hosts" 2>/dev/null || return 1
             durability_sync || return 1
         fi
@@ -353,6 +361,7 @@ preserve_hosts() {
     durability_sync || return 1
     write_transaction hosts-backed-up || return 1
     durability_sync || return 1
+    release_hosts_mount
     rm -f "$hosts" 2>/dev/null || return 1
     [ ! -e "$hosts" ] && [ ! -L "$hosts" ] || return 1
     durability_sync || return 1

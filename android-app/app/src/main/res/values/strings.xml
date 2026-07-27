@@ -90,6 +90,8 @@
     <string name="control_not_available">N/A</string>
     <string name="control_settings">Settings</string>
     <string name="control_autostart">Autostart on boot</string>
+    <string name="control_tethering">Cover hotspot clients</string>
+    <string name="control_tethering_subtitle">Also process traffic forwarded to devices connected to this phone\'s hotspot. Restarts the service.</string>
     <string name="control_network">Network</string>
     <string name="control_network_type">Network type</string>
     <string name="network_type_wifi">Wi-Fi</string>
@@ -188,6 +190,8 @@
     <string name="control_service_started">Service started</string>
     <string name="control_service_expected_state_error">Service did not reach the expected state</string>
     <string name="control_autostart_save_failed">Could not save the autostart setting</string>
+    <string name="control_tethering_save_failed">Could not save the hotspot coverage setting</string>
+    <string name="control_tethering_restart_failed">The setting was saved, but the service could not be restarted</string>
     <string name="control_module_update_in_progress">Module writes are blocked by an update, recovery, disable, or removal.</string>
     <string name="control_runtime_rollback_failed">The runtime change failed and the previous configuration could not be restored. Reboot before retrying and inspect diagnostics.</string>
     <string name="control_app_up_to_date">The app is up to date</string>
@@ -274,14 +278,18 @@
     <string name="dns_applying">Saving DNS configuration…</string>
     <string name="dns_resetting">Resetting DNS configuration…</string>
     <string name="dns_reset_title">Reset DNS configuration?</string>
-    <string name="dns_reset_body">This removes the generated Zapret2 DNS block and clears the saved DNS service selection. Reboot to apply the change.</string>
+    <string name="dns_reset_body">This removes the generated Zapret2 DNS block and clears the saved DNS service selection.</string>
     <string name="dns_invalid_preset">The selected DNS preset is invalid</string>
+    <string name="dns_applied">DNS configuration applied</string>
     <string name="dns_saved_reboot">DNS configuration saved; reboot to apply it</string>
+    <string name="dns_hosts_conflict">DNS configuration saved, but the module \"%1$s\" already provides /system/etc/hosts. Disable it to let Zapret2 apply these entries.</string>
+    <string name="dns_module_outdated">DNS configuration saved, but the installed module is too old to apply it. Update the module and reboot.</string>
     <string name="dns_save_failed">Could not save the DNS configuration</string>
     <string name="dns_catalog_changed">DNS data changed after a module update. The latest catalog was loaded; review the selection and try again.</string>
     <string name="dns_hosts_changed">The hosts source changed before it could be updated. Nothing was saved; review the current state and try again.</string>
     <string name="dns_rollback_failed">DNS routing was not saved and the previous hosts overlay or runtime state could not be fully restored. Reboot before retrying and inspect diagnostics.</string>
     <string name="dns_apply_blocked">Module writes are blocked by an update, recovery, disable, or removal; DNS changes were not saved.</string>
+    <string name="dns_reset_applied">DNS configuration reset</string>
     <string name="dns_reset_saved_reboot">DNS reset saved; reboot to apply it</string>
     <string name="dns_reset_failed">Could not reset the DNS configuration</string>
     <string name="dns_reset_blocked">Module writes are blocked by an update, recovery, disable, or removal; DNS reset was not saved.</string>

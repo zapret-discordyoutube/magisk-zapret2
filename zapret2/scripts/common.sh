@@ -317,12 +317,19 @@ PURGE_REQUEST="$STATE_DIR/purge.request"
 FULL_ROLLBACK_TRANSACTION="$STATE_DIR/full-rollback.transaction"
 FULL_ROLLBACK_META="$STATE_DIR/full-rollback.meta"
 FULL_ROLLBACK_HOSTS_BACKUP="$STATE_DIR/hosts.rollback.backup"
+# The DNS manager publishes from /data and this module bind-mounts it over
+# /system/etc/hosts; hosts-overlay.sh owns that mount and re-derives the same
+# paths standalone, because it also runs from post-fs-data.sh without common.sh.
+HOSTS_OVERLAY_DIR="${HOSTS_OVERLAY_DIR:-/data/adb/zapret2-hosts}"
+HOSTS_OVERLAY_FILE="$HOSTS_OVERLAY_DIR/hosts"
+HOSTS_OVERLAY_BASE="$HOSTS_OVERLAY_DIR/system-hosts.base"
+HOSTS_OVERLAY_SCRIPT="$SCRIPT_DIR/hosts-overlay.sh"
 FULL_ROLLBACK_VERSION=1
 INSTALL_GENERATION_META="$ZAPRET_DIR/install-generation.meta"
 INSTALL_GENERATION_VERSION=1
 LEGACY_MIGRATION_MARKER="$STATE_DIR/legacy-direct-rules.migrated"
-OWNER_STATE_VERSION=8
-OWNER_STATE_V8_FIELD_SEQUENCE="version|pid|starttime|argv_sha256|qnum|exe|generation|boot_id|phase|install_generation|install_archive_sha256|firewall_tag|out_chain|in_chain|ports_tcp|ports_udp|stun_ports|tcp_pkt_out|tcp_pkt_in|udp_pkt_out|udp_pkt_in|desync_mark|ipv4_active|ipv6_active|ipv4_connbytes|ipv4_multiport|ipv4_mark|ipv6_connbytes|ipv6_multiport|ipv6_mark|ipv4_rules|ipv6_rules|ipv4_spec|ipv6_spec|firewall_fingerprint"
+OWNER_STATE_VERSION=9
+OWNER_STATE_V9_FIELD_SEQUENCE="version|pid|starttime|argv_sha256|qnum|exe|generation|boot_id|phase|install_generation|install_archive_sha256|firewall_tag|out_chain|in_chain|tethering|ports_tcp|ports_udp|stun_ports|tcp_pkt_out|tcp_pkt_in|udp_pkt_out|udp_pkt_in|desync_mark|ipv4_active|ipv6_active|ipv4_connbytes|ipv4_multiport|ipv4_mark|ipv6_connbytes|ipv6_multiport|ipv6_mark|ipv4_rules|ipv6_rules|ipv4_spec|ipv6_spec|firewall_fingerprint"
 OBSOLETE_FIREWALL_WAL="$STATE_DIR/firewall-teardown.wal"
 
 export STATE_DIR Z2_STATE_TMP PIDFILE OWNER_STATE LOGFILE LOGFILE_PREVIOUS CMDLINE_FILE COMPILED_ARGV_FILE
@@ -341,7 +348,7 @@ RUNTIME_CONFIG_STATUS="unknown"
 RUNTIME_CONFIG_REASON=""
 RUNTIME_CONFIG_ERROR=""
 RUNTIME_CORE_REPAIR_MODE="defaults"
-RUNTIME_CORE_REQUIRED_KEYS="schema_version config_format runtime_source autostart wifi_only debug qnum desync_mark active_preset nfqws_uid log_mode"
+RUNTIME_CORE_REQUIRED_KEYS="schema_version config_format runtime_source autostart wifi_only tethering debug qnum desync_mark active_preset nfqws_uid log_mode"
 
 is_decimal() {
     case "$1" in
@@ -1422,6 +1429,7 @@ apply_core_config_key() {
     case "$key" in
         autostart|AUTOSTART) case "$value" in 0|1) AUTOSTART="$value" ;; *) return 1;; esac ;;
         wifi_only|WIFI_ONLY) case "$value" in 0|1) WIFI_ONLY="$value" ;; *) return 1;; esac ;;
+        tethering|TETHERING) case "$value" in 0|1) TETHERING="$value" ;; *) return 1;; esac ;;
         debug|DEBUG) case "$value" in 0|1) DEBUG="$value" ;; *) return 1;; esac ;;
         qnum|QNUM) normalize_qnum "$value" || return 1; QNUM="$QNUM_NORMALIZED" ;;
         desync_mark|DESYNC_MARK) canonical_mark "$value" || return 1; DESYNC_MARK="$MARK_CANONICAL" ;;
@@ -1480,6 +1488,7 @@ set_core_config_defaults() {
     RUNTIME_SOURCE="builtin-defaults"
     AUTOSTART=1
     WIFI_ONLY=0
+    TETHERING=0
     DEBUG=0
     QNUM=200
     DESYNC_MARK=0x40000000
@@ -1566,7 +1575,7 @@ apply_runtime_core_overrides() {
                 case "$value" in ""|*[!A-Za-z0-9._-]*) RUNTIME_CONFIG_ERROR="invalid runtime.ini runtime_source"; return 1;; esac
                 RUNTIME_SOURCE="$value"
                 ;;
-            autostart|wifi_only|debug|qnum|desync_mark|active_preset|nfqws_uid|log_mode)
+            autostart|wifi_only|tethering|debug|qnum|desync_mark|active_preset|nfqws_uid|log_mode)
                 apply_core_config_key "$key" "$value" || {
                     if [ "$key" = qnum ]; then
                         RUNTIME_CONFIG_ERROR="qnum=$value, expected 1..65535"
@@ -2262,6 +2271,7 @@ OWNER_STATE_PHASE=""
 OWNER_STATE_SCHEMA_VERSION=""
 OWNER_STATE_INSTALL_GENERATION=""
 OWNER_STATE_INSTALL_ARCHIVE_SHA256=""
+OWNER_STATE_TETHERING=0
 OWNER_STATE_PORTS_TCP=""; OWNER_STATE_PORTS_UDP=""; OWNER_STATE_STUN_PORTS=""
 OWNER_STATE_TCP_PKT_OUT=""; OWNER_STATE_TCP_PKT_IN=""
 OWNER_STATE_UDP_PKT_OUT=""; OWNER_STATE_UDP_PKT_IN=""; OWNER_STATE_DESYNC_MARK=""
@@ -2339,7 +2349,7 @@ prepare_new_firewall_identity() {
 # Global-return: the spec is compared and embedded, never streamed, and the
 # printf it used to ride on is an external on the target shell.
 owner_build_family_spec_read() {
-    OWNER_FAMILY_SPEC="family:$1;active:$2;tag:$OWNER_WRITE_FIREWALL_TAG;outchain:$OWNER_WRITE_OUT_CHAIN;inchain:$OWNER_WRITE_IN_CHAIN;qnum:$OWNER_WRITE_QNUM;tcp:$OWNER_WRITE_PORTS_TCP;udp:$OWNER_WRITE_PORTS_UDP;stun:$OWNER_WRITE_STUN_PORTS;tcp_out:$OWNER_WRITE_TCP_PKT_OUT;tcp_in:$OWNER_WRITE_TCP_PKT_IN;udp_out:$OWNER_WRITE_UDP_PKT_OUT;udp_in:$OWNER_WRITE_UDP_PKT_IN;mark:$OWNER_WRITE_DESYNC_MARK;connbytes:$3;multiport:$4;markcap:$5;rules:$6"
+    OWNER_FAMILY_SPEC="family:$1;active:$2;tag:$OWNER_WRITE_FIREWALL_TAG;outchain:$OWNER_WRITE_OUT_CHAIN;inchain:$OWNER_WRITE_IN_CHAIN;tethering:$OWNER_WRITE_TETHERING;qnum:$OWNER_WRITE_QNUM;tcp:$OWNER_WRITE_PORTS_TCP;udp:$OWNER_WRITE_PORTS_UDP;stun:$OWNER_WRITE_STUN_PORTS;tcp_out:$OWNER_WRITE_TCP_PKT_OUT;tcp_in:$OWNER_WRITE_TCP_PKT_IN;udp_out:$OWNER_WRITE_UDP_PKT_OUT;udp_in:$OWNER_WRITE_UDP_PKT_IN;mark:$OWNER_WRITE_DESYNC_MARK;connbytes:$3;multiport:$4;markcap:$5;rules:$6"
 }
 
 owner_spec_fingerprint_read() {
@@ -2366,6 +2376,7 @@ prepare_owner_generation_spec() {
     read_install_generation_meta || return 1
     is_safe_firewall_identity "${FIREWALL_TAG:-}" "${ZAPRET2_OUT:-}" "${ZAPRET2_IN:-}" || prepare_new_firewall_identity || return 1
     OWNER_WRITE_FIREWALL_TAG="$FIREWALL_TAG"; OWNER_WRITE_OUT_CHAIN="$ZAPRET2_OUT"; OWNER_WRITE_IN_CHAIN="$ZAPRET2_IN"
+    case "${TETHERING:-0}" in 0|1) OWNER_WRITE_TETHERING="${TETHERING:-0}" ;; *) return 1 ;; esac
     normalize_qnum "${QNUM:-}" || return 1; OWNER_WRITE_QNUM="$QNUM_NORMALIZED"
     normalize_owner_optional_port_list "${PORTS_TCP:-}" || return 1; OWNER_WRITE_PORTS_TCP="$OWNER_PORT_LIST_NORMALIZED"
     normalize_owner_optional_port_list "${PORTS_UDP:-}" || return 1; OWNER_WRITE_PORTS_UDP="$OWNER_PORT_LIST_NORMALIZED"
@@ -2450,6 +2461,7 @@ read_owner_state() {
 
 owner_state_prime_derived() {
     OWNER_WRITE_FIREWALL_TAG="$OWNER_STATE_FIREWALL_TAG"; OWNER_WRITE_OUT_CHAIN="$OWNER_STATE_OUT_CHAIN"; OWNER_WRITE_IN_CHAIN="$OWNER_STATE_IN_CHAIN"
+    OWNER_WRITE_TETHERING="$OWNER_STATE_TETHERING"
     OWNER_WRITE_QNUM="$OWNER_STATE_QNUM"
     OWNER_WRITE_PORTS_TCP="$OWNER_STATE_PORTS_TCP"; OWNER_WRITE_PORTS_UDP="$OWNER_STATE_PORTS_UDP"; OWNER_WRITE_STUN_PORTS="$OWNER_STATE_STUN_PORTS"
     OWNER_WRITE_TCP_PKT_OUT="$OWNER_STATE_TCP_PKT_OUT"; OWNER_WRITE_TCP_PKT_IN="$OWNER_STATE_TCP_PKT_IN"
@@ -2468,7 +2480,7 @@ read_owner_state_fresh() {
     OWNER_STATE_IPV4_ACTIVE=""; OWNER_STATE_IPV6_ACTIVE=""; OWNER_STATE_IPV4_CONNBYTES=""; OWNER_STATE_IPV4_MULTIPORT=""; OWNER_STATE_IPV4_MARK=""
     OWNER_STATE_IPV6_CONNBYTES=""; OWNER_STATE_IPV6_MULTIPORT=""; OWNER_STATE_IPV6_MARK=""; OWNER_STATE_IPV4_RULES=""; OWNER_STATE_IPV6_RULES=""
     OWNER_STATE_IPV4_SPEC=""; OWNER_STATE_IPV6_SPEC=""; OWNER_STATE_FIREWALL_FINGERPRINT=""
-    OWNER_STATE_FIREWALL_TAG=""; OWNER_STATE_OUT_CHAIN=""; OWNER_STATE_IN_CHAIN=""
+    OWNER_STATE_FIREWALL_TAG=""; OWNER_STATE_OUT_CHAIN=""; OWNER_STATE_IN_CHAIN=""; OWNER_STATE_TETHERING=""
     local key value version="" tcp_count udp_count stun_count expected seen_keys="|" field_sequence="" size old_ifs
     path_meta_capture "$OWNER_STATE"
     if state_file_is_secure "$OWNER_STATE" && [ -r "$OWNER_STATE" ] &&
@@ -2500,6 +2512,7 @@ read_owner_state_fresh() {
             firewall_tag) OWNER_STATE_FIREWALL_TAG="$value" ;;
             out_chain) OWNER_STATE_OUT_CHAIN="$value" ;;
             in_chain) OWNER_STATE_IN_CHAIN="$value" ;;
+            tethering) OWNER_STATE_TETHERING="$value" ;;
             ports_tcp) OWNER_STATE_PORTS_TCP="$value" ;;
             ports_udp) OWNER_STATE_PORTS_UDP="$value" ;;
             stun_ports) OWNER_STATE_STUN_PORTS="$value" ;;
@@ -2525,7 +2538,7 @@ read_owner_state_fresh() {
         esac
     done < "$OWNER_STATE"
     [ "$version" = "$OWNER_STATE_VERSION" ] &&
-        [ "$field_sequence" = "$OWNER_STATE_V8_FIELD_SEQUENCE" ] || return 1
+        [ "$field_sequence" = "$OWNER_STATE_V9_FIELD_SEQUENCE" ] || return 1
     OWNER_STATE_SCHEMA_VERSION="$OWNER_STATE_VERSION"
     is_canonical_positive_decimal "$OWNER_STATE_PID" &&
         is_canonical_nonnegative_i64 "$OWNER_STATE_START" || return 1
@@ -2539,6 +2552,7 @@ read_owner_state_fresh() {
     is_safe_token "$OWNER_STATE_INSTALL_GENERATION" && [ "${#OWNER_STATE_INSTALL_GENERATION}" -le 128 ] 2>/dev/null || return 1
     is_lower_sha256 "$OWNER_STATE_INSTALL_ARCHIVE_SHA256" || return 1
     is_safe_firewall_identity "$OWNER_STATE_FIREWALL_TAG" "$OWNER_STATE_OUT_CHAIN" "$OWNER_STATE_IN_CHAIN" || return 1
+    case "$OWNER_STATE_TETHERING" in 0|1) ;; *) return 1 ;; esac
     # A cold lifecycle process has no prior OWNER_WRITE_* generation. Prime
     # every derived global solely from the just-validated owner fields;
     # otherwise a valid record is accidentally accepted only in the writer's
@@ -2627,6 +2641,7 @@ install_archive_sha256=$OWNER_WRITE_INSTALL_ARCHIVE_SHA256
 firewall_tag=$OWNER_WRITE_FIREWALL_TAG
 out_chain=$OWNER_WRITE_OUT_CHAIN
 in_chain=$OWNER_WRITE_IN_CHAIN
+tethering=$OWNER_WRITE_TETHERING
 ports_tcp=$OWNER_WRITE_PORTS_TCP
 ports_udp=$OWNER_WRITE_PORTS_UDP
 stun_ports=$OWNER_WRITE_STUN_PORTS
@@ -3207,6 +3222,10 @@ owner_family_generation_healthy() {
     local TCP_PKT_OUT="$OWNER_STATE_TCP_PKT_OUT" TCP_PKT_IN="$OWNER_STATE_TCP_PKT_IN"
     local UDP_PKT_OUT="$OWNER_STATE_UDP_PKT_OUT" UDP_PKT_IN="$OWNER_STATE_UDP_PKT_IN"
     local QNUM="$OWNER_STATE_QNUM" DESYNC_MARK="$OWNER_STATE_DESYNC_MARK"
+    # The published generation is re-verified against the topology it recorded,
+    # never against the one now configured: a changed tethering setting must
+    # surface as a topology replacement, not as a health failure of live rules.
+    local TETHERING="$OWNER_STATE_TETHERING"
     is_safe_firewall_identity "$OWNER_STATE_FIREWALL_TAG" \
         "$OWNER_STATE_OUT_CHAIN" "$OWNER_STATE_IN_CHAIN" || return 1
     [ "$OWNER_STATE_OUT_CHAIN" = "$Z2_FW_OUT_CHAIN" ] &&
@@ -3276,7 +3295,7 @@ audit_owned_firewall_for_cleanup() {
             # nothing" — and only the former deserves a reservation. Nothing
             # can appear in between: teardown publishes no rules and the
             # lifecycle lock is held across both steps.
-            [ "${Z2_FW_AUDIT_IP6TABLES:-}" != "0 0 0 0" ] || FIREWALL_IPV6_AUDITED_EMPTY=1
+            ! z2_fw_audit_is_absent ip6tables || FIREWALL_IPV6_AUDITED_EMPTY=1
         else
             FIREWALL_IPV6_UNQUERYABLE=1
         fi
@@ -3476,10 +3495,14 @@ purge_zapret2_namespace() {
                 case "$suffix" in O[1-9]* ) parent="Z2O_$tag" ;; I[1-9]* ) parent="Z2I_$tag" ;; *) return 1 ;; esac
                 zapret2_delete_simple_jump_all "$tool" "$parent" "$chain" || return 1
                 ;;
-            Z2O_*) zapret2_delete_simple_jump_all "$tool" OUTPUT "$chain" || return 1 ;;
-            Z2I_*) zapret2_delete_simple_jump_all "$tool" INPUT "$chain" || return 1 ;;
-            ZAPRET2_OUT) zapret2_delete_simple_jump_all "$tool" OUTPUT "$chain" || return 1 ;;
-            ZAPRET2_IN) zapret2_delete_simple_jump_all "$tool" INPUT "$chain" || return 1 ;;
+            Z2O_*|ZAPRET2_OUT)
+                zapret2_delete_simple_jump_all "$tool" OUTPUT "$chain" || return 1
+                zapret2_delete_simple_jump_all "$tool" FORWARD "$chain" || return 1
+                ;;
+            Z2I_*|ZAPRET2_IN)
+                zapret2_delete_simple_jump_all "$tool" INPUT "$chain" || return 1
+                zapret2_delete_simple_jump_all "$tool" FORWARD "$chain" || return 1
+                ;;
             ZAPRET2_PROBE) ;;
             *) return 1 ;;
         esac

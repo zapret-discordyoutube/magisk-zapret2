@@ -215,6 +215,7 @@ if [ "$mode" = inspect-machine ]; then
     printf 'Z2_RUNTIME_CORE\truntime_source\t%s\n' "$RUNTIME_SOURCE"
     printf 'Z2_RUNTIME_CORE\tautostart\t%s\n' "$AUTOSTART"
     printf 'Z2_RUNTIME_CORE\twifi_only\t%s\n' "$WIFI_ONLY"
+    printf 'Z2_RUNTIME_CORE\ttethering\t%s\n' "$TETHERING"
     printf 'Z2_RUNTIME_CORE\tdebug\t%s\n' "$DEBUG"
     printf 'Z2_RUNTIME_CORE\tqnum\t%s\n' "$QNUM"
     printf 'Z2_RUNTIME_CORE\tdesync_mark\t%s\n' "$DESYNC_MARK"
@@ -282,6 +283,7 @@ fi
     fi
     echo 'autostart=1'
     echo 'wifi_only=0'
+    echo 'tethering=0'
     echo 'debug=0'
     echo 'qnum=200'
     echo 'desync_mark=0x40000000'

@@ -339,6 +339,7 @@ package_contract_validate_manifest() {
         "runtime-dependency-immutable|0644|zapret2/lua/zapret-multishake.lua" \
         "immutable-exec|0755|customize.sh" \
         "immutable-exec|0755|service.sh" \
+        "immutable-exec|0755|post-fs-data.sh" \
         "immutable-exec|0755|uninstall.sh" \
         "immutable-exec|0755|action.sh" \
         "immutable-exec|0755|zapret2/scripts/common.sh" \
@@ -349,6 +350,7 @@ package_contract_validate_manifest() {
         "immutable-exec|0755|zapret2/scripts/package-contract.sh" \
         "immutable-exec|0755|zapret2/scripts/runtime-config.sh" \
         "immutable-exec|0755|zapret2/scripts/runtime-init.sh" \
+        "immutable-exec|0755|zapret2/scripts/hosts-overlay.sh" \
         "immutable-exec|0755|zapret2/scripts/lifecycle-lease.sh" \
         "immutable-exec|0755|zapret2/scripts/zapret-start.sh" \
         "immutable-exec|0755|zapret2/scripts/zapret-stop.sh" \
@@ -489,7 +491,7 @@ package_contract_validate_lifecycle_contract() {
     local file="$root/$relative"
     package_contract_check_regular "$file" "$relative" || return 1
     [ "$(wc -l < "$file" 2>/dev/null)" = 1 ] &&
-        [ "$(cat "$file" 2>/dev/null)" = 8 ] || {
+        [ "$(cat "$file" 2>/dev/null)" = 9 ] || {
         package_contract_fail "LIFECYCLE_CONTRACT_INVALID" "$relative"
         return 1
     }
@@ -734,7 +736,7 @@ package_contract_compare_release() {
         return 1
     }
     for path in \
-        module.prop service.sh uninstall.sh action.sh \
+        module.prop service.sh post-fs-data.sh uninstall.sh action.sh \
         system/bin/zapret2-start system/bin/zapret2-stop \
         system/bin/zapret2-status system/bin/zapret2-restart \
         system/bin/zapret2-full-rollback \
@@ -743,7 +745,8 @@ package_contract_compare_release() {
         zapret2/scripts/daemon-replace-transaction.sh \
         zapret2/scripts/topology-replace-transaction.sh \
         zapret2/scripts/package-contract.sh zapret2/scripts/runtime-config.sh \
-        zapret2/scripts/runtime-init.sh zapret2/scripts/zapret-start.sh \
+        zapret2/scripts/runtime-init.sh zapret2/scripts/hosts-overlay.sh \
+        zapret2/scripts/zapret-start.sh \
         zapret2/scripts/zapret-stop.sh zapret2/scripts/zapret-status.sh
     do
         package_contract_check_regular "$source_root/$path" "$path" || return 1

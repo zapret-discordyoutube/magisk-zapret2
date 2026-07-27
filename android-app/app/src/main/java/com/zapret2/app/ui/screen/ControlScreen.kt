@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SystemUpdate
+import androidx.compose.material.icons.filled.WifiTethering
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -321,6 +322,15 @@ fun ControlScreen(
                             checked = state.autostart,
                             onCheckedChange = { activeViewModel?.setAutostart(it) },
                             icon = Icons.Default.PowerSettingsNew,
+                            enabled = state.canEditSettings,
+                        )
+                        Spacer(Modifier.height(SpacingTokens.Small))
+                        SettingToggleRow(
+                            title = stringResource(R.string.control_tethering),
+                            checked = state.tethering,
+                            onCheckedChange = { activeViewModel?.setTethering(it) },
+                            subtitle = stringResource(R.string.control_tethering_subtitle),
+                            icon = Icons.Default.WifiTethering,
                             enabled = state.canEditSettings,
                         )
                     }

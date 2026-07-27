@@ -339,7 +339,9 @@ write_ok_status() {
     STATUS_IPV4_ACTIVE=1; STATUS_IPV6_ACTIVE="$3"
     STATUS_IPV4_RULES="$status_ipv4_rules"; STATUS_IPV6_RULES="$status_ipv6_rules"
     STATUS_CHAINS=$((1 + IPV4_CONNBYTES + STATUS_IPV6_ACTIVE * (1 + IPV6_CONNBYTES)))
-    STATUS_ANCHORS="$STATUS_CHAINS"
+    # Tethering capture anchors every published chain a second time, into
+    # FORWARD, so the anchor count is no longer the chain count.
+    STATUS_ANCHORS=$((STATUS_CHAINS * (1 + ${TETHERING:-0})))
     STATUS_NFQUEUE_SUPPORTED=1; STATUS_QUEUE_BYPASS_SUPPORTED=1
     STATUS_CONNBYTES_SUPPORTED="${IPV4_CONNBYTES:-1}"
     STATUS_MULTIPORT_SUPPORTED="${IPV4_MULTIPORT:-1}"
@@ -446,6 +448,10 @@ snapshot_owned_state() {
             SNAP_ANCHORS=$((SNAP_ANCHORS + 1))
         iptables -t mangle -C INPUT -j "$Z2_FW_IN_CHAIN" >/dev/null 2>&1 &&
             SNAP_ANCHORS=$((SNAP_ANCHORS + 1))
+        iptables -t mangle -C FORWARD -j "$Z2_FW_OUT_CHAIN" >/dev/null 2>&1 &&
+            SNAP_ANCHORS=$((SNAP_ANCHORS + 1))
+        iptables -t mangle -C FORWARD -j "$Z2_FW_IN_CHAIN" >/dev/null 2>&1 &&
+            SNAP_ANCHORS=$((SNAP_ANCHORS + 1))
     fi
     if command -v ip6tables >/dev/null 2>&1 && owned_family_present ip6tables; then
         SNAP_IPV6=1
@@ -457,6 +463,10 @@ snapshot_owned_state() {
         ip6tables -t mangle -C OUTPUT -j "$Z2_FW_OUT_CHAIN" >/dev/null 2>&1 &&
             SNAP_ANCHORS=$((SNAP_ANCHORS + 1))
         ip6tables -t mangle -C INPUT -j "$Z2_FW_IN_CHAIN" >/dev/null 2>&1 &&
+            SNAP_ANCHORS=$((SNAP_ANCHORS + 1))
+        ip6tables -t mangle -C FORWARD -j "$Z2_FW_OUT_CHAIN" >/dev/null 2>&1 &&
+            SNAP_ANCHORS=$((SNAP_ANCHORS + 1))
+        ip6tables -t mangle -C FORWARD -j "$Z2_FW_IN_CHAIN" >/dev/null 2>&1 &&
             SNAP_ANCHORS=$((SNAP_ANCHORS + 1))
     elif { ! command -v ip6tables >/dev/null 2>&1 || ! z2_fw_tool_available ip6tables; } &&
          snapshot_ipv6_publication_recorded; then

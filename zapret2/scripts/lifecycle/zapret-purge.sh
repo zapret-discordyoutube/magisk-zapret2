@@ -202,6 +202,9 @@ commit_purge() {
     z2_purge_remove_managed_tree "$Z2_PURGE_CANONICAL_PENDING_DIR" || cleanup_rc=1
     z2_purge_remove_external_workspaces || { cleanup_rc=1; external_removed=0; }
     z2_purge_remove_legacy_files || cleanup_rc=1
+    # Before the module directory goes: releasing the mount needs the helper
+    # that lives inside it.
+    z2_purge_remove_hosts_overlay || cleanup_rc=1
     z2_purge_remove_managed_tree "$Z2_PURGE_CANONICAL_MODULE_DIR" || cleanup_rc=1
     z2_purge_remove_managed_tree "$Z2_PURGE_CANONICAL_STATE_DIR" || cleanup_rc=1
     sync >/dev/null 2>&1 || cleanup_rc=1

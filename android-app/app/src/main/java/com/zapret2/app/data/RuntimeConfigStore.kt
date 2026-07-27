@@ -68,7 +68,7 @@ internal fun parseRuntimeConfigSnapshot(content: String): RuntimeConfigReadResul
     val raw = section.values
     val expectedKeys = setOf(
         "schema_version", "config_format", "runtime_source", "autostart", "wifi_only",
-        "debug", "qnum", "desync_mark", "active_preset", "nfqws_uid", "log_mode",
+        "tethering", "debug", "qnum", "desync_mark", "active_preset", "nfqws_uid", "log_mode",
     )
     if (raw.keys != expectedKeys) {
         return RuntimeConfigReadResult.Malformed(
@@ -97,6 +97,8 @@ internal fun parseRuntimeConfigSnapshot(content: String): RuntimeConfigReadResul
         ?: return malformedRuntimeValue("autostart")
     val wifiOnly = raw.getValue("wifi_only").takeIf(::isRuntimeBoolean)
         ?: return malformedRuntimeValue("wifi_only")
+    val tethering = raw.getValue("tethering").takeIf(::isRuntimeBoolean)
+        ?: return malformedRuntimeValue("tethering")
     val debug = raw.getValue("debug").takeIf(::isRuntimeBoolean)
         ?: return malformedRuntimeValue("debug")
     val qnum = raw.getValue("qnum")
@@ -123,6 +125,7 @@ internal fun parseRuntimeConfigSnapshot(content: String): RuntimeConfigReadResul
             "runtime_source" to runtimeSource,
             "autostart" to autostart,
             "wifi_only" to wifiOnly,
+            "tethering" to tethering,
             "debug" to debug,
             "qnum" to qnum,
             "desync_mark" to desyncMark,
@@ -194,6 +197,7 @@ object RuntimeConfigStore {
         val logMode: String? = null,
         val autostart: Boolean? = null,
         val wifiOnly: Boolean? = null,
+        val tethering: Boolean? = null,
         val desyncMark: String? = null,
         val nfqwsUid: String? = null
     ) {
@@ -203,6 +207,7 @@ object RuntimeConfigStore {
             logMode?.let { values["log_mode"] = it }
             autostart?.let { values["autostart"] = if (it) "1" else "0" }
             wifiOnly?.let { values["wifi_only"] = if (it) "1" else "0" }
+            tethering?.let { values["tethering"] = if (it) "1" else "0" }
             desyncMark?.let { values["desync_mark"] = it }
             nfqwsUid?.let { values["nfqws_uid"] = it }
             return values

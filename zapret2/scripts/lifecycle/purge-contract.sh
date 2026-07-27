@@ -14,6 +14,10 @@ Z2_PURGE_MODULE_ID="${MODDIR##*/}"
 Z2_PURGE_CANONICAL_MODULE_DIR="$MODDIR"
 Z2_PURGE_CANONICAL_PENDING_DIR="$Z2_PURGE_STORAGE_DIR/modules_update/$Z2_PURGE_MODULE_ID"
 Z2_PURGE_CANONICAL_STATE_DIR="/data/adb/zapret2-state"
+# The DNS manager's published hosts file and its captured system baseline. The
+# module bind-mounts the published file over /system/etc/hosts, so removal has
+# to release that mount before the directory goes.
+Z2_PURGE_CANONICAL_HOSTS_DIR="/data/adb/zapret2-hosts"
 Z2_PURGE_REQUEST="${PURGE_REQUEST:-$Z2_PURGE_CANONICAL_STATE_DIR/purge.request}"
 
 z2_purge_is_decimal() {
@@ -122,7 +126,7 @@ z2_purge_managed_tree_path() {
     local path="$1" parent name suffix
     case "$path" in
         "$Z2_PURGE_CANONICAL_MODULE_DIR"|"$Z2_PURGE_CANONICAL_PENDING_DIR"|\
-        "$Z2_PURGE_CANONICAL_STATE_DIR") return 0 ;;
+        "$Z2_PURGE_CANONICAL_STATE_DIR"|"$Z2_PURGE_CANONICAL_HOSTS_DIR") return 0 ;;
     esac
     parent="${path%/*}"
     name="${path##*/}"
@@ -146,6 +150,17 @@ z2_purge_remove_managed_tree() {
         rm -rf "$path" 2>/dev/null || return 1
     fi
     [ ! -e "$path" ] && [ ! -L "$path" ]
+}
+
+# The published hosts file is bind-mounted over /system/etc/hosts, so the mount
+# has to be released before the directory goes: unlinking underneath a live
+# mount would leave the system path serving a deleted inode until the next boot.
+z2_purge_remove_hosts_overlay() {
+    local script="$Z2_PURGE_CANONICAL_MODULE_DIR/zapret2/scripts/hosts-overlay.sh"
+    if [ -f "$script" ] && [ ! -L "$script" ]; then
+        /system/bin/sh "$script" --clear >/dev/null 2>&1 || :
+    fi
+    z2_purge_remove_managed_tree "$Z2_PURGE_CANONICAL_HOSTS_DIR"
 }
 
 z2_purge_remove_external_workspaces() {

@@ -57,6 +57,7 @@ if [ "${1:-}" = --values ]; then
     printf 'runtime_source\t%s\n' "$RUNTIME_SOURCE"
     printf 'autostart\t%s\n' "$AUTOSTART"
     printf 'wifi_only\t%s\n' "$WIFI_ONLY"
+    printf 'tethering\t%s\n' "$TETHERING"
     printf 'debug\t%s\n' "$DEBUG"
     printf 'qnum\t%s\n' "$QNUM"
     printf 'desync_mark\t%s\n' "$DESYNC_MARK"

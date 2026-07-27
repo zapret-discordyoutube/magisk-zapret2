@@ -59,12 +59,24 @@ class DiagnosticBoundaryPolicyTest {
         )
 
         val moduleFailure = source.sourceRegion(
-            after = "message = if (outcome is ApplyOutcome.ModuleFailed) {",
-            before = "} else {",
+            after = "is ApplyOutcome.ModuleFailed ->",
+            before = "is ApplyOutcome.Conflict ->",
         )
         assertTrue(
             "module stdout/stderr must cross the same boundary as any other diagnostic",
             moduleFailure.contains("sanitizedBoundedUiDiagnostic(outcome.diagnostic)"),
+        )
+
+        // The conflicting module's id is read off the device, so it is a device-supplied string
+        // reaching the UI exactly like a module diagnostic — as a resource argument rather than
+        // a Dynamic, which is why the escape count above cannot see it.
+        val conflict = source.sourceRegion(
+            after = "is ApplyOutcome.Conflict -> UiText.Resource(",
+            before = "else -> UiText.resource(",
+        )
+        assertTrue(
+            "a device-supplied module id must cross the boundary before it is rendered",
+            conflict.contains("sanitizedBoundedUiDiagnostic(outcome.moduleId)"),
         )
 
         // Anything constructed straight from a raw string is what this test exists to stop, so

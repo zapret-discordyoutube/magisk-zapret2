@@ -89,7 +89,7 @@ class ModulePackageContractTest {
     fun packageAndInstalledRootExecutablesAreSeparated() {
         assertEquals(setOf("customize.sh"), ModulePackageContract.installerOnlyExecutables.toSet())
         assertEquals(
-            setOf("service.sh", "uninstall.sh", "action.sh"),
+            setOf("service.sh", "post-fs-data.sh", "uninstall.sh", "action.sh"),
             ModulePackageContract.moduleRootExecutables.toSet(),
         )
         assertEquals(listOf(ModulePackageContract.RUNTIME_MANIFEST_PATH), ModulePackageContract.requiredRegularFiles)
@@ -122,6 +122,7 @@ class ModulePackageContractTest {
             "runtime-dependency-immutable|0644|zapret2/lua/zapret-tests.lua",
             "immutable-exec|0755|customize.sh",
             "immutable-exec|0755|service.sh",
+            "immutable-exec|0755|post-fs-data.sh",
             "immutable-exec|0755|uninstall.sh",
             "immutable-exec|0755|action.sh",
             "immutable-exec|0755|zapret2/scripts/common.sh",
@@ -132,6 +133,7 @@ class ModulePackageContractTest {
             "immutable-exec|0755|zapret2/scripts/package-contract.sh",
             "immutable-exec|0755|zapret2/scripts/runtime-config.sh",
             "immutable-exec|0755|zapret2/scripts/runtime-init.sh",
+            "immutable-exec|0755|zapret2/scripts/hosts-overlay.sh",
             "immutable-exec|0755|zapret2/scripts/zapret-start.sh",
             "immutable-exec|0755|zapret2/scripts/zapret-stop.sh",
             "immutable-exec|0755|zapret2/scripts/zapret-restart.sh",

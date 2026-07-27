@@ -124,7 +124,7 @@ QNUM=200; PORTS_TCP=80,443; PORTS_UDP=443,3478,5349,19302; TCP_PKT_OUT=20; TCP_P
 IPV4_CONNBYTES=1; IPV4_MULTIPORT=1; IPV4_MARK=1; IPV6_CONNBYTES=1; IPV6_MULTIPORT=1; IPV6_MARK=1
 ZAPRET2_LIFECYCLE_TOKEN=app-request-generation
 export ZAPRET2_LIFECYCLE_TOKEN
-prepare_new_firewall_identity || fail "schema-v8 firewall identity preparation failed"
+prepare_new_firewall_identity || fail "schema-v9 firewall identity preparation failed"
 [ "$FIREWALL_TAG:$ZAPRET2_OUT:$ZAPRET2_IN" = stable0001:ZAPRET2_OUT:ZAPRET2_IN ] ||
     fail "stable firewall identity changed"
 [ "$PENDING_OWNER_GENERATION" = "$ZAPRET2_LIFECYCLE_TOKEN" ] ||
@@ -132,8 +132,8 @@ prepare_new_firewall_identity || fail "schema-v8 firewall identity preparation f
 unset ZAPRET2_LIFECYCLE_TOKEN
 prepare_owner_generation_spec 1 0 || fail "owner generation preparation failed"
 write_owner_state 123 456 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 200 generation-a active || fail "owner publication failed"
-read_owner_state || fail "owner v8 round trip failed"
-[ "$OWNER_STATE_SCHEMA_VERSION:$OWNER_STATE_FIREWALL_TAG:$OWNER_STATE_OUT_CHAIN:$OWNER_STATE_IN_CHAIN" = 8:stable0001:ZAPRET2_OUT:ZAPRET2_IN ] ||
+read_owner_state || fail "owner v9 round trip failed"
+[ "$OWNER_STATE_SCHEMA_VERSION:$OWNER_STATE_FIREWALL_TAG:$OWNER_STATE_OUT_CHAIN:$OWNER_STATE_IN_CHAIN" = 9:stable0001:ZAPRET2_OUT:ZAPRET2_IN ] ||
     fail "owner identity fields changed"
 
 owner_family_generation_healthy iptables ipv4 || fail "healthy per-rule generation was rejected"

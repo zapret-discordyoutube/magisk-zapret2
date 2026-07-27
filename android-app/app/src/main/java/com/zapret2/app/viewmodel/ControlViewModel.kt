@@ -595,6 +595,13 @@ data class ControlUiState(
      */
     val serviceUptime: ServiceUptimeAnchor? = null,
     val autostart: Boolean = true,
+    /**
+     * Whether the module also captures traffic forwarded to tethered clients.
+     *
+     * This is a published property of the running generation, not a live switch: the capture
+     * topology is authored when the service starts, so changing it restarts the service.
+     */
+    val tethering: Boolean = false,
     val moduleVersion: String = "",
     val networkType: UiText = UiText.Resource(R.string.control_network_checking),
     val iptablesActive: Boolean = false,
@@ -1602,6 +1609,7 @@ class ControlViewModel @Inject constructor(
                             nfqueueSupported = environment?.nfqueueSupported == true,
                             moduleVersion = environment?.displayedVersion.orEmpty(),
                             autostart = coreValues["autostart"] != "0",
+                            tethering = coreValues["tethering"] == "1",
                             hasAuthoritativeRuntimeSettings = stableModuleConfig,
                             moduleDiagnostic = runtimeMutationDiagnostic,
                             showQuicBanner = showQuicBanner,
@@ -1988,6 +1996,35 @@ class ControlViewModel @Inject constructor(
                 ),
             ).also { success ->
                 if (success) _uiState.update { it.copy(autostart = enabled) }
+            }
+        }
+    }
+
+    /**
+     * The capture topology belongs to the published generation, so a running service keeps the
+     * anchors it started with until it is replaced. The setting is saved first and the restart
+     * follows only for a service that is actually running; a failed restart leaves the saved
+     * setting in place, and the next start applies it.
+     */
+    fun setTethering(enabled: Boolean) {
+        if (rejectConflictingOperation()) return
+        if (rejectUnavailableSettingMutation()) return
+        if (_uiState.value.tethering == enabled) return
+        val wasRunning = _uiState.value.isRunning
+        launchSettingMutation(R.string.control_tethering_save_failed) {
+            handleRuntimeMutation(
+                RuntimeConfigStore.upsertCoreValue(
+                    "tethering",
+                    if (enabled) "1" else "0",
+                ),
+            ).also { success ->
+                if (!success) return@also
+                _uiState.update { it.copy(tethering = enabled) }
+                if (!wasRunning) return@also
+                if (!ServiceLifecycleController.restart().success) {
+                    publishMessage(UiText.Resource(R.string.control_tethering_restart_failed))
+                }
+                checkStatus()
             }
         }
     }

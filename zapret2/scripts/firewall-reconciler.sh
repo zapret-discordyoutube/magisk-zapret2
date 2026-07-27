@@ -17,6 +17,7 @@ Z2_FW_IN_CHAIN="${Z2_FW_IN_CHAIN:-ZAPRET2_IN}"
 Z2_FW_BACKEND=""
 Z2_FW_CONNBYTES=0
 Z2_FW_MULTIPORT=1
+Z2_FW_TETHERING=0
 Z2_FW_RULES=0
 Z2_FW_CHAINS=0
 Z2_FW_ANCHORS=0
@@ -33,6 +34,8 @@ Z2_FW_BASELINE_OUT_CHAIN=0
 Z2_FW_BASELINE_IN_CHAIN=0
 Z2_FW_BASELINE_OUT_ANCHORS=0
 Z2_FW_BASELINE_IN_ANCHORS=0
+Z2_FW_BASELINE_FWD_OUT_ANCHORS=0
+Z2_FW_BASELINE_FWD_IN_ANCHORS=0
 Z2_FW_AUDIT_IPTABLES=""
 Z2_FW_AUDIT_IP6TABLES=""
 Z2_FW_VERIFY_DETAIL=""
@@ -294,6 +297,24 @@ z2_fw_tool_available() {
         "$1" -t mangle -L OUTPUT -n >/dev/null 2>&1
 }
 
+# Packets of a tethered client are forwarded, so they meet the FORWARD hook and
+# never OUTPUT or INPUT. Their capture direction is nevertheless identical to
+# the local one: the client's request is the conntrack original direction with
+# the server port as destination, and the reply is the reply direction with the
+# server port as source — exactly what the two owned chains already match. So
+# tethering capture is expressed as two more anchors into the same chains, not
+# as a third chain, a new rule shape, or an interface selector this module has
+# no verified way to author. TETHERING is a configuration input like the port
+# lists, and the owner record carries it, so a live generation is re-verified
+# against the topology it published rather than the one now configured.
+z2_fw_tethering_read() {
+    case "${TETHERING:-0}" in
+        1) Z2_FW_TETHERING=1 ;;
+        0|"") Z2_FW_TETHERING=0 ;;
+        *) return 1 ;;
+    esac
+}
+
 z2_fw_capture_baseline() {
     local tool="$1" listing plan
     Z2_FW_BASELINE_READY=0
@@ -301,7 +322,13 @@ z2_fw_capture_baseline() {
     Z2_FW_BASELINE_IN_CHAIN=0
     Z2_FW_BASELINE_OUT_ANCHORS=0
     Z2_FW_BASELINE_IN_ANCHORS=0
+    Z2_FW_BASELINE_FWD_OUT_ANCHORS=0
+    Z2_FW_BASELINE_FWD_IN_ANCHORS=0
     listing="$("$tool" -t mangle -S 2>/dev/null)" || return 1
+    # The baseline counts the FORWARD anchors separately from the built-in ones
+    # instead of judging them: a generation that published tethering capture is
+    # torn down by the same code that tears down one that did not, and only the
+    # publication path decides which anchors belong to the configured topology.
     plan="$(printf '%s\n' "$listing" |
         awk -v out="$Z2_FW_OUT_CHAIN" -v inchain="$Z2_FW_IN_CHAIN" '
             $1 == "-N" && $2 == out { out_chain++ }
@@ -313,10 +340,12 @@ z2_fw_capture_baseline() {
                     target = $(i + 1)
                     if (target == out) {
                         if ($0 == "-A OUTPUT -j " out) out_anchor++
+                        else if ($0 == "-A FORWARD -j " out) fwd_out_anchor++
                         else bad = 1
                     }
                     if (target == inchain) {
                         if ($0 == "-A INPUT -j " inchain) in_anchor++
+                        else if ($0 == "-A FORWARD -j " inchain) fwd_in_anchor++
                         else bad = 1
                     }
                 }
@@ -324,20 +353,25 @@ z2_fw_capture_baseline() {
             END {
                 if (bad || out_chain > 1 || in_chain > 1 ||
                     out_anchor > 8 || in_anchor > 8 ||
-                    (out_anchor && !out_chain) || (in_anchor && !in_chain))
+                    fwd_out_anchor > 8 || fwd_in_anchor > 8 ||
+                    ((out_anchor || fwd_out_anchor) && !out_chain) ||
+                    ((in_anchor || fwd_in_anchor) && !in_chain))
                     exit 1
-                printf "%d %d %d %d\n",
-                    out_chain, in_chain, out_anchor, in_anchor
+                printf "%d %d %d %d %d %d\n",
+                    out_chain, in_chain, out_anchor, in_anchor,
+                    fwd_out_anchor, fwd_in_anchor
             }
         ')" || return 1
-    # The awk producer emits exactly four decimal fields.
+    # The awk producer emits exactly six decimal fields.
     # shellcheck disable=SC2086
     set -- $plan
-    [ "$#" = 4 ] || return 1
+    [ "$#" = 6 ] || return 1
     Z2_FW_BASELINE_OUT_CHAIN="$1"
     Z2_FW_BASELINE_IN_CHAIN="$2"
     Z2_FW_BASELINE_OUT_ANCHORS="$3"
     Z2_FW_BASELINE_IN_ANCHORS="$4"
+    Z2_FW_BASELINE_FWD_OUT_ANCHORS="$5"
+    Z2_FW_BASELINE_FWD_IN_ANCHORS="$6"
     Z2_FW_BASELINE_READY=1
     return 0
 }
@@ -349,7 +383,7 @@ z2_fw_cleanup_is_unambiguous() {
 z2_fw_save_audit() {
     local tool="$1" plan
     [ "$Z2_FW_BASELINE_READY" = 1 ] || return 1
-    plan="$Z2_FW_BASELINE_OUT_CHAIN $Z2_FW_BASELINE_IN_CHAIN $Z2_FW_BASELINE_OUT_ANCHORS $Z2_FW_BASELINE_IN_ANCHORS"
+    plan="$Z2_FW_BASELINE_OUT_CHAIN $Z2_FW_BASELINE_IN_CHAIN $Z2_FW_BASELINE_OUT_ANCHORS $Z2_FW_BASELINE_IN_ANCHORS $Z2_FW_BASELINE_FWD_OUT_ANCHORS $Z2_FW_BASELINE_FWD_IN_ANCHORS"
     case "$tool" in
         iptables) Z2_FW_AUDIT_IPTABLES="$plan" ;;
         ip6tables) Z2_FW_AUDIT_IP6TABLES="$plan" ;;
@@ -364,22 +398,40 @@ z2_fw_load_audit() {
         ip6tables) plan="$Z2_FW_AUDIT_IP6TABLES" ;;
         *) return 1 ;;
     esac
-    # Saved audit plans contain exactly four decimal fields.
+    # Saved audit plans contain exactly six decimal fields.
     # shellcheck disable=SC2086
     set -- $plan
-    [ "$#" = 4 ] || return 1
+    [ "$#" = 6 ] || return 1
     Z2_FW_BASELINE_OUT_CHAIN="$1"
     Z2_FW_BASELINE_IN_CHAIN="$2"
     Z2_FW_BASELINE_OUT_ANCHORS="$3"
     Z2_FW_BASELINE_IN_ANCHORS="$4"
+    Z2_FW_BASELINE_FWD_OUT_ANCHORS="$5"
+    Z2_FW_BASELINE_FWD_IN_ANCHORS="$6"
     Z2_FW_BASELINE_READY=1
+}
+
+# One place decides what "nothing of ours is published" means, so a topology
+# that gained anchors cannot leave a caller comparing a shorter tuple.
+Z2_FW_ABSENT_PLAN="0 0 0 0 0 0"
+
+z2_fw_audit_is_absent() {
+    case "$1" in
+        iptables) [ "${Z2_FW_AUDIT_IPTABLES:-}" = "$Z2_FW_ABSENT_PLAN" ] ;;
+        ip6tables) [ "${Z2_FW_AUDIT_IP6TABLES:-}" = "$Z2_FW_ABSENT_PLAN" ] ;;
+        *) return 1 ;;
+    esac
+}
+
+z2_fw_baseline_is_absent() {
+    [ "$Z2_FW_BASELINE_OUT_CHAIN:$Z2_FW_BASELINE_IN_CHAIN:$Z2_FW_BASELINE_OUT_ANCHORS:$Z2_FW_BASELINE_IN_ANCHORS:$Z2_FW_BASELINE_FWD_OUT_ANCHORS:$Z2_FW_BASELINE_FWD_IN_ANCHORS" = 0:0:0:0:0:0 ]
 }
 
 z2_fw_family_absent() {
     local tool="$1"
     command -v "$tool" >/dev/null 2>&1 || return 2
     z2_fw_capture_baseline "$tool" || return 2
-    [ "$Z2_FW_BASELINE_OUT_CHAIN:$Z2_FW_BASELINE_IN_CHAIN:$Z2_FW_BASELINE_OUT_ANCHORS:$Z2_FW_BASELINE_IN_ANCHORS" = 0:0:0:0 ]
+    z2_fw_baseline_is_absent
 }
 
 # Builder counterpart of the old per-line emitter: cleanup lines land in
@@ -396,8 +448,18 @@ z2_fw_build_baseline_cleanup() {
         n=$((n + 1))
     done
     n=0
+    while [ "$n" -lt "$Z2_FW_BASELINE_FWD_OUT_ANCHORS" ]; do
+        Z2_FW_BUILT_CLEANUP="${Z2_FW_BUILT_CLEANUP}${Z2_FW_BUILT_CLEANUP:+$nl}-D FORWARD -j $Z2_FW_OUT_CHAIN"
+        n=$((n + 1))
+    done
+    n=0
     while [ "$n" -lt "$Z2_FW_BASELINE_IN_ANCHORS" ]; do
         Z2_FW_BUILT_CLEANUP="${Z2_FW_BUILT_CLEANUP}${Z2_FW_BUILT_CLEANUP:+$nl}-D INPUT -j $Z2_FW_IN_CHAIN"
+        n=$((n + 1))
+    done
+    n=0
+    while [ "$n" -lt "$Z2_FW_BASELINE_FWD_IN_ANCHORS" ]; do
+        Z2_FW_BUILT_CLEANUP="${Z2_FW_BUILT_CLEANUP}${Z2_FW_BUILT_CLEANUP:+$nl}-D FORWARD -j $Z2_FW_IN_CHAIN"
         n=$((n + 1))
     done
     if [ "$Z2_FW_BASELINE_IN_CHAIN" = 1 ]; then
@@ -486,6 +548,7 @@ z2_fw_build_batch_rules() {
 z2_fw_write_batch() {
     local path="$1" connbytes="$2" multiport="${3:-1}" batch nl='
 '
+    z2_fw_tethering_read || return 1
     z2_fw_build_baseline_cleanup || return 1
     batch="*mangle"
     [ -z "$Z2_FW_BUILT_CLEANUP" ] || batch="$batch$nl$Z2_FW_BUILT_CLEANUP"
@@ -502,7 +565,11 @@ z2_fw_write_batch() {
         [ -z "$Z2_FW_BUILT_RULES" ] || batch="$batch$nl$Z2_FW_BUILT_RULES"
     fi
     batch="$batch$nl-A OUTPUT -j $Z2_FW_OUT_CHAIN"
-    [ "$connbytes" != 1 ] || batch="$batch$nl-A INPUT -j $Z2_FW_IN_CHAIN"
+    [ "$Z2_FW_TETHERING" != 1 ] || batch="$batch$nl-A FORWARD -j $Z2_FW_OUT_CHAIN"
+    if [ "$connbytes" = 1 ]; then
+        batch="$batch$nl-A INPUT -j $Z2_FW_IN_CHAIN"
+        [ "$Z2_FW_TETHERING" != 1 ] || batch="$batch$nl-A FORWARD -j $Z2_FW_IN_CHAIN"
+    fi
     batch="$batch${nl}COMMIT"
     z2_emit_line "$batch" > "$path"
 }
@@ -542,6 +609,9 @@ z2_fw_reconfigure_family() {
     Z2_FW_RULES=0; Z2_FW_CHAINS=0; Z2_FW_ANCHORS=0
     Z2_FW_FAILURE_CLASS=""; Z2_FW_ERROR_DETAIL=""
     case "$connbytes:$multiport" in [01]:[01]) ;; *) return 2;; esac
+    # Anchors are not part of a reconfiguration batch, so a caller that changed
+    # the capture topology has to take the full publication path instead.
+    z2_fw_tethering_read || return 2
     z2_fw_restore_command_read "$tool" || return 2
     restore="$Z2_FW_RESTORE_COMMAND"
     command -v "$restore" >/dev/null 2>&1 || return 3
@@ -698,6 +768,10 @@ z2_fw_verify_family() {
     local tool="$1" connbytes="$2" multiport="${3:-1}" listing verification
     local out_tcp out_udp in_tcp in_udp
     Z2_FW_VERIFY_DETAIL=""
+    z2_fw_tethering_read || {
+        Z2_FW_VERIFY_DETAIL="invalid tethering capture setting"
+        return 1
+    }
     listing="$("$tool" -t mangle -S 2>/dev/null)" || {
         Z2_FW_VERIFY_DETAIL="$tool mangle snapshot command failed"
         return 1
@@ -734,7 +808,7 @@ z2_fw_verify_family() {
         printf '%s\n' "$listing"
     } | awk \
         -v out="$Z2_FW_OUT_CHAIN" -v inchain="$Z2_FW_IN_CHAIN" \
-        -v connbytes="$connbytes" '
+        -v connbytes="$connbytes" -v tethering="$Z2_FW_TETHERING" '
         # Without multiport a port list becomes one rule per interval, so a
         # single expected signature per chain and protocol is no longer the
         # shape to compare against. Expectations are loaded as a multiset of
@@ -854,9 +928,11 @@ z2_fw_verify_family() {
                 target=$(i+1)
                 if (target == out) {
                     if ($0 == "-A OUTPUT -j " out) out_anchor++
+                    else if ($0 == "-A FORWARD -j " out) fwd_out_anchor++
                     else bad=1
                 } else if (target == inchain) {
                     if ($0 == "-A INPUT -j " inchain) in_anchor++
+                    else if ($0 == "-A FORWARD -j " inchain) fwd_in_anchor++
                     else bad=1
                 }
             }
@@ -871,17 +947,22 @@ z2_fw_verify_family() {
             if (bad) reason="FOREIGN_OR_UNEXPECTED_RULE"
             else if (out_chain != 1) reason="OUT_CHAIN_COUNT:" out_chain
             else if (out_anchor != 1) reason="OUT_ANCHOR_COUNT:" out_anchor
+            else if (fwd_out_anchor != tethering)
+                reason="FORWARD_OUT_ANCHOR_COUNT:" fwd_out_anchor
             else if (out_rules != expected_out) reason="OUT_RULE_COUNT:" out_rules
             else if (!expectations_met(out)) reason="OUT_RULE_MISMATCH"
             if (connbytes == 1) {
                 if (reason == "" && in_chain != 1) reason="INPUT_CHAIN_COUNT:" in_chain
                 else if (reason == "" && in_anchor != 1) reason="INPUT_ANCHOR_COUNT:" in_anchor
+                else if (reason == "" && fwd_in_anchor != tethering)
+                    reason="FORWARD_IN_ANCHOR_COUNT:" fwd_in_anchor
                 else if (reason == "" && in_rules != expected_in) reason="INPUT_RULE_COUNT:" in_rules
                 else if (reason == "" && !expectations_met(inchain))
                     reason="INPUT_RULE_MISMATCH"
             } else {
                 if (reason == "" &&
-                    (in_chain != 0 || in_anchor != 0 || in_rules != 0))
+                    (in_chain != 0 || in_anchor != 0 || fwd_in_anchor != 0 ||
+                     in_rules != 0))
                     reason="UNEXPECTED_INPUT_TOPOLOGY"
             }
             if (reason != "") {
@@ -890,21 +971,23 @@ z2_fw_verify_family() {
             }
         }')" || {
         [ -n "$verification" ] || verification=UNKNOWN_TOPOLOGY_MISMATCH
-        Z2_FW_VERIFY_DETAIL="$tool post-publication topology mismatch (connbytes=$connbytes, reason=$verification)"
+        Z2_FW_VERIFY_DETAIL="$tool post-publication topology mismatch (connbytes=$connbytes, tethering=$Z2_FW_TETHERING, reason=$verification)"
         return 1
     }
     Z2_FW_CONNBYTES="$connbytes"
     z2_fw_expected_rule_count "$connbytes" "$multiport" || return 1
     Z2_FW_RULES="$Z2_FW_EXPECTED_RULES"
     Z2_FW_CHAINS=$((1 + connbytes))
-    Z2_FW_ANCHORS=$((1 + connbytes))
+    # Every published chain is anchored once into its built-in hook, and once
+    # more into FORWARD when tethering capture is on.
+    Z2_FW_ANCHORS=$(((1 + connbytes) * (1 + Z2_FW_TETHERING)))
     return 0
 }
 
 z2_fw_apply_cleanup() {
     local tool="$1" restore batch phase rc detail
     [ "$Z2_FW_BASELINE_READY" = 1 ] || return 1
-    if [ "$Z2_FW_BASELINE_OUT_CHAIN:$Z2_FW_BASELINE_IN_CHAIN:$Z2_FW_BASELINE_OUT_ANCHORS:$Z2_FW_BASELINE_IN_ANCHORS" = 0:0:0:0 ]; then
+    if z2_fw_baseline_is_absent; then
         return 0
     fi
     z2_fw_restore_command_read "$tool" || return 2
@@ -966,6 +1049,7 @@ z2_fw_reconcile_family() {
     Z2_FW_BACKEND=""; Z2_FW_CONNBYTES=0; Z2_FW_MULTIPORT=1
     Z2_FW_RULES=0; Z2_FW_CHAINS=0; Z2_FW_ANCHORS=0
     Z2_FW_FAILURE_CLASS=""; Z2_FW_ERROR_DETAIL=""; Z2_FW_FALLBACK_DETAIL=""
+    z2_fw_tethering_read || return 2
     command -v "$tool" >/dev/null 2>&1 || {
         Z2_FW_FAILURE_CLASS=BACKEND_UNAVAILABLE
         Z2_FW_ERROR_DETAIL="$tool command is unavailable"

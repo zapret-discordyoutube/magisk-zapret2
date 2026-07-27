@@ -31,7 +31,7 @@ case "${Z2_QUERY_MODE:-clean}: $* " in
         exit 0
         ;;
     foreign:*' -t mangle -S ')
-        printf '%s\n' '-N ZAPRET2_OUT' '-A FORWARD -j ZAPRET2_OUT'
+        printf '%s\n' '-N ZAPRET2_OUT' '-A PREROUTING -j ZAPRET2_OUT'
         exit 0
         ;;
     clean:*' -t mangle -S ') exit 0 ;;

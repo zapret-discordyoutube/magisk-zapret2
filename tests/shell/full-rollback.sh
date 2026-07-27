@@ -9,11 +9,15 @@ STATE="$CASE/state"
 MOCK="$CASE/bin"
 LOG="$CASE/iptables.mutations"
 OUT="$CASE/out"
+# The DNS manager publishes from /data and the module bind-mounts it, so the
+# rollback preserves this path rather than one inside the module tree.
+HOSTS_DIR="$CASE/zapret2-hosts"
+export HOSTS_OVERLAY_DIR="$HOSTS_DIR"
 
 fail() { echo "FAIL: rollback: $*" >&2; exit 1; }
 assert_line() { grep -Fxq -- "$2" "$1" || fail "missing $2"; }
 
-mkdir -p "$MOD/zapret2/scripts" "$MOD/zapret2/lists" "$MOD/system/etc" "$STATE" "$MOCK"
+mkdir -p "$MOD/zapret2/scripts" "$MOD/zapret2/lists" "$MOD/system/etc" "$STATE" "$MOCK" "$HOSTS_DIR"
 chmod 0700 "$STATE"
 cp "$ROOT/zapret2/scripts/common.sh" "$MOD/zapret2/scripts/common.sh"
 cp "$ROOT/zapret2/scripts/firewall-reconciler.sh" "$MOD/zapret2/scripts/firewall-reconciler.sh"
@@ -28,8 +32,8 @@ selected_direct=three
 tcp=custom-user-order
 EOF
 printf '%s\n' 'user-list-content' > "$MOD/zapret2/lists/user.txt"
-printf '%s\n' '127.0.0.1 localhost' '1.1.1.1 example.test' > "$MOD/system/etc/hosts"
-chmod 0644 "$MOD/zapret2/runtime.ini" "$MOD/system/etc/hosts"
+printf '%s\n' '127.0.0.1 localhost' '1.1.1.1 example.test' > "$HOSTS_DIR/hosts"
+chmod 0644 "$MOD/zapret2/runtime.ini" "$HOSTS_DIR/hosts"
 cat > "$MOD/zapret2/install-generation.meta" <<EOF
 version=1
 module_dir=$MOD
@@ -117,9 +121,9 @@ grep -Fqx 'autostart=1' "$MOD/zapret2/runtime.ini" || fail "malformed journal pr
 rm -f "$STATE/full-rollback.transaction"
 
 # A failed durability barrier retains the exact disable fence and journal.
-exec 9< "$MOD/system/etc/hosts"
-hosts_inode_before=$(stat -c %i "$MOD/system/etc/hosts")
-hosts_mode_before=$(stat -c %a "$MOD/system/etc/hosts")
+exec 9< "$HOSTS_DIR/hosts"
+hosts_inode_before=$(stat -c %i "$HOSTS_DIR/hosts")
+hosts_mode_before=$(stat -c %a "$HOSTS_DIR/hosts")
 set +e
 PATH="$MOCK:$PATH" STATE_DIR="$STATE" Z2_MOCK_LOG="$LOG" Z2_MOCK_SYNC_FAIL=1 sh "$MOD/zapret2/scripts/zapret-full-rollback.sh" --machine > "$OUT"
 rc=$?
@@ -139,7 +143,7 @@ rc=$?
 set -e
 [ "$rc" = 1 ] || fail "process-clean sync signal did not interrupt rollback"
 assert_line "$OUT.signal-process" 'Z2_RB_STATUS=partial'
-[ -f "$MOD/system/etc/hosts" ] && [ ! -e "$STATE/hosts.rollback.backup" ] || fail "hosts were touched before process-clean phase durability"
+[ -f "$HOSTS_DIR/hosts" ] && [ ! -e "$STATE/hosts.rollback.backup" ] || fail "hosts were touched before process-clean phase durability"
 grep -Fqx 'phase=process-clean' "$STATE/full-rollback.transaction" || fail "process-clean phase was not retained"
 
 # The next sync is the backup-publication durability barrier. Source must still
@@ -153,7 +157,7 @@ rc=$?
 set -e
 [ "$rc" = 1 ] || fail "hosts publication signal did not interrupt rollback"
 assert_line "$OUT.signal-hosts" 'Z2_RB_STATUS=partial'
-[ -f "$MOD/system/etc/hosts" ] && [ -f "$STATE/hosts.rollback.backup" ] || fail "source was unlinked before backup durability/journal ordering"
+[ -f "$HOSTS_DIR/hosts" ] && [ -f "$STATE/hosts.rollback.backup" ] || fail "source was unlinked before backup durability/journal ordering"
 grep -Fqx 'phase=process-clean' "$STATE/full-rollback.transaction" || fail "signal regressed or advanced an uncommitted hosts phase"
 
 # The generation being rolled back committed a status snapshot claiming an
@@ -183,7 +187,7 @@ assert_line "$OUT" 'Z2_RB_COMPLETE=1'
 [ -f "$MOD/disable" ] && [ ! -L "$MOD/disable" ] || fail "disable fence missing"
 [ -f "$STATE/hosts.rollback.backup" ] || fail "hosts backup missing"
 grep -Fqx '1.1.1.1 example.test' "$STATE/hosts.rollback.backup" || fail "hosts bytes not preserved"
-[ ! -e "$MOD/system/etc/hosts" ] || fail "hosts overlay was not moved"
+[ ! -e "$HOSTS_DIR/hosts" ] || fail "hosts overlay was not moved"
 [ "$(stat -c %a "$STATE/hosts.rollback.backup")" = 600 ] || fail "hosts backup is not root-private"
 [ "$(stat -c %i "$STATE/hosts.rollback.backup")" != "$hosts_inode_before" ] || fail "hosts live inode was moved instead of copied"
 [ "$(stat -Lc %i "/proc/$$/fd/9")" = "$hosts_inode_before" ] || fail "open hosts inode changed"
@@ -236,7 +240,7 @@ rmdir "$STATE/lifecycle.lock"
 rm -f "$STATE/full-rollback.meta" "$STATE/legacy-direct-rules.migrated" "$MOD/disable"
 rm -rf "$STATE/hosts.rollback.backup"
 mkdir -p "$MOD/system/etc"
-printf '%s\n' '127.0.0.1 localhost' > "$MOD/system/etc/hosts"
+printf '%s\n' '127.0.0.1 localhost' > "$HOSTS_DIR/hosts"
 sed -i 's/^autostart=0$/autostart=1/' "$MOD/zapret2/runtime.ini"
 # Publish a real exact-path process and matching owner generation. This makes
 # the firewall foreign-reference audit, rather than process preflight, the

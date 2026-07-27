@@ -89,6 +89,7 @@ NFQWS_TEMP="$ZAPRET_DIR/.nfqws2.install.$$"
 for required in \
     "$MODPATH/module.prop" \
     "$MODPATH/service.sh" \
+    "$MODPATH/post-fs-data.sh" \
     "$MODPATH/uninstall.sh" \
     "$MODPATH/action.sh" \
     "$ZAPRET_DIR/runtime-manifest.tsv" \
@@ -100,6 +101,7 @@ for required in \
     "$ZAPRET_DIR/hosts.ini" \
     "$SCRIPT_DIR/common.sh" \
     "$SCRIPT_DIR/command-builder.sh" \
+    "$SCRIPT_DIR/hosts-overlay.sh" \
     "$SCRIPT_DIR/package-contract.sh" \
     "$SCRIPT_DIR/zapret-start.sh" \
     "$SCRIPT_DIR/zapret-stop.sh" \
@@ -114,6 +116,7 @@ done
 chmod 0755 \
     "$MODPATH/customize.sh" \
     "$MODPATH/service.sh" \
+    "$MODPATH/post-fs-data.sh" \
     "$MODPATH/uninstall.sh" \
     "$MODPATH/action.sh" \
     "$ZAPRET_DIR/bin/arm64-v8a/nfqws2" \
@@ -157,5 +160,36 @@ GENERATION_TEMP="$ZAPRET_DIR/.install-generation.meta.$$"
 [ -f "$NFQWS_TARGET" ] && [ ! -L "$NFQWS_TARGET" ] &&
     [ -s "$NFQWS_TARGET" ] && [ -x "$NFQWS_TARGET" ] ||
     abort "! Prepared module is incomplete: ${NFQWS_TARGET#"$MODPATH"/}"
+
+# Releases up to v2.2.5 published the DNS manager's hosts file inside the live
+# module tree, which the root manager replaces wholesale on the next boot. This
+# is the last moment that file still exists, so carry the user's selection over
+# to the storage the new release publishes from. It is a rescue of user data
+# out of a location that no longer holds it — the staged generation itself
+# still inherits nothing from the live tree.
+LEGACY_HOSTS="$LIVE_MODPATH/system/etc/hosts"
+HOSTS_OVERLAY_DIR="/data/adb/zapret2-hosts"
+HOSTS_OVERLAY_FILE="$HOSTS_OVERLAY_DIR/hosts"
+if [ -f "$LEGACY_HOSTS" ] && [ ! -L "$LEGACY_HOSTS" ] &&
+   [ ! -e "$HOSTS_OVERLAY_FILE" ] && [ ! -L "$HOSTS_OVERLAY_FILE" ] &&
+   [ "$(stat -c %u "$LEGACY_HOSTS" 2>/dev/null)" = 0 ]; then
+    LEGACY_HOSTS_BYTES="$(stat -c %s "$LEGACY_HOSTS" 2>/dev/null)"
+    case "$LEGACY_HOSTS_BYTES" in
+        ''|*[!0-9]*) LEGACY_HOSTS_BYTES=0 ;;
+    esac
+    if [ "$LEGACY_HOSTS_BYTES" -gt 0 ] && [ "$LEGACY_HOSTS_BYTES" -le 1048576 ]; then
+        HOSTS_MIGRATION_TEMP="$HOSTS_OVERLAY_DIR/.hosts.migrate.$$"
+        if mkdir -p "$HOSTS_OVERLAY_DIR" 2>/dev/null &&
+            chmod 0755 "$HOSTS_OVERLAY_DIR" 2>/dev/null &&
+            cp "$LEGACY_HOSTS" "$HOSTS_MIGRATION_TEMP" 2>/dev/null &&
+            chmod 0644 "$HOSTS_MIGRATION_TEMP" 2>/dev/null &&
+            mv -f "$HOSTS_MIGRATION_TEMP" "$HOSTS_OVERLAY_FILE" 2>/dev/null; then
+            ui_print "- Carried the existing DNS hosts selection over to $HOSTS_OVERLAY_FILE"
+        else
+            rm -f "$HOSTS_MIGRATION_TEMP" 2>/dev/null
+            ui_print "! Existing DNS hosts selection could not be carried over; re-apply it in the app"
+        fi
+    fi
+fi
 
 ui_print "- Fresh Zapret2 generation staged by $ROOT_MANAGER; reboot to activate it"

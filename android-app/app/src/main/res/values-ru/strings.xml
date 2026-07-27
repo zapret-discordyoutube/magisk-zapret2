@@ -90,6 +90,8 @@
     <string name="control_not_available">Нет данных</string>
     <string name="control_settings">Настройки</string>
     <string name="control_autostart">Автозапуск при загрузке</string>
+    <string name="control_tethering">Обход для точки доступа</string>
+    <string name="control_tethering_subtitle">Обрабатывать трафик устройств, подключённых к точке доступа телефона. Сервис будет перезапущен.</string>
     <string name="control_network">Сеть</string>
     <string name="control_network_type">Тип сети</string>
     <string name="network_type_wifi">Wi-Fi</string>
@@ -188,6 +190,8 @@
     <string name="control_service_started">Служба запущена</string>
     <string name="control_service_expected_state_error">Служба не перешла в ожидаемое состояние</string>
     <string name="control_autostart_save_failed">Не удалось сохранить настройку автозапуска</string>
+    <string name="control_tethering_save_failed">Не удалось сохранить настройку обхода для точки доступа</string>
+    <string name="control_tethering_restart_failed">Настройка сохранена, но перезапустить сервис не удалось</string>
     <string name="control_module_update_in_progress">Запись в модуль заблокирована обновлением, восстановлением, отключением или удалением.</string>
     <string name="control_runtime_rollback_failed">Изменение runtime завершилось ошибкой, а предыдущую конфигурацию восстановить не удалось. Перезагрузите устройство перед повтором и проверьте диагностику.</string>
     <string name="control_app_up_to_date">Установлена актуальная версия приложения</string>
@@ -282,14 +286,18 @@
     <string name="dns_applying">Сохранение конфигурации DNS…</string>
     <string name="dns_resetting">Сброс конфигурации DNS…</string>
     <string name="dns_reset_title">Сбросить конфигурацию DNS?</string>
-    <string name="dns_reset_body">Сгенерированный DNS-блок Zapret2 и сохранённый выбор DNS-служб будут удалены. Для применения перезагрузите устройство.</string>
+    <string name="dns_reset_body">Сгенерированный DNS-блок Zapret2 и сохранённый выбор DNS-служб будут удалены.</string>
     <string name="dns_invalid_preset">Выбран недопустимый пресет DNS</string>
+    <string name="dns_applied">Конфигурация DNS применена</string>
     <string name="dns_saved_reboot">Конфигурация DNS сохранена; перезагрузите устройство для применения</string>
+    <string name="dns_hosts_conflict">Конфигурация DNS сохранена, но модуль «%1$s» уже предоставляет /system/etc/hosts. Отключите его, чтобы записи Zapret2 вступили в силу.</string>
+    <string name="dns_module_outdated">Конфигурация DNS сохранена, но установленный модуль слишком старый и не может её применить. Обновите модуль и перезагрузите устройство.</string>
     <string name="dns_save_failed">Не удалось сохранить конфигурацию DNS</string>
     <string name="dns_catalog_changed">Данные DNS изменились после обновления модуля. Загружен актуальный каталог; проверьте выбор и повторите попытку.</string>
     <string name="dns_hosts_changed">Источник hosts изменился до обновления. Ничего не сохранено; проверьте текущее состояние и повторите попытку.</string>
     <string name="dns_rollback_failed">DNS-маршрутизация не сохранена, а предыдущий hosts overlay или состояние runtime восстановлены не полностью. Перезагрузите устройство перед повтором и проверьте диагностику.</string>
     <string name="dns_apply_blocked">Запись в модуль заблокирована обновлением, восстановлением, отключением или удалением; изменения DNS не сохранены.</string>
+    <string name="dns_reset_applied">Конфигурация DNS сброшена</string>
     <string name="dns_reset_saved_reboot">Сброс DNS сохранён; перезагрузите устройство для применения</string>
     <string name="dns_reset_failed">Не удалось сбросить конфигурацию DNS</string>
     <string name="dns_reset_blocked">Запись в модуль заблокирована обновлением, восстановлением, отключением или удалением; сброс DNS не сохранён.</string>

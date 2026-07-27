@@ -35,8 +35,12 @@ case "$args" in
     *' -t mangle -L OUTPUT -n '*) exit 0 ;;
     *' -t mangle -C OUTPUT -j ZAPRET2_OUT '*) [ -f "$state/anchor.out" ] ;;
     *' -t mangle -C INPUT -j ZAPRET2_IN '*) [ -f "$state/anchor.in" ] ;;
+    *' -t mangle -C FORWARD -j ZAPRET2_OUT '*) [ -f "$state/anchor.fwd.out" ] ;;
+    *' -t mangle -C FORWARD -j ZAPRET2_IN '*) [ -f "$state/anchor.fwd.in" ] ;;
     *' -t mangle -D OUTPUT -j ZAPRET2_OUT '*) rm -f "$state/anchor.out" ;;
     *' -t mangle -D INPUT -j ZAPRET2_IN '*) rm -f "$state/anchor.in" ;;
+    *' -t mangle -D FORWARD -j ZAPRET2_OUT '*) rm -f "$state/anchor.fwd.out" ;;
+    *' -t mangle -D FORWARD -j ZAPRET2_IN '*) rm -f "$state/anchor.fwd.in" ;;
     *' -t mangle -S ZAPRET2_OUT '*)
         [ -f "$state/chain.out" ] || exit 1
         echo '-N ZAPRET2_OUT'
@@ -72,7 +76,9 @@ case "$args" in
         [ ! -f "$state/chain.in" ] || echo '-N ZAPRET2_IN'
         [ ! -f "$state/anchor.out" ] || echo '-A OUTPUT -j ZAPRET2_OUT'
         [ ! -f "$state/anchor.in" ] || echo '-A INPUT -j ZAPRET2_IN'
-        [ "${Z2_FOREIGN_REF:-0}" != 1 ] || echo '-A FORWARD -j ZAPRET2_OUT'
+        [ ! -f "$state/anchor.fwd.out" ] || echo '-A FORWARD -j ZAPRET2_OUT'
+        [ ! -f "$state/anchor.fwd.in" ] || echo '-A FORWARD -j ZAPRET2_IN'
+        [ "${Z2_FOREIGN_REF:-0}" != 1 ] || echo '-A PREROUTING -j ZAPRET2_OUT'
         [ ! -s "$state/rules.out" ] || cat "$state/rules.out"
         [ ! -s "$state/rules.in" ] || cat "$state/rules.in"
         ;;
@@ -155,6 +161,12 @@ fi
 if printf '%s\n' "$payload" | grep -Fx -- '-D INPUT -j ZAPRET2_IN' >/dev/null; then
     rm -f "$state/anchor.in"
 fi
+if printf '%s\n' "$payload" | grep -Fx -- '-D FORWARD -j ZAPRET2_OUT' >/dev/null; then
+    rm -f "$state/anchor.fwd.out"
+fi
+if printf '%s\n' "$payload" | grep -Fx -- '-D FORWARD -j ZAPRET2_IN' >/dev/null; then
+    rm -f "$state/anchor.fwd.in"
+fi
 if printf '%s\n' "$payload" | grep -Fx -- '-X ZAPRET2_OUT' >/dev/null; then
     rm -f "$state/chain.out" "$state/rules.out"
 fi
@@ -183,6 +195,12 @@ printf '%s\n' "$payload" | grep -Fx -- '-A OUTPUT -j ZAPRET2_OUT' >/dev/null &&
     : > "$state/anchor.out"
 if printf '%s\n' "$payload" | grep -Fx -- '-A INPUT -j ZAPRET2_IN' >/dev/null; then
     : > "$state/anchor.in"
+fi
+if printf '%s\n' "$payload" | grep -Fx -- '-A FORWARD -j ZAPRET2_OUT' >/dev/null; then
+    : > "$state/anchor.fwd.out"
+fi
+if printf '%s\n' "$payload" | grep -Fx -- '-A FORWARD -j ZAPRET2_IN' >/dev/null; then
+    : > "$state/anchor.fwd.in"
 fi
 if [ "${Z2_CORRUPT_AFTER_COMMIT:-0}" = 1 ] &&
    { printf '%s\n' "$payload" | grep -F -- ':ZAPRET2_OUT ' >/dev/null ||
@@ -532,6 +550,58 @@ z2_fw_reconcile_family iptables || fail "a kernel with multiport failed to publi
 grep -q -- '-m multiport' "$FW/rules.out" ||
     fail "the extension was not used where it is available"
 z2_fw_cleanup_family iptables || fail "could not tear down after the multiport cases"
+
+# Tethering capture reuses the two owned chains and their rules verbatim: a
+# forwarded client request is the same original-direction, destination-port
+# match the local one is, and its reply is the same reply-direction,
+# source-port match. Only the anchors differ, so the published rule count must
+# not move while the anchor count doubles.
+PORTS_TCP=80,443
+PORTS_UDP=443
+TETHERING=1
+z2_fw_reconcile_family iptables || fail "tethering capture could not publish"
+[ "$Z2_FW_BACKEND:$Z2_FW_CONNBYTES:$Z2_FW_RULES:$Z2_FW_CHAINS:$Z2_FW_ANCHORS" = restore:1:4:2:4 ] ||
+    fail "tethering capture changed something other than the anchor count"
+[ -f "$FW/anchor.fwd.out" ] && [ -f "$FW/anchor.fwd.in" ] ||
+    fail "tethering capture did not anchor both chains into FORWARD"
+[ -f "$FW/anchor.out" ] && [ -f "$FW/anchor.in" ] ||
+    fail "tethering capture dropped the built-in anchors"
+[ "$(grep -c -- '-A ZAPRET2_OUT ' "$FW/rules.out")" = 2 ] ||
+    fail "tethering capture authored extra rules instead of extra anchors"
+z2_fw_verify_family iptables 1 || fail "the tethered topology did not verify"
+
+# The setting is a published property of the generation, not of the process
+# reading it: verifying a tethered generation as an untethered one must fail
+# with the anchor reason rather than silently accept the extra anchors.
+TETHERING=0
+if z2_fw_verify_family iptables 1; then
+    fail "a tethered topology verified as an untethered one"
+fi
+case "$Z2_FW_VERIFY_DETAIL" in
+    *'reason=FORWARD_OUT_ANCHOR_COUNT:1'*) ;;
+    *) fail "the extra anchor lost its typed reason: $Z2_FW_VERIFY_DETAIL" ;;
+esac
+
+# Teardown answers to the baseline it captured, never to the current setting,
+# so turning tethering off must still remove the anchors it published.
+z2_fw_cleanup_family iptables || fail "tethering anchors could not be torn down"
+z2_fw_family_absent iptables || fail "tethering anchors survived teardown"
+[ ! -f "$FW/anchor.fwd.out" ] && [ ! -f "$FW/anchor.fwd.in" ] ||
+    fail "teardown left a FORWARD anchor behind"
+
+# Anchors are not part of a reconfiguration batch, so a generation whose
+# tethering setting changed must not take that path at all.
+TETHERING=1
+z2_fw_reconcile_family iptables || fail "could not republish the tethered topology"
+TETHERING=bogus
+set +e
+z2_fw_reconfigure_family iptables 1 1
+rc=$?
+set -e
+[ "$rc" = 2 ] || fail "an invalid tethering setting was accepted as a topology"
+TETHERING=0
+z2_fw_cleanup_family iptables || fail "could not tear down after the tethering cases"
+unset TETHERING
 
 z2_fw_restore_command_read() { Z2_FW_RESTORE_COMMAND=missing-iptables-restore; }
 set +e

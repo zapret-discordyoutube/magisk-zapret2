@@ -17,6 +17,7 @@ class RuntimeConfigStoreTest {
         runtime_source=test
         autostart=1
         wifi_only=0
+        tethering=0
         debug=0
         qnum=200
         desync_mark=0x40000000
@@ -127,6 +128,7 @@ class RuntimeConfigStoreTest {
             logMode = "file",
             autostart = true,
             wifiOnly = false,
+            tethering = true,
             desyncMark = "0x40000000",
             nfqwsUid = "0:0",
         ).toCorePairs()
@@ -137,6 +139,7 @@ class RuntimeConfigStoreTest {
                 "log_mode" to "file",
                 "autostart" to "1",
                 "wifi_only" to "0",
+                "tethering" to "1",
                 "desync_mark" to "0x40000000",
                 "nfqws_uid" to "0:0",
             ),

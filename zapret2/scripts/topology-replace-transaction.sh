@@ -146,6 +146,7 @@ topology_load_generation() {
     OWNER_WRITE_FIREWALL_TAG="$OWNER_STATE_FIREWALL_TAG"
     OWNER_WRITE_OUT_CHAIN="$OWNER_STATE_OUT_CHAIN"
     OWNER_WRITE_IN_CHAIN="$OWNER_STATE_IN_CHAIN"
+    OWNER_WRITE_TETHERING="$OWNER_STATE_TETHERING"
     OWNER_WRITE_QNUM="$OWNER_STATE_QNUM"
     OWNER_WRITE_PORTS_TCP="$PORTS_TCP"
     OWNER_WRITE_PORTS_UDP="$PORTS_UDP"
@@ -180,6 +181,11 @@ topology_replace_prepare() {
     z2_load_firewall_reconciler || return 1
     [ "$OWNER_STATE_OUT_CHAIN" = "$Z2_FW_OUT_CHAIN" ] &&
         [ "$OWNER_STATE_IN_CHAIN" = "$Z2_FW_IN_CHAIN" ] || return 1
+    # Hot replacement repopulates the owned chains inside one COMMIT and never
+    # rewrites an anchor, so a changed tethering setting has no representation
+    # on this path. Refusing it here sends that change down the full
+    # publication path instead of publishing rules the anchors contradict.
+    [ "${TETHERING:-0}" = "$OWNER_STATE_TETHERING" ] || return 1
     owner_family_generation_healthy iptables ipv4 || return 1
     if command -v ip6tables >/dev/null 2>&1; then
         owner_family_generation_healthy ip6tables ipv6 || return 1

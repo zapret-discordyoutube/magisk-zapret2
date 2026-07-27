@@ -555,6 +555,7 @@ manager_remove_locked_state() {
     z2_purge_remove_managed_tree "$Z2_PURGE_CANONICAL_PENDING_DIR" || return 1
     z2_purge_remove_external_workspaces || return 1
     z2_purge_remove_legacy_files || return 1
+    z2_purge_remove_hosts_overlay || return 1
     z2_purge_remove_managed_tree "$Z2_PURGE_CANONICAL_STATE_DIR" || return 1
     sync >/dev/null 2>&1 || return 1
     [ ! -e "$STATE_DIR" ] && [ ! -L "$STATE_DIR" ] || return 1

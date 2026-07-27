@@ -13,6 +13,9 @@ MOCK="$CASE/bin"
 LIVE=/data/adb/modules/zapret2
 UPDATE=/data/adb/modules_update/zapret2
 LIVE_STATE=/data/adb/zapret2-state
+# The DNS manager publishes here and the module bind-mounts it over
+# /system/etc/hosts, so this is what a rollback has to preserve.
+LIVE_HOSTS_DIR=/data/adb/zapret2-hosts
 SYSTEM_CREATED=0
 FIXTURE_OWNED=0
 LIVE_TEST_PID=""
@@ -151,8 +154,8 @@ rm -f "$FULL_ROLLBACK_META"
 
 # Build a realistic installer archive from the current package contract.
 mkdir -p "$FIXTURE" "$PACKAGE_SOURCE"
-cp "$ROOT/module.prop" "$ROOT/customize.sh" "$ROOT/service.sh" "$ROOT/uninstall.sh" \
-    "$ROOT/action.sh" "$PACKAGE_SOURCE/"
+cp "$ROOT/module.prop" "$ROOT/customize.sh" "$ROOT/service.sh" "$ROOT/post-fs-data.sh" \
+    "$ROOT/uninstall.sh" "$ROOT/action.sh" "$PACKAGE_SOURCE/"
 cp -R "$ROOT/system" "$ROOT/zapret2" "$PACKAGE_SOURCE/"
 mkdir -p "$PACKAGE_SOURCE/zapret2/bin/arm64-v8a" "$PACKAGE_SOURCE/zapret2/bin/armeabi-v7a"
 cp "${Z2_TEST_EXECUTABLE_SHELL:-/bin/true}" "$PACKAGE_SOURCE/zapret2/bin/arm64-v8a/nfqws2"
@@ -164,7 +167,7 @@ printf '%064d\n' 0 > "$PACKAGE_SOURCE/zapret2/upstream-zapret2.archive.sha256"
 package_contract_assemble_package "$PACKAGE_SOURCE" "$FIXTURE" ||
     fail "cannot assemble installer fixture: $PACKAGE_CONTRACT_CODE $PACKAGE_CONTRACT_DETAIL"
 (cd "$FIXTURE" && z2_test_create_zip "$ARCHIVE" \
-    module.prop customize.sh service.sh uninstall.sh action.sh system zapret2)
+    module.prop customize.sh service.sh post-fs-data.sh uninstall.sh action.sh system zapret2)
 
 run_installer() {
     rm -rf "$UPDATE"
@@ -321,8 +324,9 @@ cp "$CASE/nfqws2.packaged" "$LIVE/zapret2/nfqws2"
 chmod 0755 "$LIVE/zapret2/nfqws2"
 rm -rf "$UPDATE"
 
-printf '%s\n' '127.0.0.1 localhost' '1.1.1.1 preserved.test' > "$LIVE/system/etc/hosts"
-chmod 0644 "$LIVE/system/etc/hosts"
+mkdir -p "$LIVE_HOSTS_DIR"
+printf '%s\n' '127.0.0.1 localhost' '1.1.1.1 preserved.test' > "$LIVE_HOSTS_DIR/hosts"
+chmod 0644 "$LIVE_HOSTS_DIR/hosts"
 cat > "$MOCK/iptables" <<'EOF'
 #!/bin/sh
 case "$*" in

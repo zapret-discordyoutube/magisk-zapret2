@@ -30,7 +30,7 @@ internal object ModulePackageContract {
      */
     internal const val APPLY_PRESET_SCRIPT_PATH = "zapret2/scripts/zapret-apply-preset.sh"
     internal const val LIFECYCLE_CONTRACT_PATH = "zapret2/lifecycle-contract.version"
-    internal const val LIFECYCLE_CONTRACT_VERSION = "8"
+    internal const val LIFECYCLE_CONTRACT_VERSION = "9"
     internal const val PURGE_CONTRACT_PATH = "zapret2/scripts/lifecycle/purge-contract.sh"
     internal const val PURGE_SCRIPT_PATH = "zapret2/scripts/lifecycle/zapret-purge.sh"
     internal const val MAX_SHELL_EXEC_BYTES = 256 * 1024
@@ -52,9 +52,20 @@ internal object ModulePackageContract {
 
     val moduleRootExecutables = listOf(
         "service.sh",
+        "post-fs-data.sh",
         "uninstall.sh",
         "action.sh",
     )
+
+    /**
+     * Module-owned publication of the DNS manager's hosts file.
+     *
+     * The file itself lives in /data and this script bind-mounts it over /system/etc/hosts, so
+     * the app never writes into the live module tree. A generation that predates it cannot
+     * publish anything the app writes, which [HostsOverlayRepository] reports as an outdated
+     * module rather than a silent no-op.
+     */
+    internal const val HOSTS_OVERLAY_SCRIPT_PATH = "zapret2/scripts/hosts-overlay.sh"
 
     /**
      * Non-negotiable runtime surface. The signed manifest may extend this catalog, but it must
@@ -70,6 +81,7 @@ internal object ModulePackageContract {
         PACKAGE_CONTRACT_SCRIPT_PATH,
         "zapret2/scripts/runtime-config.sh",
         "zapret2/scripts/runtime-init.sh",
+        HOSTS_OVERLAY_SCRIPT_PATH,
         "zapret2/scripts/zapret-start.sh",
         "zapret2/scripts/zapret-stop.sh",
         "zapret2/scripts/zapret-restart.sh",
