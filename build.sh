@@ -191,7 +191,12 @@ package_contract_assemble_package "$PWD" "$PACKAGE_ASSEMBLY_ROOT" || {
 rm -f "$ZIP_PATH"
 (
     cd "$PACKAGE_ASSEMBLY_ROOT"
-    zip -r "$ZIP_PATH" module.prop customize.sh service.sh post-fs-data.sh uninstall.sh action.sh system zapret2
+    # The assembly root is exactly what the runtime manifest declares, so the
+    # archive is its whole contents. Naming the files again by hand only
+    # created a second, silently divergent list: post-fs-data.sh shipped in the
+    # manifest and the package contract while every zip command still omitted
+    # it, and the release failed its own name check.
+    zip -r "$ZIP_PATH" .
 )
 
 # Fail locally on the same missing/duplicate/type/mode/content regressions that

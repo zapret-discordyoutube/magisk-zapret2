@@ -274,7 +274,7 @@ cp "$TMP_ROOT/command-builder.good" "$package_root/zapret2/scripts/command-build
 
 if command -v zip >/dev/null 2>&1 && command -v zipinfo >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
     archive="$TMP_ROOT/manifest-package.zip"
-    (cd "$package_root" && zip -qr "$archive" module.prop customize.sh service.sh post-fs-data.sh uninstall.sh action.sh system zapret2)
+    (cd "$package_root" && zip -qr "$archive" .)
     names="$TMP_ROOT/manifest-package.names"
     zipinfo -1 "$archive" > "$names"
     package_contract_validate_zip_names "$package_root" "$names" || fail "fixture ZIP names: $PACKAGE_CONTRACT_CODE $PACKAGE_CONTRACT_DETAIL"

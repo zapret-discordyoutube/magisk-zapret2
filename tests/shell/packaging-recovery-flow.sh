@@ -166,8 +166,9 @@ printf '%064d\n' 0 > "$PACKAGE_SOURCE/zapret2/upstream-zapret2.archive.sha256"
 . "$PACKAGE_SOURCE/zapret2/scripts/package-contract.sh"
 package_contract_assemble_package "$PACKAGE_SOURCE" "$FIXTURE" ||
     fail "cannot assemble installer fixture: $PACKAGE_CONTRACT_CODE $PACKAGE_CONTRACT_DETAIL"
-(cd "$FIXTURE" && z2_test_create_zip "$ARCHIVE" \
-    module.prop customize.sh service.sh post-fs-data.sh uninstall.sh action.sh system zapret2)
+# The assembly root is the manifest; archive all of it rather than repeating
+# the file list here.
+(cd "$FIXTURE" && z2_test_create_zip "$ARCHIVE" .)
 
 run_installer() {
     rm -rf "$UPDATE"

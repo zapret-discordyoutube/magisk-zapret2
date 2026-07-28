@@ -48,7 +48,9 @@ z2_test_create_store_zip() {
             rm -f "$z2_zip_manifest" "$z2_zip_central"
             return 1
         fi
-    done | LC_ALL=C sort > "$z2_zip_manifest" || {
+    # `find .` yields ./-prefixed paths while zip(1) does not, and the archive
+    # names have to match whichever implementation ran.
+    done | sed 's|^\./||' | LC_ALL=C sort > "$z2_zip_manifest" || {
         rm -f "$z2_zip_manifest" "$z2_zip_central"
         return 1
     }

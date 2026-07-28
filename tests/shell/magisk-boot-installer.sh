@@ -43,8 +43,7 @@ printf '%064d\n' 0 > "$SOURCE/zapret2/upstream-zapret2.archive.sha256"
 . "$SOURCE/zapret2/scripts/package-contract.sh"
 package_contract_assemble_package "$SOURCE" "$PACKAGE" ||
     fail "cannot assemble installer fixture: $PACKAGE_CONTRACT_CODE $PACKAGE_CONTRACT_DETAIL"
-(cd "$PACKAGE" && z2_test_create_zip "$ARCHIVE" \
-    module.prop customize.sh service.sh post-fs-data.sh uninstall.sh action.sh system zapret2)
+(cd "$PACKAGE" && z2_test_create_zip "$ARCHIVE" .)
 
 prepare_magisk_stage() {
     rm -rf "$UPDATE"
