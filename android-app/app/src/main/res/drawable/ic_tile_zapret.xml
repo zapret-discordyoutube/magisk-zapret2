@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Quick Settings renders a tile icon as a monochrome mask: only alpha survives,
+  so this is a single filled path with no colour of its own.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="?android:attr/colorControlNormal">
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M12,2 3,5.5v6.2c0,4.9 3.8,9.5 9,10.3 5.2,-0.8 9,-5.4 9,-10.3V5.5L12,2zM12,4.2l7,2.7v4.8c0,3.9 -2.9,7.6 -7,8.3 -4.1,-0.7 -7,-4.4 -7,-8.3V6.9l7,-2.7zM11,7v4H8l5,6v-4h3l-5,-6z" />
+</vector>

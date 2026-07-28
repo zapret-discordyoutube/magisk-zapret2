@@ -534,4 +534,9 @@
     <string name="profiles_name">Имя профиля</string>
     <string name="profiles_save">Сохранить</string>
     <string name="profiles_lists_unavailable">Списки доменов и IP недоступны</string>
+    <string name="tile_label">Zapret2</string>
+    <string name="tile_subtitle_running">Работает</string>
+    <string name="tile_subtitle_stopped">Остановлена</string>
+    <string name="tile_subtitle_busy">Занято</string>
+    <string name="tile_subtitle_unavailable">Недоступно</string>
 </resources>

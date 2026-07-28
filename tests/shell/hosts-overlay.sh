@@ -81,15 +81,22 @@ cmp -s "$OVERLAY_DIR/system-hosts.base" "$SYSTEM_HOSTS" ||
 state=$(machine_field Z2_HOSTS_STATE "$(run_overlay --inspect-machine)")
 [ "$state" = absent ] || fail "expected absent with nothing published, got $state"
 
-# --- a legacy in-tree overlay is carried over and taken out of the module ---
+# --- boot never writes into the module's own tree ---
+# The installer carries a pre-2.3.0 in-tree overlay across while the old tree
+# still exists, and every supported root manager replaces that tree wholesale
+# on the activating boot. So this stage has no business reaching into it, and a
+# file that is somehow there is left for the manager that owns it.
 reset_fixture
 mkdir -p "$MODULES_DIR/zapret2/system/etc"
 printf '127.0.0.1\tlocalhost\n0.0.0.0\tlegacy.test\n' > "$MODULES_DIR/zapret2/system/etc/hosts"
+tree_before=$(find "$MODULES_DIR/zapret2" | sort)
 run_overlay --boot >/dev/null 2>&1 || :
-[ -f "$OVERLAY_DIR/hosts" ] || fail "legacy overlay was not migrated"
-grep -Fq 'legacy.test' "$OVERLAY_DIR/hosts" || fail "migrated overlay lost its content"
-[ ! -e "$MODULES_DIR/zapret2/system/etc/hosts" ] ||
-    fail "legacy overlay was left inside the live module tree"
+[ "$(find "$MODULES_DIR/zapret2" | sort)" = "$tree_before" ] ||
+    fail "boot mutated the module tree"
+grep -Fq 'legacy.test' "$MODULES_DIR/zapret2/system/etc/hosts" ||
+    fail "boot rewrote a file inside the module tree"
+[ ! -e "$OVERLAY_DIR/hosts" ] ||
+    fail "boot published content it found in the module tree"
 
 # --- another enabled module owning the same path is a conflict, not a race ---
 reset_fixture

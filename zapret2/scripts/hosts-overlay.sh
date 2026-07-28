@@ -132,30 +132,6 @@ hosts_capture_base() {
         }
 }
 
-# Installations up to v2.2.5 kept the published file inside the module tree.
-# Carry that content over once, then take it out of the tree: leaving it there
-# would keep the old path mounted by the root manager in parallel with ours.
-hosts_migrate_legacy_overlay() {
-    local legacy="$MODULES_DIR/$MODULE_ID/system/etc/hosts" tmp
-    [ -e "$legacy" ] || [ -L "$legacy" ] || return 0
-    if hosts_regular_root_file "$legacy" &&
-       [ ! -e "$HOSTS_OVERLAY_FILE" ] && [ ! -L "$HOSTS_OVERLAY_FILE" ]; then
-        hosts_ensure_dir || return 1
-        tmp="$HOSTS_OVERLAY_FILE.tmp.$$"
-        cp "$legacy" "$tmp" 2>/dev/null &&
-            chmod 0644 "$tmp" 2>/dev/null &&
-            hosts_regular_root_file "$tmp" &&
-            mv -f "$tmp" "$HOSTS_OVERLAY_FILE" 2>/dev/null || {
-                rm -f "$tmp" 2>/dev/null
-                return 1
-            }
-        hosts_log "migrated the legacy in-tree hosts overlay to $HOSTS_OVERLAY_FILE"
-    fi
-    rm -f "$legacy" 2>/dev/null || return 1
-    rmdir "$MODULES_DIR/$MODULE_ID/system/etc" 2>/dev/null
-    return 0
-}
-
 # Releases only the mount this module published. A foreign mount is left
 # exactly as it was found.
 hosts_umount_ours() {
@@ -296,11 +272,17 @@ hosts_emit_machine() {
 
 case "${1:---inspect-machine}" in
     --boot)
-        # Order matters: the snapshot has to happen while the real file is
-        # still visible, and the legacy overlay has to leave the tree before
-        # the root manager gets another chance to mount it.
+        # The snapshot has to happen while the real file is still visible, so
+        # it comes before anything is mounted over it.
+        #
+        # Nothing here reaches into the module tree. Installations up to v2.2.5
+        # kept the published file there, and customize.sh carries that content
+        # over while the old tree still exists — which is the only moment it
+        # does, since every supported root manager replaces the tree wholesale
+        # on the activating boot. By the time this runs there is no old file
+        # left to find, and looking for one would only be a path that never
+        # executes in the field.
         hosts_capture_base || hosts_log "cannot snapshot $SYSTEM_HOSTS"
-        hosts_migrate_legacy_overlay || hosts_log "cannot retire the legacy in-tree hosts overlay"
         hosts_mount_if_published || {
             hosts_log "ERROR: ${HOSTS_DETAIL:-hosts publication failed}"
             exit 1

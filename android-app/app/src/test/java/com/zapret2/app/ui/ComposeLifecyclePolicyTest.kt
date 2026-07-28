@@ -1,6 +1,7 @@
 package com.zapret2.app.ui
 
 import java.io.File
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -97,12 +98,42 @@ class ComposeLifecyclePolicyTest {
         assertTrue(motion.contains("unregisterContentObserver(observer)"))
         assertTrue(motion.contains("DisposableEffect(resolver)"))
 
+        // The Quick Settings tile is the one place with no lifecycle owner to borrow: the
+        // platform destroys the service when the shade closes, while the transition it started
+        // holds a root shell for as long as the module needs. Its scope is therefore exempt and
+        // constrained instead — see the dedicated policy below.
+        val tileService = productionFile("tile/ServiceTileService.kt")
         val production = productionFile("").walkTopDown()
-            .filter { it.isFile && it.extension == "kt" }
+            .filter { it.isFile && it.extension == "kt" && it != tileService }
             .joinToString("\n") { it.readText() }
         assertFalse(production.contains("GlobalScope"))
         assertFalse(production.contains("MainScope("))
         assertFalse(Regex("""(?<![A-Za-z])CoroutineScope\(""").containsMatchIn(production))
+    }
+
+    /**
+     * The exemption above is worth exactly one scope, and only on the terms that justified it:
+     * process-scoped so a transition survives the shade closing, launching one job per tap, and
+     * never looping — an unattended poll here would run for the life of the process with no
+     * screen to stop it.
+     */
+    @Test
+    fun theQuickSettingsTileScopeStaysSingleUseAndUnattended() {
+        val tile = productionFile("tile/ServiceTileService.kt").readText()
+
+        assertEquals(
+            1,
+            Regex("""(?<![A-Za-z])CoroutineScope\(""").findAll(tile).count(),
+        )
+        assertTrue(tile.contains("CoroutineScope(SupervisorJob() + Dispatchers.IO)"))
+        assertFalse(tile.contains("GlobalScope"))
+        assertFalse(tile.contains("MainScope("))
+        assertFalse(tile.contains("while ("))
+        assertFalse(tile.contains("delay("))
+        assertFalse(tile.contains("repeat("))
+        // One tap may never queue another transition behind the one already running.
+        assertTrue(tile.contains("transitionInFlight.compareAndSet(false, true)"))
+        assertTrue(tile.contains("transitionInFlight.set(false)"))
     }
 
     @Test

@@ -24,7 +24,35 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!--
+              Long-pressing a Quick Settings tile opens whatever the app declares as that tile's
+              settings. Without this the platform falls back to the system App info page, which
+              is not where anyone pressing a Zapret2 tile wants to end up.
+            -->
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
         </activity>
+
+        <!--
+          Quick Settings tile for starting and stopping the service from the shade.
+          TOGGLEABLE_TILE lets the platform treat it as a switch on Android 11+, which is what
+          it is: the tap has exactly two outcomes and the tile shows which one is current.
+        -->
+        <service
+            android:name=".tile.ServiceTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile_zapret"
+            android:label="@string/tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.service.quicksettings.TOGGLEABLE_TILE"
+                android:value="true" />
+        </service>
 
         <!-- FileProvider for APK installation on Android 7.0+ -->
         <provider
