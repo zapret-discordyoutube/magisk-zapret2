@@ -231,6 +231,7 @@
     <string name="control_update_module_empty">The module archive is empty</string>
     <string name="control_update_module_identity_missing">The archive is not a compatible Zapret2 root module</string>
     <string name="control_update_module_package_invalid">The module package failed its integrity or compatibility check</string>
+    <string name="control_update_module_contract_mismatch">This module release needs a newer app. The app update is being installed — reopen the app and update the module again.</string>
     <string name="control_update_module_validation_failed">The module archive could not be validated</string>
     <string name="control_update_unsupported_abi">This device ABI is not supported by the module package</string>
     <string name="control_update_apk_installer_unavailable">The Android APK installer could not be opened</string>

@@ -358,6 +358,28 @@ internal object ModulePackageContract {
         return null
     }
 
+    /**
+     * True when the archive carries a lifecycle contract marker other than this build's.
+     *
+     * A raised contract means the release changed something this app does not know how to
+     * drive yet — the package is not defective, this side is stale. Callers use it to keep
+     * the same release's APK installable instead of blocking behind the rejected module.
+     * An unreadable or missing marker is not this case; [validateArchive] rejects it.
+     */
+    fun archiveSpeaksAnotherLifecycleContract(archive: File): Boolean = runCatching {
+        ZipFile(archive).use { zip ->
+            val entry = zip.entries().asSequence()
+                .filter { it.name.trimEnd('/') == LIFECYCLE_CONTRACT_PATH }
+                .toList()
+                .singleOrNull()
+                ?.takeUnless { it.isDirectory }
+                ?: return false
+            val marker = zip.getInputStream(entry).use { it.readBoundedBytes(16) } ?: return false
+            val text = marker.toString(Charsets.UTF_8)
+            text != "$LIFECYCLE_CONTRACT_VERSION\n" && text.trim().toIntOrNull() != null
+        }
+    }.getOrDefault(false)
+
     fun binaryRelativePath(binaryDirectory: String): String =
         "zapret2/bin/$binaryDirectory/nfqws2"
 

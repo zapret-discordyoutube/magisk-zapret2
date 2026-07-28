@@ -52,6 +52,15 @@ internal enum class ArtifactValidationReason {
     MODULE_EMPTY,
     MODULE_IDENTITY_MISSING,
     MODULE_PACKAGE_INVALID,
+
+    /**
+     * The package speaks a lifecycle contract this build does not.
+     *
+     * Distinct from [MODULE_PACKAGE_INVALID] because the package is fine and the app is the
+     * stale side: the APK from the same release is the fix, so it must still be installed
+     * rather than deferred behind the module that rejected it.
+     */
+    MODULE_CONTRACT_MISMATCH,
     MODULE_VALIDATION_FAILED,
 }
 

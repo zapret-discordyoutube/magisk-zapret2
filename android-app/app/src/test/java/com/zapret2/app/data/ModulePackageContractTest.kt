@@ -205,6 +205,50 @@ class ModulePackageContractTest {
     }
 
     @Test
+    fun raisedLifecycleContract_isDistinguishedFromABrokenPackage() {
+        // A release that raised the contract is rejected by this build, but it is not defective:
+        // the app is the stale half. Telling the two apart is what keeps that release's APK
+        // installable instead of deferring it behind the module it just rejected.
+        val current = temporaryFolder.newFolder("current-contract")
+        writeValidPackage(current)
+        assertFalse(
+            ModulePackageContract.archiveSpeaksAnotherLifecycleContract(
+                zip(current, "current-contract.zip"),
+            ),
+        )
+
+        val raised = temporaryFolder.newFolder("raised-contract")
+        writeValidPackage(raised)
+        val next = ModulePackageContract.LIFECYCLE_CONTRACT_VERSION.toInt() + 1
+        File(raised, ModulePackageContract.LIFECYCLE_CONTRACT_PATH).writeText("$next\n")
+        assertTrue(
+            ModulePackageContract.archiveSpeaksAnotherLifecycleContract(
+                zip(raised, "raised-contract.zip"),
+            ),
+        )
+        assertNotNull(
+            ModulePackageContract.validateArchive(
+                zip(raised, "raised-contract-validated.zip"),
+                "arm64-v8a",
+            ),
+        )
+
+        // Garbage in the marker is a broken package, not a newer contract, and must keep
+        // reporting as such.
+        listOf("", "not-a-number\n", "9\nextra\n").forEachIndexed { index, content ->
+            val malformed = temporaryFolder.newFolder("malformed-contract-$index")
+            writeValidPackage(malformed)
+            File(malformed, ModulePackageContract.LIFECYCLE_CONTRACT_PATH).writeText(content)
+            assertFalse(
+                "malformed marker $index must not read as a newer contract",
+                ModulePackageContract.archiveSpeaksAnotherLifecycleContract(
+                    zip(malformed, "malformed-contract-$index.zip"),
+                ),
+            )
+        }
+    }
+
+    @Test
     fun purgeLifecycleScriptsAreNonNegotiableRuntimeExecutables() {
         assertTrue(ModulePackageContract.PURGE_CONTRACT_PATH in ModulePackageContract.mandatoryRuntimeExecutables)
         assertTrue(ModulePackageContract.PURGE_SCRIPT_PATH in ModulePackageContract.mandatoryRuntimeExecutables)

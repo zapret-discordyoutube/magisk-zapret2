@@ -137,6 +137,8 @@ class UpdateExecutionPresentationTest {
                 R.string.control_update_module_identity_missing,
             ArtifactValidationReason.MODULE_PACKAGE_INVALID to
                 R.string.control_update_module_package_invalid,
+            ArtifactValidationReason.MODULE_CONTRACT_MISMATCH to
+                R.string.control_update_module_contract_mismatch,
             ArtifactValidationReason.MODULE_VALIDATION_FAILED to
                 R.string.control_update_module_validation_failed,
         )

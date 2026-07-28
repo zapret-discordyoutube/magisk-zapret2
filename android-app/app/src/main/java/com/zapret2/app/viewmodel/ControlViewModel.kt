@@ -310,6 +310,8 @@ private fun ArtifactValidationReason.toUiText(): UiText = UiText.Resource(
             R.string.control_update_module_identity_missing
         ArtifactValidationReason.MODULE_PACKAGE_INVALID ->
             R.string.control_update_module_package_invalid
+        ArtifactValidationReason.MODULE_CONTRACT_MISMATCH ->
+            R.string.control_update_module_contract_mismatch
         ArtifactValidationReason.MODULE_VALIDATION_FAILED ->
             R.string.control_update_module_validation_failed
     },

@@ -231,6 +231,7 @@
     <string name="control_update_module_empty">Архив модуля пуст</string>
     <string name="control_update_module_identity_missing">Архив не является совместимым root-модулем Zapret2</string>
     <string name="control_update_module_package_invalid">Пакет модуля не прошёл проверку целостности или совместимости</string>
+    <string name="control_update_module_contract_mismatch">Этот выпуск модуля требует более новой версии приложения. Обновление приложения устанавливается — откройте его заново и повторите обновление модуля.</string>
     <string name="control_update_module_validation_failed">Не удалось проверить архив модуля</string>
     <string name="control_update_unsupported_abi">Пакет модуля не поддерживает ABI этого устройства</string>
     <string name="control_update_apk_installer_unavailable">Не удалось открыть установщик APK Android</string>

@@ -980,6 +980,10 @@ class UpdateManager(private val context: Context) {
             when {
                 entries == 0 -> ArtifactValidationReason.MODULE_EMPTY
                 !hasModuleProp -> ArtifactValidationReason.MODULE_IDENTITY_MISSING
+                // Asked before the general verdict so a release that raised the contract is
+                // named as such instead of being reported as a broken package.
+                ModulePackageContract.archiveSpeaksAnotherLifecycleContract(moduleFile) ->
+                    ArtifactValidationReason.MODULE_CONTRACT_MISMATCH
                 else -> ModulePackageContract.validateArchive(
                     moduleFile,
                     binaryDirectory,
@@ -1107,12 +1111,25 @@ class UpdateManager(private val context: Context) {
                 }
                 if (validationFailure != null) {
                     moduleOutcome = ModuleArtifactOutcome.Failed(validationFailure)
-                    if (apkArtifact != null) {
+                    // Deferring the APK behind a rejected module is right when the package is
+                    // suspect: installing an app for a module that never landed splits the
+                    // pair. A raised lifecycle contract is the opposite case — this app is the
+                    // stale half, and the APK beside it is exactly what can read the new
+                    // package. Deferring it there strands the user on a build that will reject
+                    // this release forever, with no in-app way out.
+                    val contractMismatch = validationFailure ==
+                        UpdateFailure.Validation(ArtifactValidationReason.MODULE_CONTRACT_MISMATCH)
+                    if (apkArtifact != null && !contractMismatch) {
                         apkOutcome = ApkArtifactOutcome.Deferred(
                             UpdateDeferredReason.MODULE_PREFLIGHT_FAILED,
                         )
+                        return@withContext UpdateExecutionReport(moduleOutcome, apkOutcome)
                     }
-                    return@withContext UpdateExecutionReport(moduleOutcome, apkOutcome)
+                    if (apkArtifact == null) {
+                        return@withContext UpdateExecutionReport(moduleOutcome, apkOutcome)
+                    }
+                    downloadedModule = null
+                    return@let
                 }
                 validatedModule = ValidatedModuleArtifact(
                     file = moduleFile,

@@ -13,8 +13,8 @@ android {
         applicationId = "com.zapret2.app"
         minSdk = 24
         targetSdk = 35
-        versionCode = 2030000
-        versionName = "2.3.0"
+        versionCode = 2030001
+        versionName = "2.3.1"
     }
 
     signingConfigs {
