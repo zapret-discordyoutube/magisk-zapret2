@@ -169,6 +169,17 @@ if [ "${Z2_RESTORE_REJECT_CONNBYTES_COMMIT:-0}" = 1 ] &&
     echo 'iptables-restore: line 10 failed' >&2
     exit 1
 fi
+if [ "${Z2_RESTORE_REJECT_CONNBYTES_COMMIT:-0}" = 2 ] &&
+   printf '%s\n' "$payload" | grep -q -- '-m connbytes'; then
+    # Verbatim from a v2.2.x field report. The userspace library carries
+    # libxt_connbytes, so the batch parses and --test passes; the kernel has
+    # no xt_connbytes and refuses the table when it is submitted. All legacy
+    # restore knows at that point is the batch line it stopped on — line 10 is
+    # the COMMIT of a full connbytes ruleset — so the extension is never named
+    # anywhere in the diagnostic.
+    echo 'iptables-restore: line 10 failed' >&2
+    exit 1
+fi
 [ "${Z2_RESTORE_FAIL_COMMIT:-0}" != 1 ] || {
     echo 'vendor backend rejected COMMIT' >&2
     exit 1
@@ -228,7 +239,22 @@ if [ "${Z2_CORRUPT_AFTER_COMMIT:-0}" = 1 ] &&
 fi
 EOF
 
-chmod 0755 "$MOCK/iptables" "$MOCK/iptables-restore"
+# The topology comparison is the module's only proof that a published family
+# carries the authored ruleset, and the whole comparison is one awk process.
+# This mock stands in for that process not running at all — absent, refused by
+# the loader, or killed — which is a different fact from a comparison that ran
+# and disagreed, and is reported as one.
+Z2_REAL_AWK=$(command -v awk)
+cat > "$MOCK/awk" <<EOF
+#!/bin/sh
+if [ "\${Z2_MOCK_AWK_BROKEN:-0}" = 1 ]; then
+    echo 'awk: cannot open shared library' >&2
+    exit 2
+fi
+exec $Z2_REAL_AWK "\$@"
+EOF
+
+chmod 0755 "$MOCK/iptables" "$MOCK/iptables-restore" "$MOCK/awk"
 PATH="$MOCK:$PATH"
 STATE_DIR="$STATE"
 Z2_MOCK_FW="$FW"
@@ -377,6 +403,72 @@ unset Z2_RESTORE_REJECT_CONNBYTES_COMMIT
 z2_fw_cleanup_family iptables || fail "commit-time fallback cleanup failed"
 
 rm -f "$FW"/*
+# The same kernel gap through a build that names nothing at COMMIT. Reported
+# from the field as a refusal to start: the ruleset was called unsupported on
+# a device that could have run the outgoing-only one.
+Z2_RESTORE_REJECT_CONNBYTES_COMMIT=2
+export Z2_RESTORE_REJECT_CONNBYTES_COMMIT
+z2_fw_reconcile_family iptables ||
+    fail "unnamed commit rejection did not fall back"
+[ "$Z2_FW_CONNBYTES:$Z2_FW_RULES:$Z2_FW_CHAINS:$Z2_FW_ANCHORS" = 0:2:1:1 ] ||
+    fail "unnamed commit fallback metadata changed"
+[ -f "$FW/anchor.out" ] && [ ! -f "$FW/anchor.in" ] ||
+    fail "unnamed commit fallback published an input anchor"
+[ "$Z2_FW_MULTIPORT" = 1 ] ||
+    fail "unnamed commit rejection also spent the multiport latch"
+[ "$(cat "$FW/restore.count")" = 4 ] ||
+    fail "unnamed commit fallback did not use one extra test and commit"
+case "$Z2_FW_FALLBACK_DETAIL" in
+    *'commit failed'*'line 10 failed'*) ;;
+    *) fail "unnamed commit fallback diagnostic was not preserved" ;;
+esac
+unset Z2_RESTORE_REJECT_CONNBYTES_COMMIT
+z2_fw_cleanup_family iptables || fail "unnamed commit fallback cleanup failed"
+
+rm -f "$FW"/*
+# A comparison that cannot run says nothing about the table it was meant to
+# inspect, and the two used to be reported as the same failure.
+z2_fw_reconcile_family iptables || fail "verifier probe publish failed"
+Z2_MOCK_AWK_BROKEN=1
+export Z2_MOCK_AWK_BROKEN
+if z2_fw_verify_family iptables 1 1; then
+    fail "a verification that never ran reported success"
+fi
+[ "$Z2_FW_VERIFY_CLASS" = VERIFIER_FAILED ] ||
+    fail "an unrunnable verification was classed as a topology verdict"
+case "$Z2_FW_VERIFY_DETAIL" in
+    *'could not run'*'exit=2'*'cannot open shared library'*) ;;
+    *) fail "an unrunnable verification discarded the verifier diagnostic" ;;
+esac
+unset Z2_MOCK_AWK_BROKEN
+z2_fw_verify_family iptables 1 1 ||
+    fail "verification failed once the verifier was available again"
+[ -z "$Z2_FW_VERIFY_CLASS" ] ||
+    fail "a reached verdict kept a failure class"
+z2_fw_cleanup_family iptables || fail "verifier probe cleanup failed"
+
+rm -f "$FW"/*
+# End to end: publication succeeds, the verdict is unreachable, and the
+# withdrawal that keeps the device clean needs the same missing verifier. The
+# caller is told both facts.
+z2_fw_capture_baseline iptables || fail "verifier transition baseline failed"
+z2_fw_save_audit iptables || fail "verifier transition baseline was not retained"
+Z2_MOCK_AWK_BROKEN=1
+export Z2_MOCK_AWK_BROKEN
+if z2_fw_reconcile_family iptables audited; then
+    fail "a family nobody could verify was published as verified"
+fi
+[ "$Z2_FW_FAILURE_CLASS" = VERIFIER_FAILED ] ||
+    fail "an unrunnable verification lost its failure class"
+case "$Z2_FW_ERROR_DETAIL" in
+    *'could not run'*'could not be withdrawn'*) ;;
+    *) fail "a failed withdrawal after an unrunnable verification was not reported" ;;
+esac
+unset Z2_MOCK_AWK_BROKEN
+z2_fw_cleanup_family iptables || fail "verifier failure cleanup failed"
+z2_fw_family_absent iptables || fail "verifier failure left live firewall state"
+
+rm -f "$FW"/*
 Z2_RESTORE_WAIT_SUPPORTED=0
 export Z2_RESTORE_WAIT_SUPPORTED
 z2_fw_reset_restore_wait_capabilities
@@ -429,13 +521,19 @@ z2_fw_family_absent iptables || fail "unsupported baseline ruleset left live fir
 unset Z2_RESTORE_REJECT_ALL
 
 rm -f "$FW"/*
+# A COMMIT refused for a reason that is not a missing extension is
+# indistinguishable from one that is: the backend says the same thing either
+# way. The capability set is therefore exhausted before the failure is
+# reported. The two attempts this costs are transactions the backend has
+# already refused, so they cannot change the table, and the alternative is
+# refusing to start on a kernel that only needed a poorer ruleset.
 Z2_RESTORE_FAIL_COMMIT=1
 export Z2_RESTORE_FAIL_COMMIT
 if z2_fw_reconcile_family iptables; then
     fail "failed COMMIT was accepted"
 fi
-[ "$(cat "$FW/restore.count")" = 2 ] ||
-    fail "failed COMMIT incorrectly retried with a degraded topology"
+[ "$(cat "$FW/restore.count")" = 6 ] ||
+    fail "failed COMMIT gave up before the capability set was exhausted"
 z2_fw_family_absent iptables || fail "failed COMMIT left live firewall state"
 [ "$Z2_FW_FAILURE_CLASS" = PUBLICATION_FAILED ] ||
     fail "failed COMMIT did not retain its failure class"

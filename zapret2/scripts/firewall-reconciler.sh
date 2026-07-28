@@ -39,6 +39,11 @@ Z2_FW_BASELINE_FWD_IN_ANCHORS=0
 Z2_FW_AUDIT_IPTABLES=""
 Z2_FW_AUDIT_IP6TABLES=""
 Z2_FW_VERIFY_DETAIL=""
+# A verdict the comparison reached and a verdict it could not reach are two
+# different facts about a published family, and only the first one says
+# anything about the ruleset. Callers read the class instead of inferring one
+# from a detail string.
+Z2_FW_VERIFY_CLASS=""
 
 # iptables-restore gained native xtables-lock waiting later than the oldest
 # Android release supported by the module. Prefer the backend's own lock wait
@@ -660,8 +665,8 @@ z2_fw_reconfigure_family() {
     # on it. The canonical-signature comparison is the only detector for that
     # class, so it stays on the mutation path.
     if ! z2_fw_verify_family "$tool" "$connbytes" "$multiport"; then
-        Z2_FW_FAILURE_CLASS=POSTCONDITION_FAILED
-        Z2_FW_ERROR_DETAIL="$Z2_FW_VERIFY_DETAIL"
+        Z2_FW_FAILURE_CLASS="${Z2_FW_VERIFY_CLASS:-POSTCONDITION_FAILED}"
+        Z2_FW_ERROR_DETAIL="${Z2_FW_VERIFY_DETAIL:-$tool post-publication verification produced no verdict}"
         return 1
     fi
     Z2_FW_BACKEND=restore
@@ -767,8 +772,12 @@ z2_fw_expected_rule_count() {
 
 z2_fw_verify_family() {
     local tool="$1" connbytes="$2" multiport="${3:-1}" listing verification
-    local out_tcp out_udp in_tcp in_udp
+    local out_tcp out_udp in_tcp in_udp diag rc detail
     Z2_FW_VERIFY_DETAIL=""
+    # Until the comparison has actually produced a verdict, every failure here
+    # is the verifier's own, not the ruleset's. The class is narrowed to
+    # POSTCONDITION_FAILED at the single point where a verdict exists.
+    Z2_FW_VERIFY_CLASS=VERIFIER_FAILED
     z2_fw_tethering_read || {
         Z2_FW_VERIFY_DETAIL="invalid tethering capture setting"
         return 1
@@ -798,6 +807,25 @@ z2_fw_verify_family() {
     # Android awk rejects newlines inside -v assignments. Feed the authored
     # rule sets and the backend snapshot as distinct stdin sections instead;
     # only bounded, single-line scalar identities remain command arguments.
+    #
+    # The comparison speaks two channels, and both are read. A named reason on
+    # stdout is a verdict about the published table. A non-zero exit without
+    # one means the comparison never ran to its end — an absent or refused
+    # awk, a runtime abort, a killed process — and its own words are the only
+    # evidence of why. Discarding that channel is what turned every such
+    # failure into the same unattributable topology mismatch.
+    diag="$STATE_DIR/tmp/firewall-verify.${tool}.$$.error"
+    if ! z2_fw_ensure_scratch_dir ||
+       ! state_path_is_managed_file "$diag" ||
+       ! z2_fw_claim_scratch_path "$diag"; then
+        Z2_FW_VERIFY_DETAIL="unavailable firewall verification scratch path"
+        return 1
+    fi
+    umask 077
+    : > "$diag" 2>/dev/null || {
+        Z2_FW_VERIFY_DETAIL="cannot create private firewall verification capture"
+        return 1
+    }
     verification="$({
         printf '%s\n' 'Z2_EXPECTED_OUT_BEGIN'
         printf '%s\n' "$out_tcp"
@@ -970,11 +998,19 @@ z2_fw_verify_family() {
                 print reason
                 exit 1
             }
-        }')" || {
-        [ -n "$verification" ] || verification=UNKNOWN_TOPOLOGY_MISMATCH
-        Z2_FW_VERIFY_DETAIL="$tool post-publication topology mismatch (connbytes=$connbytes, tethering=$Z2_FW_TETHERING, reason=$verification)"
+        }' 2>"$diag")"
+    rc=$?
+    detail="$(z2_fw_read_restore_diagnostic "$diag")"
+    rm -f "$diag" 2>/dev/null || :
+    if [ "$rc" != 0 ]; then
+        if [ -n "$verification" ]; then
+            Z2_FW_VERIFY_CLASS=POSTCONDITION_FAILED
+            Z2_FW_VERIFY_DETAIL="$tool post-publication topology mismatch (connbytes=$connbytes, tethering=$Z2_FW_TETHERING, reason=$verification)"
+        else
+            Z2_FW_VERIFY_DETAIL="$tool post-publication verification could not run (connbytes=$connbytes, exit=$rc): ${detail:-no verifier diagnostic}"
+        fi
         return 1
-    }
+    fi
     Z2_FW_CONNBYTES="$connbytes"
     z2_fw_expected_rule_count "$connbytes" "$multiport" || return 1
     Z2_FW_RULES="$Z2_FW_EXPECTED_RULES"
@@ -982,6 +1018,7 @@ z2_fw_verify_family() {
     # Every published chain is anchored once into its built-in hook, and once
     # more into FORWARD when tethering capture is on.
     Z2_FW_ANCHORS=$(((1 + connbytes) * (1 + Z2_FW_TETHERING)))
+    Z2_FW_VERIFY_CLASS=""
     return 0
 }
 
@@ -1044,7 +1081,8 @@ z2_fw_cleanup_family() {
 }
 
 z2_fw_reconcile_family() {
-    local tool="$1" baseline_mode="${2:-owned}" apply_rc candidate_detail verify_detail
+    local tool="$1" baseline_mode="${2:-owned}" apply_rc candidate_detail
+    local verify_detail verify_class
     local connbytes multiport
     case "$baseline_mode" in owned|audited) ;; *) return 2 ;; esac
     Z2_FW_BACKEND=""; Z2_FW_CONNBYTES=0; Z2_FW_MULTIPORT=1
@@ -1074,19 +1112,20 @@ z2_fw_reconcile_family() {
             return 1
         }
     fi
-    # Two optional capabilities, each with its own latch. A rejection may only
-    # retire the capability its own diagnostic names, and each is retired at
-    # most once, so at most two downgrades happen and neither can be undone by
-    # a later failure. Anything the backend rejects for a reason it does not
-    # name is a publication error: silently rebuilding a different topology
-    # would hide a broken configuration instead of a missing kernel module.
+    # Two optional capabilities, each with its own latch. A diagnostic that
+    # names one retires that one; a rejection nobody could name retires the
+    # richest capability still standing. Each is retired at most once, so at
+    # most two downgrades happen, the loop terminates, and no later failure
+    # can hand back a capability an earlier one spent.
     #
-    # The two fail at different phases. iptables-restore --test parses in
-    # userspace but asks the kernel for match revisions while doing so, which
-    # is where a missing xt_multiport surfaces; connbytes passes the test phase
-    # and is rejected only at COMMIT. Legacy restore submits the whole table in
-    # one atomic replace, so a rejected COMMIT leaves the pre-transaction
-    # state, and post-publication verification still gates every result.
+    # Neither the phase of a rejection nor its wording is evidence about what
+    # was refused. --test parses in userspace while asking the kernel for
+    # match revisions, so some gaps surface there; an extension the userspace
+    # library carries and the kernel does not survives to COMMIT, where legacy
+    # restore names only the batch line it stopped on. Legacy restore submits
+    # the whole table in one atomic replace, so a rejected COMMIT leaves the
+    # pre-transaction state, and post-publication verification still gates
+    # every result.
     connbytes=1
     multiport=1
     # The 15-value limit is a parser rule, not a capability, so it is settled
@@ -1103,9 +1142,15 @@ z2_fw_reconcile_family() {
         fi
         if [ "$apply_rc" = 0 ]; then
             if ! z2_fw_verify_family "$tool" "$connbytes" "$multiport"; then
-                verify_detail="$Z2_FW_VERIFY_DETAIL"
-                z2_fw_cleanup_family "$tool" >/dev/null 2>&1 || true
-                Z2_FW_FAILURE_CLASS=POSTCONDITION_FAILED
+                verify_detail="${Z2_FW_VERIFY_DETAIL:-$tool post-publication verification produced no verdict}"
+                verify_class="${Z2_FW_VERIFY_CLASS:-POSTCONDITION_FAILED}"
+                # An unverified family is withdrawn, and a withdrawal that did
+                # not happen is part of the answer: it is the difference
+                # between a device left as it was and a device carrying an
+                # unproven ruleset nobody has been told about.
+                z2_fw_cleanup_family "$tool" >/dev/null 2>&1 ||
+                    verify_detail="$verify_detail; the unverified ruleset could not be withdrawn"
+                Z2_FW_FAILURE_CLASS="$verify_class"
                 Z2_FW_ERROR_DETAIL="$verify_detail"
                 return 1
             fi
@@ -1115,8 +1160,10 @@ z2_fw_reconcile_family() {
             return 0
         fi
         candidate_detail="$Z2_FW_ERROR_DETAIL"
-        # A candidate rejection at test is a capability signal by itself; any
-        # other failure has to be a publication failure to be one at all.
+        # A refused ruleset is a capability signal in whichever phase it lands.
+        # Anything else here — a busy xtables lock, an unusable scratch file,
+        # an absent backend — says nothing about the ruleset and is answered
+        # by reporting it, never by publishing a poorer topology.
         if [ "$apply_rc" != 4 ] && [ "$Z2_FW_FAILURE_CLASS" != PUBLICATION_FAILED ]; then
             return 1
         fi
@@ -1129,13 +1176,23 @@ z2_fw_reconcile_family() {
         elif [ "$multiport" = 1 ] &&
              z2_fw_diagnostic_is_multiport_unsupported "$Z2_FW_LAST_RESTORE_DETAIL"; then
             multiport=0
-        elif [ "$apply_rc" = 4 ] && [ "$connbytes" = 1 ]; then
-            # An unnamed test rejection retires the richer topology first,
-            # which is the only one whose absence a kernel can survive.
+        elif [ "$connbytes" = 1 ]; then
+            # An unnamed rejection retires the richer topology first, which is
+            # the only one whose absence a kernel can survive.
+            #
+            # Which phase refused it carries no information about what was
+            # refused. --test parses in userspace and asks the kernel for
+            # match revisions on the way, so an extension the userspace
+            # library knows and the kernel does not is taken all the way to
+            # COMMIT, where legacy restore names only the batch line it
+            # stopped on. A device whose kernel lacks xt_connbytes reported
+            # exactly that — "iptables-restore: line 10 failed" — and was told
+            # its ruleset was unsupported instead of being given the
+            # outgoing-only one it could run.
             connbytes=0
-        elif [ "$apply_rc" = 4 ] && [ "$multiport" = 1 ]; then
+        elif [ "$multiport" = 1 ]; then
             # The vocabulary this builds is small and every reduction of it is
-            # survivable, so a test rejection nobody could name is answered by
+            # survivable, so a rejection nobody could name is answered by
             # trying the next-poorer ruleset rather than by reading the
             # backend's wording more cleverly. Every iptables build words a
             # missing extension differently; exhausting the two capabilities

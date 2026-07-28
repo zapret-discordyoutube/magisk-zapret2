@@ -68,6 +68,11 @@ firewall_failure_code() {
         RULESET_REJECTED) printf '%s\n' FIREWALL_RULESET_UNSUPPORTED ;;
         PUBLICATION_FAILED) printf '%s\n' FIREWALL_PUBLISH_FAILED ;;
         POSTCONDITION_FAILED) printf '%s\n' POSTCONDITION_FAILED ;;
+        # A published family nobody could inspect is not a family that failed
+        # inspection. The two used to arrive under one code, and the reader of
+        # a bug report had no way to tell a wrong ruleset from a verifier that
+        # never ran.
+        VERIFIER_FAILED) printf '%s\n' FIREWALL_VERIFY_UNAVAILABLE ;;
         *) printf '%s\n' FIREWALL_BUILD_FAILED ;;
     esac
 }
