@@ -128,6 +128,24 @@ if [ "${Z2_RESTORE_REJECT_MARK:-0}" = 1 ] &&
     echo 'iptables-restore v1.8.11 (legacy): unknown option "--mark"' >&2
     exit 2
 fi
+if [ "${Z2_RESTORE_REJECT_MULTIPORT:-0}" = 2 ] &&
+   printf '%s\n' "$payload" | grep -q -- '-m multiport'; then
+    # Verbatim from a v2.3.0 field report: iptables 1.8.4 legacy names the
+    # extension it could not find and says nothing else. No missing-module
+    # warning, no complaint about the port list — the entire signal is one
+    # word in one line, worded differently from every newer build.
+    echo "iptables-restore v1.8.4 (legacy): Couldn't find match \`multiport'" >&2
+    echo 'Error occurred at line: 3' >&2
+    echo "Try \`iptables-restore -h' or 'iptables-restore --help' for more information." >&2
+    exit 2
+fi
+if [ "${Z2_RESTORE_REJECT_MULTIPORT:-0}" = 3 ] &&
+   printf '%s\n' "$payload" | grep -q -- '-m multiport'; then
+    # A build that names nothing at all. Nothing can be read out of this, so
+    # only exhausting the capabilities can still publish a ruleset.
+    echo 'iptables-restore: line 3 failed' >&2
+    exit 2
+fi
 if [ "${Z2_RESTORE_REJECT_MULTIPORT:-0}" = 1 ] &&
    printf '%s\n' "$payload" | grep -q -- '-m multiport'; then
     # Verbatim from a device whose kernel lacks xt_multiport: the extension
@@ -495,6 +513,42 @@ if z2_fw_verify_family iptables "$Z2_FW_CONNBYTES" "$Z2_FW_MULTIPORT"; then
     fail "a foreign rule was accepted once the ruleset was split per interval"
 fi
 mv "$FW/rules.out.split" "$FW/rules.out"
+unset Z2_RESTORE_REJECT_MULTIPORT
+
+# Same kernel gap, different iptables build. 1.8.4 legacy names the extension
+# and nothing else, which is what a v2.3.0 device reported as a hard start
+# failure: the wording carried no second signal, so the fallback never ran and
+# the user was told the ruleset was unsupported.
+z2_fw_cleanup_family iptables || fail "could not reset before the 1.8.4 multiport case"
+PORTS_TCP=80,443
+PORTS_UDP=443:65535
+Z2_RESTORE_REJECT_MULTIPORT=2
+export Z2_RESTORE_REJECT_MULTIPORT
+z2_fw_reconcile_family iptables ||
+    fail "a 1.8.4 kernel without multiport could not publish any ruleset"
+[ "$Z2_FW_MULTIPORT" = 0 ] || fail "1.8.4 multiport rejection did not retire the extension"
+[ "$Z2_FW_CONNBYTES" = 1 ] ||
+    fail "the 1.8.4 multiport rejection spent the connbytes latch"
+if grep -q -- '-m multiport' "$FW/rules.out"; then
+    fail "the published ruleset still uses the extension 1.8.4 could not find"
+fi
+z2_fw_verify_family iptables "$Z2_FW_CONNBYTES" "$Z2_FW_MULTIPORT" ||
+    fail "the 1.8.4 fallback ruleset did not verify"
+unset Z2_RESTORE_REJECT_MULTIPORT
+
+# A build that names nothing must still end up with a published ruleset: the
+# capability set is small and finite, so it is exhausted rather than guessed at.
+z2_fw_cleanup_family iptables || fail "could not reset before the unnamed rejection case"
+Z2_RESTORE_REJECT_MULTIPORT=3
+export Z2_RESTORE_REJECT_MULTIPORT
+z2_fw_reconcile_family iptables ||
+    fail "an unnamed multiport rejection could not publish any ruleset"
+[ "$Z2_FW_MULTIPORT" = 0 ] || fail "an unnamed rejection kept the extension"
+if grep -q -- '-m multiport' "$FW/rules.out"; then
+    fail "the published ruleset still uses the extension the backend refused"
+fi
+z2_fw_verify_family iptables "$Z2_FW_CONNBYTES" "$Z2_FW_MULTIPORT" ||
+    fail "the exhausted-capability ruleset did not verify"
 unset Z2_RESTORE_REJECT_MULTIPORT
 
 # The 15-value limit is a userspace parser rule, not a kernel capability, so a

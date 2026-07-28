@@ -132,7 +132,7 @@ z2_fw_diagnostic_is_multiport_unsupported() {
     esac
     case "$1" in
         *not\ supported*|*missing\ kernel\ module*|*no\ kernel\ module*|\
-        *load\ match*|*[Uu]nknown\ option*|*invalid\ port/service*) return 0 ;;
+        *load\ match*|*find\ match*|*[Uu]nknown\ option*|*invalid\ port/service*) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -147,7 +147,8 @@ z2_fw_missing_extension() {
     local detail="$1" name
     case "$detail" in
         *not\ supported*|*missing\ kernel\ module*|*no\ kernel\ module*|\
-        *[Nn]o\ chain/target/match*|*[Uu]nknown\ option*|*[Cc]ouldn\'t\ load*) ;;
+        *[Nn]o\ chain/target/match*|*[Uu]nknown\ option*|\
+        *[Cc]ouldn\'t\ load*|*[Cc]ouldn\'t\ find*) ;;
         *) return 1 ;;
     esac
     for name in multiport connbytes mark NFQUEUE; do
@@ -1132,6 +1133,14 @@ z2_fw_reconcile_family() {
             # An unnamed test rejection retires the richer topology first,
             # which is the only one whose absence a kernel can survive.
             connbytes=0
+        elif [ "$apply_rc" = 4 ] && [ "$multiport" = 1 ]; then
+            # The vocabulary this builds is small and every reduction of it is
+            # survivable, so a test rejection nobody could name is answered by
+            # trying the next-poorer ruleset rather than by reading the
+            # backend's wording more cleverly. Every iptables build words a
+            # missing extension differently; exhausting the two capabilities
+            # is what makes the outcome independent of that wording.
+            multiport=0
         else
             if [ -z "$Z2_FW_ERROR_DETAIL" ]; then
                 Z2_FW_FAILURE_CLASS=POSTCONDITION_FAILED
