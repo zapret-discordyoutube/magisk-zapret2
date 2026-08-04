@@ -93,6 +93,15 @@ readonly REPO
     || fail "--repo must identify the repository root"
 [[ -f "$REPO/AGENTS.md" ]] || fail "repository AGENTS.md is missing"
 
+# Stable sources come from git archive and therefore intentionally contain no
+# ignored local.properties. Resolve and export the trusted SDK before any
+# Gradle invocation so qualification never depends on checkout-local residue.
+SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$DEFAULT_SDK_DIR}}"
+readonly SDK_ROOT
+[[ -d "$SDK_ROOT" && ! -L "$SDK_ROOT" ]] || fail "Android SDK path is unavailable or unsafe"
+export ANDROID_HOME="$SDK_ROOT"
+export ANDROID_SDK_ROOT="$SDK_ROOT"
+
 SOURCE_SHA="$(git -C "$REPO" rev-parse HEAD)"
 readonly SOURCE_SHA
 [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "invalid source commit"
@@ -383,8 +392,6 @@ fi
 SOURCE_APK="$APP_SOURCE/android-app/app/build/outputs/apk/release/app-release.apk"
 [[ -f "$SOURCE_APK" && -s "$SOURCE_APK" ]] || fail "release APK was not produced"
 
-SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$DEFAULT_SDK_DIR}}"
-readonly SDK_ROOT
 APKSIGNER="$(find "$SDK_ROOT/build-tools" -mindepth 2 -maxdepth 2 -type f \
     -name apksigner -print | sort -V | tail -n 1)"
 readonly APKSIGNER
