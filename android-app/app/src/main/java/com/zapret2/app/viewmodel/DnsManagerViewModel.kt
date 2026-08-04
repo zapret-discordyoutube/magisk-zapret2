@@ -38,6 +38,7 @@ data class DnsManagerUiState(
     val selectedDirectServices: Set<String> = emptySet(),
     val operation: DnsManagerOperation? = null,
     val loadingText: UiText? = null,
+    val loadFailure: ConfigurationLoadFailure? = null,
     val loadError: UiText? = null,
     val message: UiText? = null,
 ) {
@@ -99,6 +100,7 @@ class DnsManagerViewModel @Inject constructor(
             it.copy(
                 operation = DnsManagerOperation.LOAD,
                 loadingText = UiText.resource(R.string.dns_loading_hosts),
+                loadFailure = null,
                 loadError = null,
             )
         }
@@ -115,6 +117,7 @@ class DnsManagerViewModel @Inject constructor(
                             selectedDirectServices = emptySet(),
                             operation = null,
                             loadingText = null,
+                            loadFailure = ConfigurationLoadFailure.READ_FAILED,
                             loadError = UiText.resource(R.string.dns_load_error_body),
                         )
                     }
@@ -153,12 +156,14 @@ class DnsManagerViewModel @Inject constructor(
                         selectedDirectServices = direct,
                         operation = null,
                         loadingText = null,
+                        loadFailure = null,
                         loadError = null,
                     )
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
+                val rootAccessError = error.rootAccessUiErrorOrNull()
                 _uiState.update {
                     it.copy(
                         hostsData = null,
@@ -167,16 +172,19 @@ class DnsManagerViewModel @Inject constructor(
                         selectedDirectServices = emptySet(),
                         operation = null,
                         loadingText = null,
+                        loadFailure = error.toConfigurationLoadFailure(),
                         // The message here is the module's own error envelope,
                         // which reaches the screen as body copy. Every other
                         // user-visible dynamic diagnostic in the app goes
                         // through the shared redaction boundary and its length
                         // bound; this one used to skip both, and had no
                         // localized answer when there was no message at all.
-                        loadError = error.message
-                            ?.takeIf { it.isNotBlank() }
-                            ?.let { UiText.Dynamic(sanitizedBoundedUiDiagnostic(it)) }
-                            ?: UiText.resource(R.string.dns_load_error_body),
+                        loadError = rootAccessError ?: run {
+                            error.message
+                                ?.takeIf { it.isNotBlank() }
+                                ?.let { UiText.Dynamic(sanitizedBoundedUiDiagnostic(it)) }
+                                ?: UiText.resource(R.string.dns_load_error_body)
+                        },
                     )
                 }
             } finally {

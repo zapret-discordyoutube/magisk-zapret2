@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly SCRIPT_DIR
 readonly UPSTREAM_LUA_LIST="${SCRIPT_DIR}/lua-files.txt"
 readonly BINARY_MAP="${SCRIPT_DIR}/android-binaries.tsv"
+readonly REVIEWED_RELEASE_FILE="${SCRIPT_DIR}/reviewed-release.txt"
 
 usage() {
     printf 'Usage: %s OUTPUT_DIRECTORY\n' "$0" >&2
@@ -79,6 +80,12 @@ for command_name in curl jq tar sha256sum awk readelf install mktemp find; do
 done
 [[ -f "$UPSTREAM_LUA_LIST" && ! -L "$UPSTREAM_LUA_LIST" ]] || fail "invalid upstream Lua allowlist"
 [[ -f "$BINARY_MAP" && ! -L "$BINARY_MAP" ]] || fail "invalid Android binary map"
+[[ -f "$REVIEWED_RELEASE_FILE" && ! -L "$REVIEWED_RELEASE_FILE" ]] \
+    || fail "invalid reviewed upstream release contract"
+REVIEWED_RELEASE_TAG="$(<"$REVIEWED_RELEASE_FILE")"
+readonly REVIEWED_RELEASE_TAG
+[[ "$REVIEWED_RELEASE_TAG" =~ ^v[0-9]+([.][0-9]+){1,3}([._-][0-9A-Za-z]+)*$ ]] \
+    || fail "unsafe reviewed upstream release tag: $REVIEWED_RELEASE_TAG"
 
 if [[ -e "$OUTPUT_DIR" ]]; then
     [[ -d "$OUTPUT_DIR" && ! -L "$OUTPUT_DIR" ]] || fail "output path is not a regular directory"
@@ -101,6 +108,8 @@ RELEASE_TAG="$(jq -er '.tag_name' "$RELEASE_JSON")"
 readonly RELEASE_TAG
 [[ "$RELEASE_TAG" =~ ^v[0-9]+([.][0-9]+){1,3}([._-][0-9A-Za-z]+)*$ ]] \
     || fail "unsafe latest release tag: $RELEASE_TAG"
+[[ "$RELEASE_TAG" == "$REVIEWED_RELEASE_TAG" ]] || fail \
+    "latest stable is $RELEASE_TAG, but the nfqws2 parser contract was reviewed for $REVIEWED_RELEASE_TAG; review upstream grammar and update reviewed-release.txt"
 
 RELEASE_SHA="$(api_get "$API_ROOT/commits/$RELEASE_TAG" | jq -er '.sha')"
 readonly RELEASE_SHA

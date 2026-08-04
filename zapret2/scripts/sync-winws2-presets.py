@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 from pathlib import Path
 
 
@@ -32,10 +33,9 @@ ANDROID_LIST_RENAMES = {
 
 
 def is_windows_only(lines: list[str]) -> bool:
-    """Reject profiles that require WinDivert's inbound/circular packet path."""
+    """Reject profiles that require WinDivert or an unsupported circular path."""
     return any(
-        line.startswith("--in-range=")
-        or line.startswith("--wf-tcp-in=")
+        line.startswith("--wf-tcp-in=")
         or line.startswith("--wf-udp-in=")
         or line.startswith("--lua-desync=circular:")
         for line in lines
@@ -142,6 +142,42 @@ def with_android_capture_policy(lines: list[str]) -> list[str]:
     return compact_blank_lines(prefix + list(CAPTURE_POLICY) + [""] + lines[header_end:])
 
 
+def validate_imported_presets(imported: dict[str, str], package_root: Path) -> None:
+    """Run the runtime parser on private candidates before publishing the batch."""
+    command_builder = package_root / "scripts" / "command-builder.sh"
+    presets_dir = package_root / "presets"
+    if not command_builder.is_file() or command_builder.is_symlink():
+        raise ValueError(f"runtime preset validator is unavailable: {command_builder}")
+    candidates: list[Path] = []
+    try:
+        for index, (logical_name, content) in enumerate(imported.items()):
+            candidate = presets_dir / f"_import-validation-{index}.candidate.txt"
+            if candidate.exists() or candidate.is_symlink():
+                raise ValueError(f"preset validation candidate already exists: {candidate.name}")
+            candidate.write_text(content, encoding="utf-8", newline="\n")
+            candidates.append(candidate)
+            result = subprocess.run(
+                [
+                    "sh",
+                    str(command_builder),
+                    "--validate-preset-machine",
+                    str(package_root),
+                    str(candidate),
+                    logical_name,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            if result.returncode != 0:
+                detail = (result.stdout + result.stderr).strip() or f"exit {result.returncode}"
+                raise ValueError(f"runtime validator rejected {logical_name}: {detail}")
+    finally:
+        for candidate in candidates:
+            candidate.unlink(missing_ok=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("source", type=Path, help="zapretgui builtin/winws2 directory")
@@ -177,6 +213,7 @@ def main() -> int:
             + "\n"
             for name, lines in imported_lines.items()
         }
+        validate_imported_presets(imported, destination.parent)
     except ValueError as error:
         parser.error(str(error))
 

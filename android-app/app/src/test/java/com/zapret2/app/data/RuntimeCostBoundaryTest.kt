@@ -9,6 +9,34 @@ import org.junit.Test
 class RuntimeCostBoundaryTest {
 
     @Test
+    fun configurationReadsDoNotObserveWhetherNfqwsIsRunning() {
+        listOf(
+            "android-app/app/src/main/java/com/zapret2/app/data/HostlistRepository.kt",
+            "android-app/app/src/main/java/com/zapret2/app/data/HostsOverlayRepository.kt",
+            "android-app/app/src/main/java/com/zapret2/app/data/HostsIniParser.kt",
+        ).forEach { path ->
+            val source = repositoryFile(path).readText()
+            assertFalse("Configuration read unexpectedly depends on service status: $path", source.contains("getStatus("))
+            assertFalse("Configuration read unexpectedly depends on nfqws state: $path", source.contains("isServiceRunning("))
+        }
+
+        val presets = repositoryFile(
+            "android-app/app/src/main/java/com/zapret2/app/data/PresetRepository.kt",
+        ).readText()
+        val catalogRead = presets
+            .substringAfter("override suspend fun loadCatalog()")
+            .substringBefore("override suspend fun readActive()")
+        val editorRead = presets
+            .substringAfter("override suspend fun readCompatible(")
+            .substringBefore("override suspend fun preview(")
+
+        assertFalse(catalogRead.contains("isServiceRunning"))
+        assertFalse(catalogRead.contains("getStatus"))
+        assertFalse(editorRead.contains("isServiceRunning"))
+        assertFalse(editorRead.contains("getStatus"))
+    }
+
+    @Test
     fun updateRuntime_doesNotRepeatTheCompletePackageAudit() {
         val source = repositoryFile(
             "android-app/app/src/main/java/com/zapret2/app/data/UpdateManager.kt",

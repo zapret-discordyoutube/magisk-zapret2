@@ -3,6 +3,8 @@ package com.zapret2.app.ui.screen
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -26,6 +28,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.FolderOff
+import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SettingsSuggest
 import androidx.compose.material.icons.filled.WarningAmber
@@ -68,6 +71,7 @@ import com.zapret2.app.ui.components.SettingRow
 import com.zapret2.app.ui.theme.extendedColors
 import com.zapret2.app.viewmodel.PresetsViewModel
 import com.zapret2.app.viewmodel.PresetsUiState
+import com.zapret2.app.viewmodel.ConfigurationLoadFailure
 import com.zapret2.app.viewmodel.PresetPreviewUiStatus
 import com.zapret2.app.viewmodel.PresetsOperation
 
@@ -86,6 +90,14 @@ fun PresetsScreen(
 
     LaunchedEffect(activeViewModel) {
         activeViewModel?.ensureLoaded()
+    }
+
+    val importLauncher = if (activeViewModel != null) {
+        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            uri?.let(activeViewModel::importPreset)
+        }
+    } else {
+        null
     }
 
     AppSnackbarEffect(state.message, snackbarHostState) { activeViewModel?.clearMessage() }
@@ -214,6 +226,20 @@ fun PresetsScreen(
                                 Spacer(Modifier.width(SpacingTokens.Small))
                                 Text(stringResource(R.string.action_reload))
                             }
+                            FilledTonalButton(
+                                onClick = {
+                                    importLauncher?.launch(
+                                        arrayOf("text/plain", "text/*", "application/octet-stream"),
+                                    )
+                                },
+                                enabled = settingsEnabled && state.editingPreset == null,
+                                shape = MaterialTheme.shapes.extraLarge,
+                                modifier = buttonModifier,
+                            ) {
+                                Icon(Icons.Default.FileUpload, contentDescription = null)
+                                Spacer(Modifier.width(SpacingTokens.Small))
+                                Text(stringResource(R.string.presets_import_action))
+                            }
                         }
                     }
 
@@ -239,6 +265,8 @@ fun PresetsScreen(
                         item {
                             PresetLoadErrorState(
                                 message = loadError.resolve(),
+                                rootUnavailable =
+                                    state.loadFailure == ConfigurationLoadFailure.ROOT_ACCESS_UNAVAILABLE,
                                 onReload = { activeViewModel?.loadPresets() },
                             )
                         }
@@ -526,7 +554,11 @@ private fun EmptyPresetState(onReload: () -> Unit) {
 }
 
 @Composable
-private fun PresetLoadErrorState(message: String, onReload: () -> Unit) {
+private fun PresetLoadErrorState(
+    message: String,
+    rootUnavailable: Boolean,
+    onReload: () -> Unit,
+) {
     ContentCard {
         Column(
             modifier = Modifier
@@ -542,7 +574,13 @@ private fun PresetLoadErrorState(message: String, onReload: () -> Unit) {
             )
             Spacer(Modifier.height(SpacingTokens.Medium))
             Text(
-                text = stringResource(R.string.presets_load_error_title),
+                text = stringResource(
+                    if (rootUnavailable) {
+                        R.string.root_access_unavailable_title
+                    } else {
+                        R.string.presets_load_error_title
+                    },
+                ),
                 style = MaterialTheme.typography.titleMediumEmphasized,
                 color = MaterialTheme.colorScheme.error,
             )

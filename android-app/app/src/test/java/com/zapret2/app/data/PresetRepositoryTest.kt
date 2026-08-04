@@ -11,6 +11,29 @@ import org.junit.Test
 class PresetRepositoryTest {
 
     @Test
+    fun stoppedServiceDoesNotGatePresetCatalogOrEditorReads() = runBlocking {
+        val runner = FakePresetRunner(
+            validation = PresetValidation.Compatible,
+            serviceRunning = false,
+        ).apply {
+            listPresetLines = listOf(
+                "Z2_PRESET\tREADY\tOK\tone.txt",
+                "Z2_PRESET_SUMMARY\t2\tready=1\tquarantined=0\ttotal=1",
+            )
+            config = ActivePresetConfig("one.txt")
+            files["one.txt"] = "--filter-tcp=443\n"
+        }
+        val repository = testRepository(runner, RecordingGate())
+
+        val catalog = repository.loadCatalog()
+        val editorContent = repository.readCompatible("one.txt")
+
+        assertEquals(listOf("one.txt"), catalog?.discovery?.available?.map(PresetEntry::fileName))
+        assertEquals("--filter-tcp=443\n", editorContent)
+        assertEquals(0, runner.serviceRunningCalls)
+    }
+
+    @Test
     fun machineDiscoveryFixture_exposes20AndQuarantines49WithTypedCounts() {
         val lines = buildList {
             repeat(20) { index -> add("Z2_PRESET\tVALID\tOK\tvalid-$index.txt") }
@@ -116,7 +139,27 @@ class PresetRepositoryTest {
         assertEquals(listOf("--qnum=200", "--fwmark=0x40000000", "--uid=0:0", "--name=profile with spaces"), preview.arguments)
         assertEquals("80,443", preview.tcpPorts)
         assertEquals("443,3478,5349,19302", preview.udpPorts)
+        assertEquals(null, preview.capturePolicy)
         assertTrue(preview.rendered.contains("'--name=profile with spaces'"))
+    }
+
+    @Test
+    fun previewProtocol_readsCurrentPacketCapturePolicySchema() {
+        val outcome = PresetMachineProtocol.parsePreview(
+            listOf(
+                "Z2_COMMAND_PREVIEW\t2\tgood.txt\tTCP=443\tUDP=443\tTCP_OUT=20\tTCP_IN=10\tUDP_OUT=8\tUDP_IN=4",
+                "Z2_COMMAND_EXECUTABLE\t/data/nfqws2",
+                "Z2_COMMAND_ARGUMENT\t--daemon",
+                "Z2_COMMAND_ARGUMENT\t--pidfile=/data/nfqws2.pid",
+                "Z2_COMMAND_ARGUMENT\t--qnum=200",
+                "Z2_COMMAND_ARGUMENT\t--name=TLS",
+                "Z2_COMMAND_SUMMARY\t1\tcount=4",
+            ),
+            "good.txt",
+        )
+
+        val preview = (outcome as PresetPreviewOutcome.Ready).preview
+        assertEquals(PresetCapturePolicy(20, 10, 8, 4), preview.capturePolicy)
     }
 
     @Test
@@ -137,6 +180,15 @@ class PresetRepositoryTest {
             PresetPreviewOutcome.Rejected(PresetIssue.FORBIDDEN_IPCACHE_OPTION),
             PresetMachineProtocol.parsePreview(
                 listOf("Z2_COMMAND_PREVIEW\t0\tFORBIDDEN_IPCACHE_OPTION\tgood.txt"),
+                "good.txt",
+            ),
+        )
+        assertEquals(
+            PresetPreviewOutcome.Failed,
+            PresetMachineProtocol.parsePreview(
+                listOf(
+                    "Z2_COMMAND_PREVIEW\t2\tgood.txt\tTCP=443\tUDP=\tTCP_OUT=0\tTCP_IN=10\tUDP_OUT=20\tUDP_IN=10",
+                ),
                 "good.txt",
             ),
         )
@@ -1338,9 +1390,11 @@ class PresetRepositoryTest {
         private val replaceFailure: Exception? = null,
         private val snapshotFileFailureOnCall: Int? = null,
         private val configWriteFailureOnCall: Int? = null,
+        private val serviceRunning: Boolean = true,
     ) : PresetRunner {
         var config = ActivePresetConfig("old.txt")
         val files = linkedMapOf<String, String>()
+        var listPresetLines: List<String>? = null
         val events = mutableListOf<String>()
         var validationCalls = 0
         var configWrites = 0
@@ -1349,9 +1403,10 @@ class PresetRepositoryTest {
         var snapshotFileCalls = 0
         var applyTransactionCalls = 0
         var saveTransactionCalls = 0
+        var serviceRunningCalls = 0
         val saveTransactionRequests = mutableListOf<SaveRequest>()
 
-        override suspend fun listPresets(): List<String>? = null
+        override suspend fun listPresets(): List<String>? = listPresetLines
 
         override suspend fun applyPresetTransaction(fileName: String): PresetApplyTransaction {
             events += "apply-transaction"
@@ -1392,7 +1447,10 @@ class PresetRepositoryTest {
 
         override suspend fun loadSelection(): PresetSelection = PresetSelection(config.presetFile)
 
-        override suspend fun isServiceRunning(): Boolean = true
+        override suspend fun isServiceRunning(): Boolean {
+            serviceRunningCalls++
+            return serviceRunning
+        }
 
         override suspend fun snapshotActiveConfig(): ActivePresetConfig {
             events += "snapshot-config"

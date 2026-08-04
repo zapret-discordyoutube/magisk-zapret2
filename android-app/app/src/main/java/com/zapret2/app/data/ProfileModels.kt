@@ -188,14 +188,16 @@ internal object PresetProfileParser {
             (it.startsWith("--hostlist=") || it.startsWith("--ipset=")) &&
                 it.substringAfter('=').substringAfterLast('/').contains("discord", ignoreCase = true)
         }
-        if (tcp.isNotEmpty() && (udp.isNotEmpty() || l7.isNotEmpty())) return null
-        if (voiceL7 || (udp.isNotEmpty() && discordSelector)) return StrategyCatalogScope.VOICE
-        if (tcp.isNotEmpty() && udp.isEmpty() && l7.isEmpty()) {
+        if (tcp.isNotEmpty() && udp.isNotEmpty()) return null
+        if (tcp.isEmpty() && (voiceL7 || (udp.isNotEmpty() && discordSelector))) {
+            return StrategyCatalogScope.VOICE
+        }
+        if (tcp.isNotEmpty()) {
             val ports = tcp.flatMap { it.substringAfter('=').split(',') }.toSet()
             if (ports == setOf("80")) return StrategyCatalogScope.HTTP80
             return StrategyCatalogScope.TCP
         }
-        if (udp.isNotEmpty() && tcp.isEmpty() && l7.isEmpty()) return StrategyCatalogScope.UDP
+        if (udp.isNotEmpty()) return StrategyCatalogScope.UDP
         return null
     }
 
@@ -207,7 +209,9 @@ internal object PresetProfileParser {
         val firstStrategy = block.indexOfFirst { it.startsWith("--lua-desync=") }
         if (firstStrategy < 0) return false
         return block.drop(firstStrategy).all { line ->
-            line.isBlank() || line.startsWith("#") || line.startsWith(";") || line.startsWith("--lua-desync=")
+            line.isBlank() || line.startsWith("#") || line.startsWith(";") ||
+                line == "--comment" || line.startsWith("--comment=") ||
+                line.startsWith("--lua-desync=")
         }
     }
 

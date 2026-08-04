@@ -95,6 +95,7 @@ internal object RootFileIo {
             [ "${'$'}z2_after" = "${'$'}z2_meta" ]
         """.trimIndent()
         val result = RootCommandExecutor.execute(command)
+        result.throwIfProtectedAccessFailed()
         if (!result.isSuccess) return AtomicTextSnapshot.Failed
         return when (result.out.firstOrNull()) {
             SNAPSHOT_MISSING ->
@@ -144,6 +145,7 @@ internal object RootFileIo {
                 [ "${'$'}z2_digest_after" = "${'$'}z2_digest_before" ]
         """.trimIndent()
         val result = RootCommandExecutor.execute(command)
+        result.throwIfProtectedAccessFailed()
         if (!result.isSuccess) return null
         return result.out.joinToString("\n").takeIf { '\u0000' !in it }
     }
@@ -174,6 +176,7 @@ internal object RootFileIo {
             [ "${'$'}z2_after" = "${'$'}z2_meta" ]
         """.trimIndent()
         val result = RootCommandExecutor.execute(command)
+        result.throwIfProtectedAccessFailed()
         if (!result.isSuccess) return null
         return result.out.joinToString("\n").takeIf { '\u0000' !in it }
     }

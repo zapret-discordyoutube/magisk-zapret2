@@ -4,6 +4,8 @@ import androidx.lifecycle.SavedStateHandle
 import com.zapret2.app.data.HostlistImportFailure
 import com.zapret2.app.data.HostlistImportValidation
 import com.zapret2.app.data.MAX_HOSTLIST_IMPORT_BYTES
+import com.zapret2.app.data.ProtectedAccessException
+import com.zapret2.app.data.ProtectedAccessFailure
 import com.zapret2.app.data.isIpSetHostlistFileName
 import com.zapret2.app.data.validateHostlistImport
 import org.junit.Assert.assertEquals
@@ -127,5 +129,22 @@ class HostlistsStateTest {
             assertFalse(state.canStartCatalogOperation)
             assertFalse(state.canOpenHostlist)
         }
+    }
+
+    @Test
+    fun catalogLoadNamesMissingRootInsteadOfGenericCommandFailure() {
+        assertEquals(
+            HostlistsLoadError.ROOT_ACCESS_UNAVAILABLE,
+            hostlistsLoadError(
+                ProtectedAccessException(
+                    ProtectedAccessFailure.ROOT_UNAVAILABLE,
+                    "root shell unavailable",
+                ),
+            ),
+        )
+        assertEquals(
+            HostlistsLoadError.ROOT_COMMAND_FAILED,
+            hostlistsLoadError(IllegalStateException("catalog rejected")),
+        )
     }
 }

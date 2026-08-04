@@ -8,6 +8,8 @@ import com.zapret2.app.data.HostsOverlayRepository
 import com.zapret2.app.data.HostsOverlayMutationOutcome
 import com.zapret2.app.data.HostsOverlaySnapshot
 import com.zapret2.app.data.ModuleMutationCoordinator
+import com.zapret2.app.data.ProtectedAccessFailure
+import com.zapret2.app.data.hasProtectedAccessFailure
 import com.zapret2.app.ui.UiText
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
@@ -24,6 +26,7 @@ import javax.inject.Inject
 enum class HostsEditorOperation { LOAD, SAVE, RESET }
 
 enum class HostsEditorResult {
+    ROOT_ACCESS_UNAVAILABLE,
     READ_FAILED,
     EMPTY,
     TOO_LARGE,
@@ -128,11 +131,13 @@ class HostsEditorViewModel @Inject constructor(
             )
         }
         viewModelScope.launch {
+            var readFailure: Exception? = null
             val content = try {
                 withContext(Dispatchers.IO) { hostsRepository.readEffective() }
             } catch (cancelled: CancellationException) {
                 throw cancelled
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                readFailure = error
                 null
             }
             if (content != null) {
@@ -152,7 +157,16 @@ class HostsEditorViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(operation = null, hasAuthoritativeBaseline = false)
                 }
-                publishResult(HostsEditorResult.READ_FAILED)
+                publishResult(
+                    if (readFailure?.hasProtectedAccessFailure(
+                            ProtectedAccessFailure.ROOT_UNAVAILABLE,
+                        ) == true
+                    ) {
+                        HostsEditorResult.ROOT_ACCESS_UNAVAILABLE
+                    } else {
+                        HostsEditorResult.READ_FAILED
+                    },
+                )
             }
         }
     }
@@ -387,6 +401,7 @@ class HostsEditorViewModel @Inject constructor(
 
     private fun HostsEditorResult.toUiText(): UiText = UiText.resource(
         when (this) {
+            HostsEditorResult.ROOT_ACCESS_UNAVAILABLE -> R.string.root_access_unavailable_body
             HostsEditorResult.READ_FAILED -> R.string.hosts_read_failed
             HostsEditorResult.EMPTY -> R.string.hosts_file_empty
             HostsEditorResult.TOO_LARGE -> R.string.hosts_file_too_large

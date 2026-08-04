@@ -187,6 +187,28 @@ class ServiceLifecycleControllerTest {
     }
 
     @Test
+    fun lifecycleReceipt_acceptsTetheringTopologyWithTwoAnchorsPerChain() {
+        val running = ServiceLifecycleController.parseLifecycleReceipt(
+            ServiceLifecycleController.CommandResult(
+                success = true,
+                stdout = versionSixStatusLines(
+                    healthyStatusLines(),
+                    lifecycleState = "owned",
+                    ownerKind = "android-mutation",
+                    chains = 4,
+                    anchors = 8,
+                ),
+                exitCode = 0,
+            ),
+        )
+
+        assertTrue(running?.metadataComplete == true)
+        assertTrue(running?.healthy == true)
+        assertEquals(4, running?.chainsCount)
+        assertEquals(8, running?.anchorsCount)
+    }
+
+    @Test
     fun indeterminateLifecycleResult_commitsOnlyTheExactRequestedRunningGeneration() {
         val expected = ServiceLifecycleController.parseStatusOutput(
             versionSixStatusLines(
@@ -566,8 +588,8 @@ class ServiceLifecycleControllerTest {
         val contradictory = versionFiveStatusLines(
             healthyStatusLines(),
             lifecycleState = "idle",
-            chains = 1,
-            anchors = 2,
+            chains = 4,
+            anchors = 5,
         )
 
         assertFalse(ServiceLifecycleController.parseStatusOutput(missing).metadataComplete)

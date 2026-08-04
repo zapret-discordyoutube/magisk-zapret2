@@ -1,5 +1,6 @@
 package com.zapret2.app.viewmodel
 
+import android.net.Uri
 import androidx.lifecycle.SavedStateHandle
 import com.zapret2.app.data.ActivePresetSource
 import com.zapret2.app.data.PresetCatalog
@@ -8,6 +9,8 @@ import com.zapret2.app.data.PresetDiscovery
 import com.zapret2.app.data.PresetDurableOutcome
 import com.zapret2.app.data.PresetEntry
 import com.zapret2.app.data.PresetIssue
+import com.zapret2.app.data.PresetImportReader
+import com.zapret2.app.data.PresetImportValidation
 import com.zapret2.app.data.PresetMutationOutcome
 import com.zapret2.app.data.PresetPreviewOutcome
 import com.zapret2.app.data.PresetRepository
@@ -34,7 +37,7 @@ class PresetsViewModelSafetyTest {
                 selection = PresetSelection("valid-0.txt"),
             )
         }
-        val viewModel = PresetsViewModel(SavedStateHandle(), repository, ServiceEventBus())
+        val viewModel = PresetsViewModel(SavedStateHandle(), repository, ServiceEventBus(), FakeImportReader)
 
         viewModel.loadPresetsNow()
 
@@ -50,7 +53,7 @@ class PresetsViewModelSafetyTest {
         val repository = FakeRepository().apply {
             mutation = PresetMutationOutcome.Rejected(PresetIssue.UNSAFE_DEPENDENCY_PATH)
         }
-        val viewModel = PresetsViewModel(handle, repository, ServiceEventBus())
+        val viewModel = PresetsViewModel(handle, repository, ServiceEventBus(), FakeImportReader)
 
         viewModel.applyPresetNow("valid.txt")
 
@@ -69,7 +72,7 @@ class PresetsViewModelSafetyTest {
                 PresetSelection("valid.txt"),
             )
         }
-        val viewModel = PresetsViewModel(SavedStateHandle(), repository, ServiceEventBus())
+        val viewModel = PresetsViewModel(SavedStateHandle(), repository, ServiceEventBus(), FakeImportReader)
         viewModel.loadPresetsNow()
 
         viewModel.applyPreset("valid.txt")
@@ -84,9 +87,9 @@ class PresetsViewModelSafetyTest {
         val repository = FakeRepository().apply {
             mutation = PresetMutationOutcome.RestartFailedRolledBack
         }
-        PresetsViewModel(handle, repository, ServiceEventBus()).applyPresetNow("valid.txt")
+        PresetsViewModel(handle, repository, ServiceEventBus(), FakeImportReader).applyPresetNow("valid.txt")
 
-        val recreated = PresetsViewModel(handle, repository, ServiceEventBus())
+        val recreated = PresetsViewModel(handle, repository, ServiceEventBus(), FakeImportReader)
 
         assertEquals(PresetDurableOutcome.RESTART_FAILED_ROLLED_BACK, recreated.uiState.value.lastOutcome)
         assertNull(recreated.uiState.value.lastIssue)
@@ -101,7 +104,7 @@ class PresetsViewModelSafetyTest {
             ),
         )
 
-        val restored = PresetsViewModel(handle, FakeRepository(), ServiceEventBus()).uiState.value
+        val restored = PresetsViewModel(handle, FakeRepository(), ServiceEventBus(), FakeImportReader).uiState.value
 
         assertEquals(PresetDurableOutcome.SAVED, restored.lastOutcome)
         assertNull(restored.lastIssue)
@@ -111,7 +114,7 @@ class PresetsViewModelSafetyTest {
     @Test
     fun failedSaveKeepsEditorDraftAndSuccessfulSaveClosesIt() = runBlocking {
         val repository = FakeRepository()
-        val viewModel = PresetsViewModel(SavedStateHandle(), repository, ServiceEventBus())
+        val viewModel = PresetsViewModel(SavedStateHandle(), repository, ServiceEventBus(), FakeImportReader)
         viewModel.loadPresetsNow()
         viewModel.openPresetEditorNow("valid.txt")
         viewModel.updatePresetContent("edited content")
@@ -128,7 +131,7 @@ class PresetsViewModelSafetyTest {
 
     @Test
     fun dirtyEditor_requiresExplicitDiscardAcknowledgement() = runBlocking {
-        val viewModel = PresetsViewModel(SavedStateHandle(), FakeRepository(), ServiceEventBus())
+        val viewModel = PresetsViewModel(SavedStateHandle(), FakeRepository(), ServiceEventBus(), FakeImportReader)
         viewModel.loadPresetsNow()
         viewModel.openPresetEditorNow("valid.txt")
         viewModel.updatePresetContent("edited content")
@@ -146,7 +149,7 @@ class PresetsViewModelSafetyTest {
     @Test
     fun openingAnotherEditor_cannotReplaceAnExistingDirtyDraft() = runBlocking {
         val repository = FakeRepository()
-        val viewModel = PresetsViewModel(SavedStateHandle(), repository, ServiceEventBus())
+        val viewModel = PresetsViewModel(SavedStateHandle(), repository, ServiceEventBus(), FakeImportReader)
         viewModel.loadPresetsNow()
         viewModel.openPresetEditorNow("valid.txt")
         viewModel.updatePresetContent("irreplaceable draft")
@@ -169,7 +172,7 @@ class PresetsViewModelSafetyTest {
             ),
         )
 
-        val restored = PresetsViewModel(handle, FakeRepository(), ServiceEventBus())
+        val restored = PresetsViewModel(handle, FakeRepository(), ServiceEventBus(), FakeImportReader)
             .uiState.value.editingPreset
 
         assertEquals("valid.txt", restored?.fileName)
@@ -194,7 +197,7 @@ class PresetsViewModelSafetyTest {
                 PresetSelection("valid.txt"),
             )
         }
-        val viewModel = PresetsViewModel(handle, repository, ServiceEventBus())
+        val viewModel = PresetsViewModel(handle, repository, ServiceEventBus(), FakeImportReader)
 
         viewModel.loadPresetsNow()
 
@@ -207,7 +210,7 @@ class PresetsViewModelSafetyTest {
     @Test
     fun previewUsesUnsavedDraftAndEditingInvalidatesPreviousCommand() = runBlocking {
         val repository = FakeRepository()
-        val viewModel = PresetsViewModel(SavedStateHandle(), repository, ServiceEventBus())
+        val viewModel = PresetsViewModel(SavedStateHandle(), repository, ServiceEventBus(), FakeImportReader)
         viewModel.loadPresetsNow()
         viewModel.openPresetEditorNow("valid.txt")
         viewModel.updatePresetContent("unsaved draft")
@@ -224,6 +227,45 @@ class PresetsViewModelSafetyTest {
         assertNull(viewModel.uiState.value.editingPreset?.commandPreview)
     }
 
+    @Test
+    fun importCreatesOnlyAMissingPresetThroughTheRepositoryTransaction() = runBlocking {
+        val repository = FakeRepository().apply {
+            mutation = PresetMutationOutcome.Saved
+            catalog = PresetCatalog(
+                PresetDiscovery(listOf(PresetEntry("Imported.txt")), 0, emptyMap()),
+                PresetSelection("valid.txt"),
+            )
+        }
+        val viewModel = PresetsViewModel(SavedStateHandle(), repository, ServiceEventBus(), FakeImportReader)
+
+        viewModel.importPresetNow(
+            "Imported.txt",
+            "--lua-init=@lua/zapret-lib.lua\n--comment=kept\n--filter-tcp=443\n" +
+                "--filter-l7=tls\n--lua-desync=pass\n",
+        )
+
+        assertEquals("Imported.txt", repository.savedFileName)
+        assertNull(repository.savedExpectedContent)
+        assertTrue(repository.savedContent.orEmpty().contains("# NFQWS2_TCP_PKT_OUT=20\n"))
+        assertTrue(repository.savedContent.orEmpty().contains("--name=Imported\n--filter-tcp=443"))
+        assertTrue(repository.savedContent.orEmpty().contains("--comment=kept\n"))
+        assertTrue(repository.savedContent.orEmpty().contains("--filter-l7=tls\n"))
+        assertEquals(PresetDurableOutcome.SAVED, viewModel.uiState.value.lastOutcome)
+        assertEquals(listOf("Imported.txt"), viewModel.uiState.value.presets.map(PresetEntry::fileName))
+    }
+
+    @Test
+    fun importCollisionDoesNotOverwriteOrPublishAnEditorSourceChangedOutcome() = runBlocking {
+        val repository = FakeRepository().apply { mutation = PresetMutationOutcome.SourceChanged }
+        val viewModel = PresetsViewModel(SavedStateHandle(), repository, ServiceEventBus(), FakeImportReader)
+
+        viewModel.importPresetNow("valid.txt", "new content")
+
+        assertNull(repository.savedExpectedContent)
+        assertNull(viewModel.uiState.value.lastOutcome)
+        assertNull(viewModel.uiState.value.operation)
+    }
+
     private class FakeRepository : PresetRepository {
         var catalog: PresetCatalog? = PresetCatalog(
             PresetDiscovery(listOf(PresetEntry("valid.txt")), 0, emptyMap()),
@@ -233,6 +275,9 @@ class PresetsViewModelSafetyTest {
         var compatibleContent: String? = "content"
         var previewContent: String? = null
         var applyCalls = 0
+        var savedFileName: String? = null
+        var savedExpectedContent: String? = "not-called"
+        var savedContent: String? = null
 
         override suspend fun loadCatalog(): PresetCatalog? = catalog
         override suspend fun readActive(): ActivePresetSource? {
@@ -256,6 +301,16 @@ class PresetsViewModelSafetyTest {
             expectedContent: String?,
             content: String,
             applyAfterSave: Boolean,
-        ): PresetMutationOutcome = mutation
+        ): PresetMutationOutcome {
+            savedFileName = fileName
+            savedExpectedContent = expectedContent
+            savedContent = content
+            return mutation
+        }
+    }
+
+    private data object FakeImportReader : PresetImportReader {
+        override fun readAndValidate(uri: Uri): PresetImportValidation =
+            error("Document-provider reads are outside these ViewModel unit tests")
     }
 }

@@ -19,6 +19,8 @@
     <string name="screen_hosts_editor">Hosts editor</string>
     <string name="screen_dns_manager">DNS manager</string>
     <string name="screen_hostlist_content">Hostlist contents</string>
+    <string name="root_access_unavailable_title">Root access unavailable</string>
+    <string name="root_access_unavailable_body">Grant Zapret2 root access in your root manager, then try again.</string>
     <string name="hostlists_load_error_title">Couldn’t load hostlists</string>
     <string name="hostlists_load_error_body">Check that the module is installed and accessible, then try again.</string>
     <string name="loading_hostlists">Loading hostlists…</string>
@@ -434,6 +436,7 @@
     <string name="presets_preview_ready_hint">Build the exact command from the current editor contents. Unsaved changes are supported.</string>
     <string name="presets_preview_build">Build command</string>
     <string name="presets_preview_ports">Intercepted ports — TCP: %1$s · UDP: %2$s</string>
+    <string name="presets_preview_packet_limits">Packet limits — TCP out: %1$d, in: %2$d · UDP out: %3$d, in: %4$d</string>
     <string name="presets_preview_rejected">Command was rejected: %1$s</string>
     <string name="presets_preview_failed">Could not build the command safely.</string>
     <string name="presets_preview_blocked">Command preview is temporarily blocked by another module operation.</string>
@@ -446,6 +449,14 @@
     <string name="presets_empty_body">Reload after adding .txt files to the presets directory.</string>
     <string name="presets_mode_file">Preset file</string>
     <string name="presets_loading">Loading presets…</string>
+    <string name="presets_import_action">Import TXT preset</string>
+    <string name="presets_importing">Reading and validating preset…</string>
+    <string name="presets_import_success">%1$s imported</string>
+    <string name="presets_import_already_exists">%1$s already exists; import did not overwrite it.</string>
+    <string name="presets_import_invalid_name">Use a direct .txt file name without reserved characters.</string>
+    <string name="presets_import_too_large">The preset must not exceed 1 MB.</string>
+    <string name="presets_import_invalid_encoding">The preset must be valid UTF-8 text without NUL characters.</string>
+    <string name="presets_import_read_failed">Could not read the selected preset.</string>
     <string name="presets_load_error_title">Could not load presets</string>
     <string name="presets_load_failed">Check module access, then try again.</string>
     <string name="presets_invalid_file">The preset file name is invalid</string>

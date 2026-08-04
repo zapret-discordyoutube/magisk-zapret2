@@ -83,4 +83,20 @@ class HostsEditorDurableStateTest {
         assertFalse(viewModel.uiState.value.hasUnsavedChanges)
         assertEquals("baseline", savedState.get<String>("hosts_editor_draft"))
     }
+
+    @Test
+    fun missingRootRestoresAsAnExplicitUserFacingFailure() {
+        val viewModel = HostsEditorViewModel(
+            SavedStateHandle(
+                mapOf(
+                    "hosts_editor_result" to HostsEditorResult.ROOT_ACCESS_UNAVAILABLE.name,
+                ),
+            ),
+        )
+
+        assertEquals(
+            UiText.Resource(R.string.root_access_unavailable_body),
+            viewModel.uiState.value.message,
+        )
+    }
 }

@@ -1,5 +1,6 @@
 package com.zapret2.app.viewmodel
 
+import android.net.Uri
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -10,24 +11,31 @@ import com.zapret2.app.data.PresetContentPolicy
 import com.zapret2.app.data.PresetDurableOutcome
 import com.zapret2.app.data.PresetEntry
 import com.zapret2.app.data.PresetIssue
+import com.zapret2.app.data.PresetImportFailure
+import com.zapret2.app.data.PresetImportReader
+import com.zapret2.app.data.PresetImportValidation
 import com.zapret2.app.data.PresetMutationOutcome
 import com.zapret2.app.data.PresetNamePolicy
 import com.zapret2.app.data.PresetPreviewOutcome
 import com.zapret2.app.data.PresetRepository
+import com.zapret2.app.data.ProtectedAccessException
 import com.zapret2.app.data.ServiceEventBus
 import com.zapret2.app.data.ServiceEventSource
+import com.zapret2.app.data.adaptPresetImportForAndroid
 import com.zapret2.app.ui.UiText
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 
-enum class PresetsOperation { LOAD, APPLY, OPEN_EDITOR, PREVIEW, SAVE, SAVE_AND_APPLY }
+enum class PresetsOperation { LOAD, IMPORT, APPLY, OPEN_EDITOR, PREVIEW, SAVE, SAVE_AND_APPLY }
 
 enum class PresetPreviewUiStatus { IDLE, READY, REJECTED, FAILED, BLOCKED }
 
@@ -52,6 +60,7 @@ data class PresetsUiState(
     val issueCounts: Map<PresetIssue, Int> = emptyMap(),
     val operation: PresetsOperation? = null,
     val loadingText: UiText? = null,
+    val loadFailure: ConfigurationLoadFailure? = null,
     val loadError: UiText? = null,
     val message: UiText? = null,
     val editingPreset: PresetEditorState? = null,
@@ -67,6 +76,7 @@ class PresetsViewModel @Inject constructor(
     private val savedStateHandle: SavedStateHandle,
     private val repository: PresetRepository,
     private val serviceEventBus: ServiceEventBus,
+    private val importReader: PresetImportReader,
 ) : ViewModel() {
 
     private val restoredOutcome =
@@ -118,12 +128,64 @@ class PresetsViewModel @Inject constructor(
         launchOperation { loadPresetsNow() }
     }
 
+    fun importPreset(uri: Uri) {
+        val state = _uiState.value
+        if (!state.hasAuthoritativeCatalog || state.editingPreset != null) return
+        if (!operationInProgress.compareAndSet(false, true)) return
+        beginOperation(PresetsOperation.IMPORT, UiText.resource(R.string.presets_importing))
+        launchOperation {
+            when (val validation = withContext(Dispatchers.IO) { importReader.readAndValidate(uri) }) {
+                is PresetImportValidation.Failure -> finishImportFailure(validation.reason)
+                is PresetImportValidation.Valid -> importPresetNow(
+                    validation.fileName,
+                    validation.content,
+                )
+            }
+        }
+    }
+
+    internal suspend fun importPresetNow(fileName: String, content: String) {
+        if (!PresetNamePolicy.isValid(fileName)) {
+            finishImportFailure(PresetImportFailure.INVALID_NAME)
+            return
+        }
+        val outcome = repository.save(
+            fileName = fileName,
+            expectedContent = null,
+            content = adaptPresetImportForAndroid(fileName, content),
+            applyAfterSave = false,
+        )
+        if (outcome == PresetMutationOutcome.Saved) {
+            finishMutation(outcome, fileName, keepOperation = true)
+            loadPresetsNow()
+            _uiState.update {
+                it.copy(message = UiText.resource(R.string.presets_import_success, fileName))
+            }
+        } else if (outcome == PresetMutationOutcome.SourceChanged) {
+            // Import is create-only: the repository's CAS vocabulary calls an
+            // already-present target "source changed", while the document UI
+            // should describe the actual refusal and leave durable edit state
+            // untouched because no mutation happened.
+            _uiState.update {
+                it.copy(
+                    operation = null,
+                    loadingText = null,
+                    message = UiText.resource(R.string.presets_import_already_exists, fileName),
+                )
+            }
+        } else {
+            finishMutation(outcome, fileName)
+        }
+    }
+
     internal suspend fun loadPresetsNow() {
+        var loadException: Exception? = null
         val catalog = try {
             repository.loadCatalog()
         } catch (cancelled: CancellationException) {
             throw cancelled
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            loadException = error
             null
         }
         val revalidatedEditor = if (catalog == null) {
@@ -142,7 +204,9 @@ class PresetsViewModel @Inject constructor(
                     hasAuthoritativeCatalog = false,
                     operation = null,
                     loadingText = null,
-                    loadError = UiText.resource(R.string.presets_load_failed),
+                    loadFailure = loadException.toConfigurationLoadFailure(),
+                    loadError = loadException?.rootAccessUiErrorOrNull()
+                        ?: UiText.resource(R.string.presets_load_failed),
                     editingPreset = revalidatedEditor,
                 )
             } else {
@@ -154,6 +218,7 @@ class PresetsViewModel @Inject constructor(
                     hasAuthoritativeCatalog = true,
                     operation = null,
                     loadingText = null,
+                    loadFailure = null,
                     loadError = null,
                     editingPreset = revalidatedEditor,
                 )
@@ -362,20 +427,26 @@ class PresetsViewModel @Inject constructor(
                 block()
             } catch (cancelled: CancellationException) {
                 throw cancelled
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                val rootAccessError = error.rootAccessUiErrorOrNull()
                 _uiState.update { current ->
                     current.copy(
                         operation = null,
                         loadingText = null,
+                        loadFailure = if (current.operation == PresetsOperation.LOAD) {
+                            error.toConfigurationLoadFailure()
+                        } else {
+                            current.loadFailure
+                        },
                         loadError = if (current.operation == PresetsOperation.LOAD) {
-                            UiText.resource(R.string.presets_load_failed)
+                            rootAccessError ?: UiText.resource(R.string.presets_load_failed)
                         } else {
                             current.loadError
                         },
                         message = if (current.operation == PresetsOperation.LOAD) {
                             current.message
                         } else {
-                            UiText.resource(R.string.presets_io_failed)
+                            rootAccessError ?: UiText.resource(R.string.presets_io_failed)
                         },
                     )
                 }
@@ -394,6 +465,8 @@ class PresetsViewModel @Inject constructor(
             repository.readCompatible(editor.fileName)
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (access: ProtectedAccessException) {
+            throw access
         } catch (_: Exception) {
             null
         } ?: return editor.copy(hasAuthoritativeBaseline = false)
@@ -415,6 +488,8 @@ class PresetsViewModel @Inject constructor(
             repository.readCompatible(fileName)
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (access: ProtectedAccessException) {
+            throw access
         } catch (_: Exception) {
             null
         }
@@ -438,12 +513,29 @@ class PresetsViewModel @Inject constructor(
             it.copy(
                 operation = operation,
                 loadingText = text,
+                loadFailure = if (clearLoadError) null else it.loadFailure,
                 loadError = if (clearLoadError) null else it.loadError,
                 hasAuthoritativeCatalog = if (operation == PresetsOperation.LOAD) {
                     false
                 } else {
                     it.hasAuthoritativeCatalog
                 },
+            )
+        }
+    }
+
+    private fun finishImportFailure(reason: PresetImportFailure) {
+        val message = when (reason) {
+            PresetImportFailure.INVALID_NAME -> R.string.presets_import_invalid_name
+            PresetImportFailure.TOO_LARGE -> R.string.presets_import_too_large
+            PresetImportFailure.INVALID_ENCODING -> R.string.presets_import_invalid_encoding
+            PresetImportFailure.READ_FAILED -> R.string.presets_import_read_failed
+        }
+        _uiState.update {
+            it.copy(
+                operation = null,
+                loadingText = null,
+                message = UiText.resource(message),
             )
         }
     }

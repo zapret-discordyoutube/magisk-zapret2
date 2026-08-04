@@ -185,9 +185,13 @@ cat > "$FIXTURE/presets/TCP only.txt" <<'EOF'
 
 --lua-init=@lua/zapret-lib.lua
 --blob=zero:0x00
+--comment=Imported nfqws2 strategy
 
 --name=TCP only
 --filter-tcp=80
+--filter-l7=tls
+--in-range=-d10
+--comment
 --lua-desync=pass
 EOF
 cat > "$FIXTURE/presets/UDP only.txt" <<'EOF'
@@ -221,6 +225,31 @@ read_compiled_artifact_metadata "$TMP/tcp.argv" || fail "TCP artifact metadata i
 [ "$COMPILED_TCP_PORTS" = 80 ] && [ -z "$COMPILED_UDP_PORTS" ] &&
     [ "$COMPILED_TCP_PKT_OUT:$COMPILED_TCP_PKT_IN:$COMPILED_UDP_PKT_OUT:$COMPILED_UDP_PKT_IN" = 20:10:20:10 ] ||
     fail "TCP-only preset opened unexpected ports"
+grep -Fxq -- '--comment=Imported nfqws2 strategy' "$TMP/tcp.argv" &&
+    grep -Fxq -- '--filter-l7=tls' "$TMP/tcp.argv" &&
+    grep -Fxq -- '--in-range=-d10' "$TMP/tcp.argv" &&
+    grep -Fxq -- '--comment' "$TMP/tcp.argv" ||
+    fail "native nfqws2 strategy arguments were not preserved as exact argv records"
+
+cat > "$FIXTURE/presets/Legacy native.txt" <<'EOF'
+--lua-init=@lua/zapret-lib.lua
+--filter-tcp=443
+--filter-l7=tls
+--comment=legacy native
+--lua-desync=pass
+--new=Native UDP
+--filter-udp=443
+--lua-desync=pass
+EOF
+compile_preset_artifact "$FIXTURE/presets/Legacy native.txt" "Legacy native.txt" "$TMP/legacy-native.argv" ||
+    fail "legacy/native preset without wrapper metadata or explicit first profile name did not compile"
+read_compiled_artifact_metadata "$TMP/legacy-native.argv" || fail "legacy/native artifact metadata is invalid"
+[ "$COMPILED_TCP_PORTS" = 443 ] && [ "$COMPILED_UDP_PORTS" = 443 ] &&
+    [ "$COMPILED_TCP_PKT_OUT:$COMPILED_TCP_PKT_IN:$COMPILED_UDP_PKT_OUT:$COMPILED_UDP_PKT_IN" = 20:10:20:10 ] ||
+    fail "legacy/native preset did not receive the documented Android capture default"
+grep -Fxq -- '--comment=legacy native' "$TMP/legacy-native.argv" &&
+    grep -Fxq -- '--new=Native UDP' "$TMP/legacy-native.argv" ||
+    fail "legacy/native nfqws2 argv was rewritten during runtime compilation"
 cat > "$FIXTURE/install-generation.meta" <<EOF
 version=1
 module_dir=$MODDIR
@@ -268,6 +297,24 @@ compile_preset_artifact "$FIXTURE/presets/Multi filter.txt" "Multi filter.txt" "
 read_compiled_artifact_metadata "$TMP/multi-filter.argv" || fail "multi-filter metadata is invalid"
 [ "$COMPILED_TCP_PORTS" = 80,443 ] && [ -z "$COMPILED_UDP_PORTS" ] ||
     fail "fork-free capture parser dropped a repeated protocol filter"
+sed 's/--filter-tcp=80/--filter-tcp=~443/' "$FIXTURE/presets/TCP only.txt" > "$FIXTURE/presets/Negated filter.txt"
+compile_preset_artifact "$FIXTURE/presets/Negated filter.txt" "Negated filter.txt" "$TMP/negated-filter.argv" ||
+    fail "upstream negated port filter did not compile"
+read_compiled_artifact_metadata "$TMP/negated-filter.argv" || fail "negated-filter metadata is invalid"
+[ "$COMPILED_TCP_PORTS" = 1:442,444:65535 ] && [ -z "$COMPILED_UDP_PORTS" ] ||
+    fail "negated port filter did not produce its exact kernel-capture complement"
+sed 's/--filter-tcp=80/--filter-tcp=0,443/' "$FIXTURE/presets/TCP only.txt" > "$FIXTURE/presets/Zero filter.txt"
+compile_preset_artifact "$FIXTURE/presets/Zero filter.txt" "Zero filter.txt" "$TMP/zero-filter.argv" ||
+    fail "upstream zero/deny port filter did not compile"
+read_compiled_artifact_metadata "$TMP/zero-filter.argv" || fail "zero-filter metadata is invalid"
+[ "$COMPILED_TCP_PORTS" = 443 ] && [ -z "$COMPILED_UDP_PORTS" ] ||
+    fail "upstream deny-all port zero incorrectly expanded kernel capture"
+sed 's/--filter-tcp=80/--filter-tcp=*,443/' "$FIXTURE/presets/TCP only.txt" > "$FIXTURE/presets/Wildcard filter.txt"
+compile_preset_artifact "$FIXTURE/presets/Wildcard filter.txt" "Wildcard filter.txt" "$TMP/wildcard-filter.argv" ||
+    fail "upstream wildcard list filter did not compile"
+read_compiled_artifact_metadata "$TMP/wildcard-filter.argv" || fail "wildcard-filter metadata is invalid"
+[ "$COMPILED_TCP_PORTS" = 1:65535 ] && [ -z "$COMPILED_UDP_PORTS" ] ||
+    fail "wildcard list filter did not normalize to the full kernel capture"
 cp "$TMP/tcp.argv" "$TMP/tampered-ipcache.argv"
 printf '%s\n' '--ipcache-hostname=1' >> "$TMP/tampered-ipcache.argv"
 read_compiled_artifact_metadata "$TMP/tampered-ipcache.argv" || fail "tampered artifact fixture is structurally invalid"

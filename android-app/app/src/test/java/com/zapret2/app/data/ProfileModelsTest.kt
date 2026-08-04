@@ -108,6 +108,24 @@ class ProfileModelsTest {
     }
 
     @Test
+    fun tcpTlsProfileUsesTcpCatalogInsteadOfBeingTreatedAsAmbiguous() {
+        val tls = source
+            .replaceFirst("--filter-tcp=80", "--filter-tcp=443\n--filter-l7=tls")
+            .replaceFirst("--lua-desync=multisplit:pos=2", "--lua-desync=multisplit:pos=2\n--comment=keep me")
+        val document = requireNotNull(PresetProfileParser.parse("Default.txt", tls))
+
+        assertEquals(StrategyCatalogScope.TCP, document.profiles.first().catalogScope)
+        val replaced = requireNotNull(
+            PresetProfileParser.replaceStrategy(
+                document,
+                0,
+                listOf("--lua-desync=pass"),
+            ),
+        )
+        assertTrue(replaced.contains("--lua-desync=pass\n--comment=keep me"))
+    }
+
+    @Test
     fun interleavedStrategyAndPayloadCannotBeRewrittenAsOneCatalogStrategy() {
         val interleaved = source.replaceFirst(
             "--lua-desync=multisplit:pos=2",

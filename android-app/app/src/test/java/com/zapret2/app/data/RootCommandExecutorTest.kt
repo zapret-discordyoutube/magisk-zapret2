@@ -148,6 +148,23 @@ class RootCommandExecutorTest {
         assertEquals("root denied", result.detail)
     }
 
+    @Test
+    fun protectedReadPreservesRootTransportFailureWithoutMisclassifyingCommandExit() {
+        val unavailable = runCatching {
+            RootCommandResult(
+                failure = RootCommandFailure.SHELL_UNAVAILABLE,
+                detail = "root denied",
+            ).throwIfProtectedAccessFailed()
+        }.exceptionOrNull() as ProtectedAccessException
+
+        assertEquals(ProtectedAccessFailure.ROOT_UNAVAILABLE, unavailable.failure)
+        assertTrue(
+            unavailable.hasProtectedAccessFailure(ProtectedAccessFailure.ROOT_UNAVAILABLE),
+        )
+
+        RootCommandResult(code = 1).throwIfProtectedAccessFailed()
+    }
+
     private class FakeSession : RootCommandSession {
         val next = CompletableFuture<RootCommandResult>()
         val submissions = AtomicInteger()

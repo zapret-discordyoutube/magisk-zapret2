@@ -69,6 +69,63 @@ internal enum class RootCommandFailure {
     SHELL_DIED,
 }
 
+/**
+ * A protected read could not reach its root transport.
+ *
+ * This is deliberately narrower than a non-zero shell exit: an accessible module can reject a
+ * malformed or unsafe file without implying that root itself disappeared. Configuration screens
+ * use this typed failure to distinguish "root unavailable" from an ordinary read error while
+ * remaining completely independent of whether nfqws2 is running.
+ */
+internal enum class ProtectedAccessFailure {
+    ROOT_UNAVAILABLE,
+    ROOT_BUSY,
+    ROOT_TIMEOUT,
+}
+
+internal class ProtectedAccessException(
+    val failure: ProtectedAccessFailure,
+    detail: String?,
+) : IllegalStateException(detail ?: failure.name)
+
+internal fun RootCommandResult.throwIfProtectedAccessFailed() {
+    val protectedFailure = when (failure) {
+        RootCommandFailure.SHELL_UNAVAILABLE,
+        RootCommandFailure.SHELL_DIED,
+        -> ProtectedAccessFailure.ROOT_UNAVAILABLE
+        RootCommandFailure.QUEUE_BUSY -> ProtectedAccessFailure.ROOT_BUSY
+        RootCommandFailure.COMMAND_TIMEOUT,
+        RootCommandFailure.TRANSPORT_TIMEOUT,
+        -> ProtectedAccessFailure.ROOT_TIMEOUT
+        null -> null
+    }
+    if (protectedFailure != null) {
+        throw ProtectedAccessException(protectedFailure, detail)
+    }
+}
+
+internal fun Throwable.hasProtectedAccessFailure(failure: ProtectedAccessFailure): Boolean =
+    generateSequence(this) { it.cause }
+        .filterIsInstance<ProtectedAccessException>()
+        .any { it.failure == failure }
+
+internal fun ServiceLifecycleController.CommandResult.throwIfProtectedAccessFailed() {
+    val protectedFailure = when (rootAccessState) {
+        ServiceLifecycleController.RootAccessState.DENIED,
+        ServiceLifecycleController.RootAccessState.MANAGER_UNAVAILABLE,
+        ServiceLifecycleController.RootAccessState.SHELL_FAILURE,
+        -> ProtectedAccessFailure.ROOT_UNAVAILABLE
+        ServiceLifecycleController.RootAccessState.BUSY -> ProtectedAccessFailure.ROOT_BUSY
+        ServiceLifecycleController.RootAccessState.TIMEOUT -> ProtectedAccessFailure.ROOT_TIMEOUT
+        ServiceLifecycleController.RootAccessState.GRANTED,
+        null,
+        -> null
+    }
+    if (!success && protectedFailure != null) {
+        throw ProtectedAccessException(protectedFailure, error ?: lifecycleError?.diagnosticText())
+    }
+}
+
 internal data class RootCommandResult(
     val out: List<String> = emptyList(),
     val err: List<String> = emptyList(),

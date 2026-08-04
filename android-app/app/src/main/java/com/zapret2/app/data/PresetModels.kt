@@ -51,6 +51,7 @@ data class PresetCommandPreview(
     val arguments: List<String>,
     val tcpPorts: String,
     val udpPorts: String,
+    val capturePolicy: PresetCapturePolicy? = null,
 ) {
     val rendered: String
         get() = buildList {
@@ -61,6 +62,13 @@ data class PresetCommandPreview(
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\"'\"'") + "'"
 }
+
+data class PresetCapturePolicy(
+    val tcpPacketOut: Int,
+    val tcpPacketIn: Int,
+    val udpPacketOut: Int,
+    val udpPacketIn: Int,
+)
 
 sealed interface PresetPreviewOutcome {
     data class Ready(val preview: PresetCommandPreview) : PresetPreviewOutcome

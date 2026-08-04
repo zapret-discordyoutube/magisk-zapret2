@@ -192,15 +192,40 @@ validate_preset_dependency() {
 }
 
 validate_filter_ports() {
-    local list="$1" old_ifs item first last
+    local list="$1" old_ifs item range first last restore_glob=0
     [ -n "$list" ] || return 1
     [ "$list" != '*' ] || return 0
-    case "$list" in *[!0-9,:-]*|,*|*,|*,,*) return 1 ;; esac
+    case "$list" in *[!0-9,*~-]*|,*|*,|*,,*) return 1 ;; esac
+    case "$-" in *f*) ;; *) set -f; restore_glob=1 ;; esac
+    old_ifs="$IFS"; IFS=,; set -- $list; IFS="$old_ifs"
+    [ "$restore_glob" -eq 0 ] || set +f
+    [ "$#" -gt 0 ] || return 1
+    for item in "$@"; do
+        [ "$item" != '*' ] || continue
+        range="${item#\~}"
+        [ -n "$range" ] || return 1
+        case "$range" in *'*'*) return 1 ;; esac
+        case "$range" in
+            *-*) first="${range%%-*}"; last="${range#*-}"; case "$last" in *-*) return 1 ;; esac ;;
+            *) first="$range"; last="$range" ;;
+        esac
+        case "$first:$last" in *[!0-9:]*) return 1 ;; esac
+        [ "$first" -ge 0 ] 2>/dev/null && [ "$last" -le 65535 ] 2>/dev/null &&
+            [ "$first" -le "$last" ] 2>/dev/null || return 1
+    done
+}
+
+# Compiler output uses the firewall's canonical inclusive-range separator.
+# Keep this parser distinct from nfqws2 source syntax so accepting an internal
+# `80:443` record can never make that non-upstream spelling valid in a TXT.
+validate_capture_ports() {
+    local list="$1" old_ifs item first last
+    [ -n "$list" ] || return 1
+    case "$list" in *[!0-9,:]*|,*|*,|*,,*) return 1 ;; esac
     old_ifs="$IFS"; IFS=,; set -- $list; IFS="$old_ifs"
     [ "$#" -gt 0 ] || return 1
     for item in "$@"; do
         case "$item" in
-            *-*) first="${item%%-*}"; last="${item#*-}"; case "$last" in *-*) return 1 ;; esac ;;
             *:*) first="${item%%:*}"; last="${item#*:}"; case "$last" in *:*) return 1 ;; esac ;;
             *) first="$item"; last="$item" ;;
         esac
@@ -211,11 +236,20 @@ validate_filter_ports() {
 }
 
 validate_l7_filter() {
-    local value="$1"
-    case "$value" in
-        stun|discord|stun,discord|discord,stun) return 0 ;;
-        *) return 1 ;;
-    esac
+    local value="$1" old_ifs token
+    case "$value" in ''|,*|*,|*,,*|*[!A-Za-z0-9_,]*) return 1 ;; esac
+    old_ifs="$IFS"; IFS=,; set -- $value; IFS="$old_ifs"
+    [ "$#" -gt 0 ] || return 1
+    for token in "$@"; do
+        # Reviewed against bol-van/zapret2 v1.0.4 protocol_name[].  Keeping the
+        # complete upstream set here prevents the Android wrapper from
+        # inventing a smaller language than the nfqws2 binary it launches.
+        case "$token" in
+            all|unknown|known|http|tls|dtls|quic|wireguard|dht|discord|stun|xmpp|dns|mtproto|bt|utp_bt) ;;
+            *) return 1 ;;
+        esac
+    done
+    return 0
 }
 
 validate_strategy_blob_references() {
@@ -353,53 +387,65 @@ validate_preset_file() {
                 [ "$in_profiles" -eq 0 ] || { preset_validation_fail GLOBAL_OPTION_AFTER_PROFILE "$logical_name"; return 1; }
                 case "${line#*=}" in 0|1) ;; *) preset_validation_fail INVALID_OPTION_VALUE "$logical_name"; return 1 ;; esac
                 ;;
+            --comment|--comment=*)
+                # Upstream deliberately treats this as a no-op marker.  It is
+                # still preserved as one argv element so imported strategies
+                # round-trip exactly and nfqws2 remains the final authority.
+                ;;
             --name=*)
-                [ "$profile_open" -eq 0 ] || { preset_validation_fail PROFILE_DUPLICATE_NAME "$logical_name"; return 1; }
+                [ "$profile_name" -eq 0 ] || { preset_validation_fail PROFILE_DUPLICATE_NAME "$logical_name"; return 1; }
                 [ -n "${line#--name=}" ] || { preset_validation_fail PROFILE_NAME_MISSING "$logical_name"; return 1; }
                 in_profiles=1; profile_open=1; profile_name=1
                 ;;
             --skip)
-                [ "$profile_open" -eq 1 ] || { preset_validation_fail PROFILE_NAME_MISSING "$logical_name"; return 1; }
+                in_profiles=1; profile_open=1
                 [ "$profile_skip" -eq 0 ] || { preset_validation_fail PROFILE_DUPLICATE_SKIP "$logical_name"; return 1; }
                 profile_skip=1
                 ;;
             --filter-tcp=*|--filter-udp=*)
-                [ "$profile_open" -eq 1 ] || { preset_validation_fail PROFILE_NAME_MISSING "$logical_name"; return 1; }
+                in_profiles=1; profile_open=1
                 validate_filter_ports "${line#*=}" || { preset_validation_fail INVALID_FILTER "$logical_name"; return 1; }
                 profile_filter=$((profile_filter + 1))
                 ;;
             --filter-l7=*)
-                [ "$profile_open" -eq 1 ] || { preset_validation_fail PROFILE_NAME_MISSING "$logical_name"; return 1; }
+                in_profiles=1; profile_open=1
                 validate_l7_filter "${line#*=}" || { preset_validation_fail INVALID_FILTER "$logical_name"; return 1; }
                 profile_filter=$((profile_filter + 1))
                 ;;
             --filter-l3=*)
-                [ "$profile_open" -eq 1 ] || { preset_validation_fail PROFILE_NAME_MISSING "$logical_name"; return 1; }
+                in_profiles=1; profile_open=1
                 case "${line#*=}" in ipv4|ipv6|ipv4,ipv6|ipv6,ipv4) ;; *) preset_validation_fail INVALID_FILTER "$logical_name"; return 1 ;; esac
                 ;;
             --hostlist=*|--hostlist-exclude=*|--ipset=*|--ipset-exclude=*)
-                [ "$profile_open" -eq 1 ] || { preset_validation_fail PROFILE_NAME_MISSING "$logical_name"; return 1; }
+                in_profiles=1; profile_open=1
                 option="${line%%=*}"; raw="${line#*=}"
                 validate_preset_dependency list "$raw" || return 1
                 ;;
-            --hostlist-domains=*|--out-range=*|--payload=*)
-                [ "$profile_open" -eq 1 ] && [ -n "${line#*=}" ] || {
+            --hostlist-domains=*|--hostlist-exclude-domains=*|--ipset-ip=*|--ipset-exclude-ip=*|--out-range=*|--in-range=*|--payload=*)
+                in_profiles=1; profile_open=1
+                [ -n "${line#*=}" ] || {
                     preset_validation_fail INVALID_OPTION_VALUE "$logical_name"; return 1;
                 }
                 ;;
             --lua-desync=*)
-                [ "$profile_open" -eq 1 ] && [ -n "${line#*=}" ] || {
+                in_profiles=1; profile_open=1
+                [ -n "${line#*=}" ] || {
                     preset_validation_fail PROFILE_STRATEGY_MISSING "$logical_name"; return 1;
                 }
                 validate_strategy_blob_references "$line" || return 1
                 profile_strategy=$((profile_strategy + 1))
                 ;;
-            --new)
+            --new|--new=*)
                 [ "$profile_open" -eq 1 ] || { preset_validation_fail EMPTY_PROFILE "$logical_name"; return 1; }
-                [ "$profile_name" -eq 1 ] || { preset_validation_fail PROFILE_NAME_MISSING "$logical_name"; return 1; }
                 [ "$profile_filter" -gt 0 ] || { preset_validation_fail PROFILE_FILTER_MISSING "$logical_name"; return 1; }
                 [ "$profile_strategy" -gt 0 ] || { preset_validation_fail PROFILE_STRATEGY_MISSING "$logical_name"; return 1; }
                 profiles=$((profiles + 1)); profile_open=0; profile_name=0; profile_filter=0; profile_strategy=0; profile_skip=0
+                case "$line" in
+                    --new=*)
+                        [ -n "${line#--new=}" ] || { preset_validation_fail PROFILE_NAME_MISSING "$logical_name"; return 1; }
+                        in_profiles=1; profile_open=1; profile_name=1
+                        ;;
+                esac
                 ;;
             --wf-*|*windivert*) preset_validation_fail WINDOWS_OPTION_FORBIDDEN "$logical_name"; return 1 ;;
             *) preset_validation_fail UNKNOWN_OPTION "$logical_name"; return 1 ;;
@@ -407,16 +453,26 @@ validate_preset_file() {
     done < "$preset_file"
 
     [ "$profile_open" -eq 1 ] || { preset_validation_fail TRAILING_NEW "$logical_name"; return 1; }
-    [ "$profile_name" -eq 1 ] || { preset_validation_fail PROFILE_NAME_MISSING "$logical_name"; return 1; }
     [ "$profile_filter" -gt 0 ] || { preset_validation_fail PROFILE_FILTER_MISSING "$logical_name"; return 1; }
     [ "$profile_strategy" -gt 0 ] || { preset_validation_fail PROFILE_STRATEGY_MISSING "$logical_name"; return 1; }
     profiles=$((profiles + 1))
-    [ "$profiles" -gt 0 ] && [ "$lua_count" -gt 0 ] && [ "$blob_count" -gt 0 ] || {
+    # Blobs are optional in upstream: pass-through and strategies with only
+    # inline parameters are valid without one.  Referenced blobs are still
+    # checked individually by validate_strategy_blob_references().
+    [ "$profiles" -gt 0 ] && [ "$lua_count" -gt 0 ] || {
         preset_validation_fail NO_VALID_OPTIONS "$logical_name"; return 1;
     }
-    [ "$seen_capture_tcp_out$seen_capture_tcp_in$seen_capture_udp_out$seen_capture_udp_in" = 1111 ] || {
-        preset_validation_fail CAPTURE_POLICY_MISSING "$logical_name"; return 1;
-    }
+    case "$seen_capture_tcp_out$seen_capture_tcp_in$seen_capture_udp_out$seen_capture_udp_in" in
+        0000)
+            # Legacy/native nfqws2 files do not know about the Android NFQUEUE
+            # packet budget.  Keep the compatibility default explicit here;
+            # the app importer persists the same values into newly owned TXT.
+            capture_tcp_out=20; capture_tcp_in=10
+            capture_udp_out=20; capture_udp_in=10
+            ;;
+        1111) ;;
+        *) preset_validation_fail CAPTURE_POLICY_MISSING "$logical_name"; return 1 ;;
+    esac
     COMPILED_TCP_PKT_OUT="$capture_tcp_out"
     COMPILED_TCP_PKT_IN="$capture_tcp_in"
     COMPILED_UDP_PKT_OUT="$capture_udp_out"
@@ -438,15 +494,28 @@ collect_capture_ports() {
                 udp_count++; udp_first[udp_count]=first+0; udp_last[udp_count]=last+0
             }
         }
-        function add_list(family, list, count, values, i, token, parts, pair) {
+        function add_list(family, list, count, values, i, token, negated, parts, pair, first, last) {
             count=split(list, values, ",")
             for (i=1; i<=count; i++) {
                 token=values[i]
                 if (token == "*") { add_interval(family, 1, 65535); continue }
-                gsub(/-/, ":", token)
-                parts=split(token, pair, ":")
-                if (parts == 1) add_interval(family, pair[1], pair[1])
-                else add_interval(family, pair[1], pair[2])
+                negated=(substr(token, 1, 1) == "~")
+                if (negated) token=substr(token, 2)
+                parts=split(token, pair, "-")
+                first=pair[1]+0
+                last=(parts == 1 ? first : pair[2]+0)
+                # pf_parse() turns the exact 0-0 filter into deny-all even
+                # when it was written with `~`; real TCP/UDP ports are never
+                # zero, so it contributes no kernel capture interval.
+                if (first == 0 && last == 0) {
+                    continue
+                } else if (negated) {
+                    if (first > 1) add_interval(family, 1, first-1)
+                    if (last < 65535) add_interval(family, last+1, 65535)
+                } else {
+                    if (first == 0) first=1
+                    add_interval(family, first, last)
+                }
             }
         }
         function flush_profile() {
@@ -482,7 +551,7 @@ collect_capture_ports() {
         }
         {
             sub(/\r$/, "")
-            if ($0 == "--new") { flush_profile(); next }
+            if ($0 ~ /^--new(=.*)?$/) { flush_profile(); next }
             if ($0 == "--skip") { profile_skip=1; next }
             if ($0 ~ /^--filter-tcp=/) {
                 value=substr($0, length("--filter-tcp=") + 1)
@@ -494,9 +563,11 @@ collect_capture_ports() {
                 profile_udp=profile_udp (profile_udp == "" ? "" : ",") value
                 next
             }
-            if ($0 == "--filter-l7=stun" || $0 == "--filter-l7=discord" ||
-                $0 == "--filter-l7=stun,discord" || $0 == "--filter-l7=discord,stun") {
-                profile_voice=1
+            if ($0 ~ /^--filter-l7=/) {
+                value=substr($0, length("--filter-l7=") + 1)
+                count=split(value, l7_values, ",")
+                for (i=1; i<=count; i++)
+                    if (l7_values[i] == "stun" || l7_values[i] == "discord") profile_voice=1
             }
         }
         END {
@@ -842,9 +913,9 @@ read_compiled_artifact_metadata() {
     is_safe_token "$COMPILED_INSTALL_GENERATION" || return 1
     is_lower_sha256 "$COMPILED_INSTALL_ARCHIVE_SHA256" || return 1
     [ -z "$COMPILED_TCP_PORTS" ] ||
-        validate_filter_ports "$COMPILED_TCP_PORTS" || return 1
+        validate_capture_ports "$COMPILED_TCP_PORTS" || return 1
     [ -z "$COMPILED_UDP_PORTS" ] ||
-        validate_filter_ports "$COMPILED_UDP_PORTS" || return 1
+        validate_capture_ports "$COMPILED_UDP_PORTS" || return 1
     [ -n "$COMPILED_TCP_PORTS$COMPILED_UDP_PORTS" ] || return 1
     validate_capture_packet_count "$COMPILED_TCP_PKT_OUT" || return 1
     validate_capture_packet_count "$COMPILED_TCP_PKT_IN" || return 1

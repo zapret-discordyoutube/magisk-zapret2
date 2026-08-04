@@ -1138,9 +1138,20 @@ object ServiceLifecycleController {
         if (ruleSum != rules.toLong()) return false
         if ((chains == null) != (anchors == null)) return false
         if (chains != null && anchors != null) {
-            if (anchors > chains) return false
-            if (status == "ok" && (chains == 0 || anchors == 0)) return false
-            if (status == "stopped" && (chains != 0 || anchors != 0)) return false
+            when (status) {
+                "ok" -> {
+                    // Every published chain has one built-in hook. Tethering coverage adds one
+                    // FORWARD hook to that same chain, so a healthy generation has exactly one
+                    // or two anchors per chain; no other ratio is authored by the module.
+                    val anchorCount = anchors.toLong()
+                    val chainCount = chains.toLong()
+                    if (chains == 0 ||
+                        (anchorCount != chainCount && anchorCount != chainCount * 2L)
+                    ) return false
+                }
+                "stopped" -> if (chains != 0 || anchors != 0) return false
+                else -> if (anchors > chains) return false
+            }
         }
         if (process && !owned) return false
         if (!process && (pid != null || pidStarttime != null)) return false

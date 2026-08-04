@@ -12,6 +12,8 @@ import com.zapret2.app.data.HostlistImportValidation
 import com.zapret2.app.data.HostlistRepository
 import com.zapret2.app.data.HostlistWriteOutcome
 import com.zapret2.app.data.ModuleMutationCoordinator
+import com.zapret2.app.data.ProtectedAccessFailure
+import com.zapret2.app.data.hasProtectedAccessFailure
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -28,8 +30,16 @@ import javax.inject.Inject
 data class HostlistUiModel(val filename: String, val entryCount: Int, val sizeBytes: Long)
 
 enum class HostlistsLoadError {
+    ROOT_ACCESS_UNAVAILABLE,
     ROOT_COMMAND_FAILED,
 }
+
+internal fun hostlistsLoadError(error: Throwable): HostlistsLoadError =
+    if (error.hasProtectedAccessFailure(ProtectedAccessFailure.ROOT_UNAVAILABLE)) {
+        HostlistsLoadError.ROOT_ACCESS_UNAVAILABLE
+    } else {
+        HostlistsLoadError.ROOT_COMMAND_FAILED
+    }
 
 enum class HostlistImportResult(@param:StringRes val messageRes: Int) {
     IMPORTED(R.string.hostlists_import_success),
@@ -101,15 +111,15 @@ class HostlistsViewModel @Inject constructor(
                                 },
                             )
                         },
-                        onFailure = {
-                            HostlistsLoadResult(error = HostlistsLoadError.ROOT_COMMAND_FAILED)
+                        onFailure = { error ->
+                            HostlistsLoadResult(error = hostlistsLoadError(error))
                         },
                     )
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
-            } catch (_: Exception) {
-                HostlistsLoadResult(error = HostlistsLoadError.ROOT_COMMAND_FAILED)
+            } catch (error: Exception) {
+                HostlistsLoadResult(error = hostlistsLoadError(error))
             }
             if (generation != loadGeneration) return@launch
             _uiState.update { current ->

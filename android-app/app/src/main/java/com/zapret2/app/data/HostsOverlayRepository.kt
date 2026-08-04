@@ -109,6 +109,7 @@ class HostsOverlayRepository @Inject constructor() {
         val probe = RootCommandExecutor.execute(
             "if [ ! -e $quoted ] && [ ! -L $quoted ]; then echo MISSING; else echo PRESENT; fi",
         )
+        probe.throwIfProtectedAccessFailed()
         return when (probe.out.singleOrNull().takeIf { probe.isSuccess }) {
             "MISSING" -> HostsOverlaySnapshot.Missing
             "PRESENT" -> RootFileIo.readSecureRegularText(OVERLAY_HOSTS, MAX_HOSTS_BYTES)

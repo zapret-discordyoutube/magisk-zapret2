@@ -66,6 +66,7 @@ import com.zapret2.app.ui.components.SectionHeader
 import com.zapret2.app.ui.components.SettingRow
 import com.zapret2.app.ui.components.quantityStringResource
 import com.zapret2.app.ui.theme.extendedColors
+import com.zapret2.app.viewmodel.ConfigurationLoadFailure
 import com.zapret2.app.viewmodel.DnsManagerViewModel
 import com.zapret2.app.viewmodel.DnsManagerUiState
 
@@ -152,6 +153,8 @@ fun DnsManagerScreen(
                 state.loadError?.let { error ->
                     ErrorState(
                         message = error.resolve(),
+                        rootUnavailable =
+                            state.loadFailure == ConfigurationLoadFailure.ROOT_ACCESS_UNAVAILABLE,
                         onRetry = { activeViewModel?.loadData() },
                         modifier = Modifier
                             .align(Alignment.Center)
@@ -404,6 +407,7 @@ private fun DnsPresetDialog(
 @Composable
 private fun ErrorState(
     message: String,
+    rootUnavailable: Boolean,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -425,7 +429,13 @@ private fun ErrorState(
             )
             Spacer(Modifier.height(SpacingTokens.Medium))
             Text(
-                stringResource(R.string.dns_load_error),
+                stringResource(
+                    if (rootUnavailable) {
+                        R.string.root_access_unavailable_title
+                    } else {
+                        R.string.dns_load_error
+                    },
+                ),
                 style = MaterialTheme.typography.titleLargeEmphasized,
             )
             Spacer(Modifier.height(SpacingTokens.Compact))

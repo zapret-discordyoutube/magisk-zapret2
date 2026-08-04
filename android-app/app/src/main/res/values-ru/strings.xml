@@ -19,6 +19,8 @@
     <string name="screen_hosts_editor">Редактор хостов</string>
     <string name="screen_dns_manager">Управление DNS</string>
     <string name="screen_hostlist_content">Содержимое списка хостов</string>
+    <string name="root_access_unavailable_title">Root-доступ недоступен</string>
+    <string name="root_access_unavailable_body">Предоставьте Zapret2 root-доступ в менеджере root-прав и повторите попытку.</string>
     <string name="hostlists_load_error_title">Не удалось загрузить списки хостов</string>
     <string name="hostlists_load_error_body">Убедитесь, что модуль установлен и доступен, затем повторите попытку.</string>
     <string name="loading_hostlists">Загрузка списков хостов…</string>
@@ -454,6 +456,7 @@
     <string name="presets_preview_ready_hint">Соберите точную команду из текущего текста редактора. Сохранять изменения перед просмотром не требуется.</string>
     <string name="presets_preview_build">Собрать команду</string>
     <string name="presets_preview_ports">Перехватываемые порты — TCP: %1$s · UDP: %2$s</string>
+    <string name="presets_preview_packet_limits">Лимиты пакетов — TCP исходящие: %1$d, входящие: %2$d · UDP исходящие: %3$d, входящие: %4$d</string>
     <string name="presets_preview_rejected">Команда отклонена: %1$s</string>
     <string name="presets_preview_failed">Не удалось безопасно собрать команду.</string>
     <string name="presets_preview_blocked">Просмотр команды временно заблокирован другой операцией с модулем.</string>
@@ -466,6 +469,14 @@
     <string name="presets_empty_body">Добавьте .txt-файлы в каталог пресетов и обновите данные.</string>
     <string name="presets_mode_file">Файл пресета</string>
     <string name="presets_loading">Загрузка пресетов…</string>
+    <string name="presets_import_action">Импорт TXT-пресета</string>
+    <string name="presets_importing">Чтение и проверка пресета…</string>
+    <string name="presets_import_success">%1$s импортирован</string>
+    <string name="presets_import_already_exists">%1$s уже существует; импорт не перезаписал его.</string>
+    <string name="presets_import_invalid_name">Выберите .txt-файл с прямым именем без зарезервированных символов.</string>
+    <string name="presets_import_too_large">Размер пресета не должен превышать 1 МБ.</string>
+    <string name="presets_import_invalid_encoding">Пресет должен быть корректным текстом UTF-8 без NUL-символов.</string>
+    <string name="presets_import_read_failed">Не удалось прочитать выбранный пресет.</string>
     <string name="presets_load_error_title">Не удалось загрузить пресеты</string>
     <string name="presets_load_failed">Проверьте доступ к модулю и повторите попытку.</string>
     <string name="presets_invalid_file">Недопустимое имя файла пресета</string>

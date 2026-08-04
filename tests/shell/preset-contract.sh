@@ -69,21 +69,28 @@ done
 if command -v python3 >/dev/null 2>&1; then
     import_source="$TMP_ROOT/import-source"
     import_destination="$TMP_ROOT/import-package/presets"
-    mkdir -p "$import_source" "$import_destination"
+    mkdir -p "$import_source"
+    cp -R "$ROOT/zapret2" "$TMP_ROOT/import-package"
     printf '%s\n' \
         '--lua-init=@lua/fakemultisplit.lua' \
         '--lua-init=@lua/fakemultidisorder.lua' \
         '--name=Профиль с пробелом' \
         '--skip' \
+        '--comment=portable marker' \
         '--ipcache-hostname=0' \
+        '--filter-tcp=443' \
+        '--filter-l7=tls' \
+        '--in-range=-d10' \
         '--ipset=lists/russia-youtube-rtmps.txt' \
         '--lua-desync=pass' > "$import_source/Fixture.txt"
     printf '%s\n' \
+        '--lua-init=@lua/fakemultisplit.lua' \
         '--blob=a:0x00' \
         '--name=Blob A' \
         '--filter-tcp=443' \
         '--lua-desync=fake:blob=a' > "$import_source/BlobA.txt"
     printf '%s\n' \
+        '--lua-init=@lua/fakemultisplit.lua' \
         '--blob=b:0x01' \
         '--name=Blob B' \
         '--filter-udp=443' \
@@ -92,6 +99,9 @@ if command -v python3 >/dev/null 2>&1; then
         "$import_source" --destination "$import_destination" >/dev/null
     grep -Fxq -- '--name=Профиль с пробелом' "$import_destination/Fixture.txt" || fail "importer removed profile name"
     grep -Fxq -- '--skip' "$import_destination/Fixture.txt" || fail "importer removed profile skip"
+    grep -Fxq -- '--comment=portable marker' "$import_destination/Fixture.txt" || fail "importer removed nfqws2 comment"
+    grep -Fxq -- '--filter-l7=tls' "$import_destination/Fixture.txt" || fail "importer removed TLS L7 filter"
+    grep -Fxq -- '--in-range=-d10' "$import_destination/Fixture.txt" || fail "importer removed portable inbound range"
     grep -Fxq -- '--lua-init=@lua/fakemultisplit.lua' "$import_destination/Fixture.txt" || fail "importer removed Android fakemultisplit"
     grep -Fxq -- '--lua-init=@lua/fakemultidisorder.lua' "$import_destination/Fixture.txt" || fail "importer removed Android fakemultidisorder"
     if grep -Fq -- '--ipcache' "$import_destination/Fixture.txt"; then fail "importer preserved ipcache"; fi
@@ -101,11 +111,28 @@ if command -v python3 >/dev/null 2>&1; then
         grep -Fxq -- '--blob=a:0x00' "$imported_preset" || fail "importer did not propagate common blob a"
         grep -Fxq -- '--blob=b:0x01' "$imported_preset" || fail "importer did not propagate common blob b"
     done
+    invalid_source="$TMP_ROOT/import-runtime-invalid"
+    mkdir -p "$invalid_source"
+    printf '%s\n' \
+        '--lua-init=@lua/fakemultisplit.lua' \
+        '--blob=x:0x00' \
+        '--name=Rejected by runtime validator' \
+        '--filter-tcp=443' \
+        '--definitely-not-an-nfqws2-option=1' \
+        '--lua-desync=pass' > "$invalid_source/Rejected.txt"
+    if python3 "$ROOT/zapret2/scripts/sync-winws2-presets.py" \
+        "$invalid_source" --destination "$import_destination" >/dev/null 2>&1; then
+        fail "importer published a preset rejected by the runtime validator"
+    fi
+    [ ! -e "$import_destination/Rejected.txt" ] || fail "rejected import reached the published catalog"
+    if find "$import_destination" -maxdepth 1 -name '_import-validation-*' -print -quit | grep -q .; then
+        fail "importer left a validation candidate behind"
+    fi
     conflict_source="$TMP_ROOT/import-conflict"
     conflict_destination="$TMP_ROOT/import-conflict-package/presets"
     mkdir -p "$conflict_source" "$conflict_destination"
-    printf '%s\n' '--blob=same:0x00' '--name=One' '--filter-tcp=443' '--lua-desync=pass' > "$conflict_source/One.txt"
-    printf '%s\n' '--blob=same:0x01' '--name=Two' '--filter-tcp=443' '--lua-desync=pass' > "$conflict_source/Two.txt"
+    printf '%s\n' '--lua-init=@lua/fakemultisplit.lua' '--blob=same:0x00' '--name=One' '--filter-tcp=443' '--lua-desync=pass' > "$conflict_source/One.txt"
+    printf '%s\n' '--lua-init=@lua/fakemultisplit.lua' '--blob=same:0x01' '--name=Two' '--filter-tcp=443' '--lua-desync=pass' > "$conflict_source/Two.txt"
     if python3 "$ROOT/zapret2/scripts/sync-winws2-presets.py" \
         "$conflict_source" --destination "$conflict_destination" >/dev/null 2>&1; then
         fail "importer accepted conflicting common blob definitions"
@@ -173,6 +200,61 @@ validate_candidate() {
 }
 write_valid_candidate
 validate_candidate | grep -Fq 'Z2_PRESET_VALIDATION' || fail "valid candidate rejected"
+
+# These are native nfqws2 options, not editor metadata.  A custom TXT must be
+# accepted without deleting or rewriting them merely because the built-in
+# catalog happened to use a smaller L7 subset.
+write_valid_candidate
+sed -i \
+    -e '/^--lua-init=/i --comment=Imported nfqws2 strategy' \
+    -e '/^--filter-tcp=/a --filter-l7=tls\n--in-range=-d10\n--comment' \
+    "$candidate"
+validate_candidate >/dev/null || fail "nfqws2 comment/TLS strategy was rejected"
+
+# Upstream does not require blob declarations when the selected Lua strategy
+# does not reference one.
+write_valid_candidate
+sed -i '/^--blob=/d' "$candidate"
+validate_candidate >/dev/null || fail "blob-free native nfqws2 strategy was rejected"
+
+# A file copied directly from native/legacy nfqws2 has neither Android packet
+# metadata nor mandatory profile names. Runtime compilation supplies only the
+# wrapper packet-budget default and leaves native arguments unchanged.
+printf '%s\n' \
+    '--lua-init=@lua/core.lua' \
+    '--filter-tcp=443' \
+    '--filter-l7=tls' \
+    '--comment=legacy profile' \
+    '--lua-desync=pass' \
+    '--new=Native UDP' \
+    '--filter-udp=443' \
+    '--lua-desync=pass' > "$candidate"
+validate_candidate >/dev/null || fail "unnamed legacy/native nfqws2 preset was rejected"
+
+write_valid_candidate
+sed -i '/^--filter-tcp=/a --filter-l7=all,unknown,known,http,tls,dtls,quic,wireguard,dht,discord,stun,xmpp,dns,mtproto,bt,utp_bt' \
+    "$candidate"
+validate_candidate >/dev/null || fail "reviewed upstream L7 protocol set was rejected"
+
+write_valid_candidate
+sed -i 's/--filter-tcp=443/--filter-tcp=~443/' "$candidate"
+validate_candidate >/dev/null || fail "upstream negated port filter was rejected"
+capture_output="$({
+    ZAPRET_DIR="$candidate_root"
+    export ZAPRET_DIR
+    . "$ROOT/zapret2/scripts/command-builder.sh"
+    collect_capture_ports "$candidate"
+    printf 'TCP=%s\nUDP=%s\n' "$COMPILED_TCP_PORTS" "$COMPILED_UDP_PORTS"
+} 2>&1)" || fail "negated port capture could not be derived: $capture_output"
+printf '%s\n' "$capture_output" | grep -Fxq 'TCP=1:442,444:65535' ||
+    fail "negated port capture was not the exact complement: $capture_output"
+
+write_valid_candidate
+sed -i '/^--filter-tcp=/a --filter-l7=not-an-upstream-protocol' "$candidate"
+assert_invalid_code INVALID_FILTER validate_candidate
+write_valid_candidate
+sed -i 's/--filter-tcp=443/--filter-tcp=80:443/' "$candidate"
+assert_invalid_code INVALID_FILTER validate_candidate
 
 printf '%s\n' '--ipcache-hostname=0' > "$candidate"
 assert_invalid_code FORBIDDEN_IPCACHE_OPTION validate_candidate

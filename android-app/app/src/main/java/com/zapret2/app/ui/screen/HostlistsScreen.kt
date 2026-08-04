@@ -66,6 +66,7 @@ import com.zapret2.app.ui.theme.extendedColors
 import com.zapret2.app.ui.theme.SizeTokens
 import com.zapret2.app.ui.theme.SpacingTokens
 import com.zapret2.app.ui.theme.ZapretTheme
+import com.zapret2.app.viewmodel.HostlistsLoadError
 import com.zapret2.app.viewmodel.HostlistsViewModel
 import com.zapret2.app.viewmodel.HostlistsUiState
 
@@ -222,7 +223,12 @@ fun HostlistsScreen(
                 item { SectionHeader(stringResource(R.string.hostlists_files_title)) }
 
                 if (state.loadError != null && !state.isLoading) {
-                    item { HostlistsLoadErrorState(onRetry = { activeViewModel?.loadData() }) }
+                    item {
+                        HostlistsLoadErrorState(
+                            error = state.loadError,
+                            onRetry = { activeViewModel?.loadData() },
+                        )
+                    }
                 } else if (state.hostlists.isEmpty() && !state.isLoading) {
                     item { EmptyHostlistState(onRefresh = { activeViewModel?.refresh() }) }
                 }
@@ -276,7 +282,11 @@ fun HostlistsScreen(
 }
 
 @Composable
-private fun HostlistsLoadErrorState(onRetry: () -> Unit) {
+private fun HostlistsLoadErrorState(
+    error: HostlistsLoadError?,
+    onRetry: () -> Unit,
+) {
+    val rootUnavailable = error == HostlistsLoadError.ROOT_ACCESS_UNAVAILABLE
     ContentCard {
         Column(
             modifier = Modifier
@@ -292,12 +302,24 @@ private fun HostlistsLoadErrorState(onRetry: () -> Unit) {
             )
             Spacer(Modifier.height(SpacingTokens.Medium))
             Text(
-            text = stringResource(R.string.hostlists_load_error_title),
+                text = stringResource(
+                    if (rootUnavailable) {
+                        R.string.root_access_unavailable_title
+                    } else {
+                        R.string.hostlists_load_error_title
+                    },
+                ),
                 style = MaterialTheme.typography.titleMediumEmphasized,
                 color = MaterialTheme.colorScheme.onSurface,
             )
             Text(
-                text = stringResource(R.string.hostlists_load_error_body),
+                text = stringResource(
+                    if (rootUnavailable) {
+                        R.string.root_access_unavailable_body
+                    } else {
+                        R.string.hostlists_load_error_body
+                    },
+                ),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -388,7 +410,10 @@ private fun hostlistIconColor(filename: String): Color {
 private fun HostlistsErrorPreview() {
     ZapretTheme(dynamicColor = false) {
         Surface(modifier = Modifier.padding(SpacingTokens.Large)) {
-            HostlistsLoadErrorState(onRetry = {})
+            HostlistsLoadErrorState(
+                error = HostlistsLoadError.ROOT_COMMAND_FAILED,
+                onRetry = {},
+            )
         }
     }
 }

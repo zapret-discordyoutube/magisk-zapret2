@@ -173,6 +173,20 @@ fun PresetEditorDialog(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
+                            commandPreview.capturePolicy?.let { policy ->
+                                Spacer(Modifier.height(SpacingTokens.ExtraSmall))
+                                Text(
+                                    stringResource(
+                                        R.string.presets_preview_packet_limits,
+                                        policy.tcpPacketOut,
+                                        policy.tcpPacketIn,
+                                        policy.udpPacketOut,
+                                        policy.udpPacketIn,
+                                    ),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                             Spacer(Modifier.height(SpacingTokens.Small))
                             OutlinedTextField(
                                 value = commandPreview.rendered,

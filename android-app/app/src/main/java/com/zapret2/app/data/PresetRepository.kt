@@ -87,6 +87,7 @@ internal object PresetMachineProtocol {
     private const val STAGE_APPLY_REQUEST = "APPLY_REQUEST"
     private const val STAGE_SAVE_REQUEST = "APPLY_SAVE_REQUEST"
     private const val UNSAFE_PRESET_NAME = "UNSAFE_PRESET_NAME"
+    private val PACKET_LIMIT = Regex("[1-9][0-9]{0,8}")
 
     private val applyOwnFields = setOf(
         APPLY_SCHEMA,
@@ -354,8 +355,25 @@ internal object PresetMachineProtocol {
             }
             return PresetPreviewOutcome.Rejected(PresetIssue.fromWireCode(first[2]))
         }
-        if (first.size != 5 || first[1] != "1" || first[2] != expectedLogicalName) {
+        if (first.getOrNull(2) != expectedLogicalName) {
             return PresetPreviewOutcome.Failed
+        }
+        val capturePolicy = when (first.getOrNull(1)) {
+            "1" -> if (first.size == 5) null else return PresetPreviewOutcome.Failed
+            "2" -> {
+                if (first.size != 9) return PresetPreviewOutcome.Failed
+                PresetCapturePolicy(
+                    tcpPacketOut = first[5].parsePacketLimit("TCP_OUT=")
+                        ?: return PresetPreviewOutcome.Failed,
+                    tcpPacketIn = first[6].parsePacketLimit("TCP_IN=")
+                        ?: return PresetPreviewOutcome.Failed,
+                    udpPacketOut = first[7].parsePacketLimit("UDP_OUT=")
+                        ?: return PresetPreviewOutcome.Failed,
+                    udpPacketIn = first[8].parsePacketLimit("UDP_IN=")
+                        ?: return PresetPreviewOutcome.Failed,
+                )
+            }
+            else -> return PresetPreviewOutcome.Failed
         }
         val tcpPorts = first[3].takeIf { it.startsWith("TCP=") }?.removePrefix("TCP=")
             ?: return PresetPreviewOutcome.Failed
@@ -383,8 +401,14 @@ internal object PresetMachineProtocol {
         }
         if (count != arguments.size || count <= 3) return PresetPreviewOutcome.Failed
         return PresetPreviewOutcome.Ready(
-            PresetCommandPreview(executable, arguments, tcpPorts, udpPorts),
+            PresetCommandPreview(executable, arguments, tcpPorts, udpPorts, capturePolicy),
         )
+    }
+
+    private fun String.parsePacketLimit(prefix: String): Int? {
+        val value = takeIf { it.startsWith(prefix) }?.removePrefix(prefix) ?: return null
+        if (!PACKET_LIMIT.matches(value)) return null
+        return value.toIntOrNull()
     }
 
     private fun String.containsControl(): Boolean = any { it.code < 0x20 || it.code == 0x7f }
@@ -456,6 +480,7 @@ internal class RootPresetRunner @Inject constructor() : PresetRunner {
             "/system/bin/sh ${RootFileIo.shellQuote(commandBuilder)} --list-presets-machine " +
                 RootFileIo.shellQuote(zapretDir),
         )
+        result.throwIfProtectedAccessFailed()
         return result.stdout.takeIf { result.success }
     }
 

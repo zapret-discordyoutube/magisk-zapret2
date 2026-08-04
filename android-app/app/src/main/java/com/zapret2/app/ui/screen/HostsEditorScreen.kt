@@ -59,6 +59,7 @@ import com.zapret2.app.ui.components.quantityStringResource
 import com.zapret2.app.ui.theme.MonospaceStyle
 import com.zapret2.app.ui.theme.extendedColors
 import com.zapret2.app.viewmodel.HostsEditorOperation
+import com.zapret2.app.viewmodel.HostsEditorResult
 import com.zapret2.app.viewmodel.HostsEditorViewModel
 import com.zapret2.app.viewmodel.HostsEditorUiState
 
@@ -220,7 +221,13 @@ fun HostsEditorScreen(
                     Spacer(Modifier.height(SpacingTokens.Large))
                     if (state.baselineLoadAttempted && !state.hasAuthoritativeBaseline && !state.isLoading) {
                         Text(
-                            text = stringResource(R.string.hosts_read_failed),
+                            text = stringResource(
+                                if (state.result == HostsEditorResult.ROOT_ACCESS_UNAVAILABLE) {
+                                    R.string.root_access_unavailable_body
+                                } else {
+                                    R.string.hosts_read_failed
+                                },
+                            ),
                             color = MaterialTheme.colorScheme.error,
                             style = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier

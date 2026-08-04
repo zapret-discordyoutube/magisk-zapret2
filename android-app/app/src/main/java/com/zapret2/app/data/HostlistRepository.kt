@@ -71,6 +71,7 @@ class HostlistRepository @Inject constructor() {
                 echo PRESENT
             """.trimIndent(),
         )
+        result.throwIfProtectedAccessFailed()
         return result.out.singleOrNull()?.takeIf { result.isSuccess }?.let {
             runCatching { HostlistTargetState.valueOf(it) }.getOrNull()
         } ?: HostlistTargetState.UNSAFE
@@ -125,6 +126,7 @@ class HostlistRepository @Inject constructor() {
                 ' - "${'$'}@" || exit 1
             """.trimIndent(),
         )
+        result.throwIfProtectedAccessFailed()
         check(result.isSuccess) { "Unable to enumerate protected hostlists" }
         Result.success(
             result.out.map { line -> requireNotNull(parseHostlistRecord(line)) }
@@ -150,6 +152,7 @@ class HostlistRepository @Inject constructor() {
                 ' $quoted 2>/dev/null
             """.trimIndent(),
         )
+        result.throwIfProtectedAccessFailed()
         return result.out.singleOrNull()?.trim()?.toIntOrNull()?.takeIf { result.isSuccess && it >= 0 }
     }
 
@@ -170,6 +173,7 @@ class HostlistRepository @Inject constructor() {
                 ' $quoted 2>/dev/null
             """.trimIndent(),
         )
+        result.throwIfProtectedAccessFailed()
         return result.out.takeIf { result.isSuccess }?.normalizeDataLines()
     }
 
@@ -205,6 +209,7 @@ class HostlistRepository @Inject constructor() {
                 ' $quotedPath 2>/dev/null
             """.trimIndent(),
         )
+        result.throwIfProtectedAccessFailed()
         if (!result.isSuccess || result.out.isEmpty()) return null
         val countLine = result.out.first()
         val count = countLine.removePrefix(COUNT_PREFIX).takeIf { countLine.startsWith(COUNT_PREFIX) }
