@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 readonly DEFAULT_SIGNING_DIR="/home/codex-pve/.config/zapret2-signing"
-readonly DEFAULT_SDK_DIR="/home/codex-pve/Android/Sdk"
+readonly DEFAULT_SDK_DIR="/opt/android-sdk"
 readonly RELEASE_REPO="youtubediscord/magisk-zapret2"
 
 usage() {
