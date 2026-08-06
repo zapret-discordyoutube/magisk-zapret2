@@ -60,6 +60,14 @@ case "$*" in
 esac
 EOF
 cp "$MOCK/iptables" "$MOCK/ip6tables"
+# The rollback contract requires both halves of the Android firewall backend:
+# the query frontend and its atomic restore command.  This fixture exercises
+# an already-empty ruleset, so the restore mocks must be discoverable even
+# though a correct cleanup never executes them.  Keeping them inside PATH
+# makes the test independent of whether the Linux CI image happens to ship
+# host iptables tools.
+cp "$MOCK/iptables" "$MOCK/iptables-restore"
+cp "$MOCK/iptables" "$MOCK/ip6tables-restore"
 cat > "$MOCK/sync" <<'EOF'
 #!/bin/sh
 [ "${Z2_MOCK_SYNC_FAIL:-0}" != 1 ] || exit 1
@@ -74,7 +82,8 @@ if [ -n "${Z2_MOCK_SYNC_COUNT:-}" ]; then
 fi
 exit 0
 EOF
-chmod 0755 "$MOCK/iptables" "$MOCK/ip6tables"
+chmod 0755 "$MOCK/iptables" "$MOCK/ip6tables" \
+    "$MOCK/iptables-restore" "$MOCK/ip6tables-restore"
 chmod 0755 "$MOCK/sync"
 
 before_list=$(sha256sum "$MOD/zapret2/lists/user.txt" | awk '{print $1}')
