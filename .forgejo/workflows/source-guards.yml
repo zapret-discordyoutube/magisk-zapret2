@@ -1,0 +1,29 @@
+name: Magisk source guards
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  guards:
+    runs-on: android
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: https://data.forgejo.org/actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Validate repository policy and shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          bash tests/release/source-policy.sh
+          bash -n upstream/fetch-release.sh
+          bash tests/release/release-channel.sh
+          while IFS= read -r -d '' script; do
+            bash -n "$script"
+          done < <(find . -type f -name '*.sh' -print0)
