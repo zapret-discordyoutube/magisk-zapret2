@@ -5,7 +5,8 @@ umask 077
 
 readonly DEFAULT_SIGNING_DIR="/home/codex-pve/.config/zapret2-signing"
 readonly DEFAULT_SDK_DIR="/opt/android-sdk"
-readonly RELEASE_REPO="youtubediscord/magisk-zapret2"
+readonly RELEASE_REPO="zapretdiscordyoutube/magisk-zapret2"
+readonly RELEASE_WEB_ROOT="https://git.zapret.moe/$RELEASE_REPO"
 
 usage() {
     cat >&2 <<'USAGE'
@@ -148,7 +149,7 @@ readonly BUILD_VERSION BUILD_VERSION_TAG
 SIGNING_DIR="$(cd -- "$signing_arg" && pwd -P)"
 readonly SIGNING_DIR
 [[ "$(stat -c '%a' "$SIGNING_DIR")" == "700" ]] || fail "signing directory mode must be 700"
-readonly SECRETS_JSON="$SIGNING_DIR/github-secrets.json"
+readonly SECRETS_JSON="$SIGNING_DIR/signing-secrets.json"
 readonly KEYSTORE_FILE="$SIGNING_DIR/keystore.jks"
 readonly CERT_DIGEST_FILE="$SIGNING_DIR/apk-signing-cert-sha256.txt"
 for private_file in "$SECRETS_JSON" "$KEYSTORE_FILE" \
@@ -175,7 +176,7 @@ readonly EXPECTED_CERT
 [[ "$EXPECTED_CERT" =~ ^[0-9A-F]{64}$ ]] || fail "invalid expected signer digest"
 FILE_CERT="$(normalize_digest < "$CERT_DIGEST_FILE")"
 readonly FILE_CERT
-[[ "$FILE_CERT" == "$EXPECTED_CERT" ]] || fail "signer digest file disagrees with github-secrets.json"
+[[ "$FILE_CERT" == "$EXPECTED_CERT" ]] || fail "signer digest file disagrees with signing-secrets.json"
 KEYSTORE_CERT="$(
     keytool -exportcert -keystore "$KEYSTORE_FILE" -storepass "$KEYSTORE_PASSWORD" \
         -alias "$KEY_ALIAS" 2>/dev/null | sha256sum | awk '{ print toupper($1) }'
@@ -434,8 +435,8 @@ if [[ "$channel_arg" == stable ]]; then
     jq -n \
         --arg version "$VERSION_TAG" \
         --argjson version_code "$VERSION_CODE" \
-        --arg zip_url "https://github.com/$RELEASE_REPO/releases/download/$VERSION_TAG/$ZIP_NAME" \
-        --arg changelog "https://github.com/$RELEASE_REPO/releases/tag/$VERSION_TAG" \
+        --arg zip_url "$RELEASE_WEB_ROOT/releases/download/$VERSION_TAG/$ZIP_NAME" \
+        --arg changelog "$RELEASE_WEB_ROOT/releases/tag/$VERSION_TAG" \
         '{
             version: $version,
             versionCode: $version_code,
@@ -446,8 +447,8 @@ if [[ "$channel_arg" == stable ]]; then
     jq -e \
         --arg version "$VERSION_TAG" \
         --argjson version_code "$VERSION_CODE" \
-        --arg zip_url "https://github.com/$RELEASE_REPO/releases/download/$VERSION_TAG/$ZIP_NAME" \
-        --arg changelog "https://github.com/$RELEASE_REPO/releases/tag/$VERSION_TAG" \
+        --arg zip_url "$RELEASE_WEB_ROOT/releases/download/$VERSION_TAG/$ZIP_NAME" \
+        --arg changelog "$RELEASE_WEB_ROOT/releases/tag/$VERSION_TAG" \
         'keys == ["changelog", "version", "versionCode", "zipUrl"] and
          .version == $version and
          .versionCode == $version_code and

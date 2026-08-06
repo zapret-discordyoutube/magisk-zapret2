@@ -49,7 +49,7 @@ class DependencyTrustPolicyTest {
 
     @Test
     fun ciEnforcesStrictVerificationOnEveryAndroidGradleInvocation() {
-        val workflow = projectFile("../../.github/workflows/build.yml").readLines()
+        val workflow = projectFile("../../.forgejo/workflows/build.yml").readLines()
         val gradleInvocations = workflow.filter { "./gradlew" in it }
         assertTrue("Expected Android Gradle invocations in CI", gradleInvocations.isNotEmpty())
         assertTrue(

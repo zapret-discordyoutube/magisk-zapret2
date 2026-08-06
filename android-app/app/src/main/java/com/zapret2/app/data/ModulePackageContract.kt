@@ -8,7 +8,7 @@ import java.util.zip.ZipFile
 internal object ModulePackageContract {
     private const val MODULE_ID = RootModuleContract.MODULE_ID
     internal const val MODULE_UPDATE_JSON =
-        "https://github.com/youtubediscord/magisk-zapret2/releases/latest/download/update.json"
+        "https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/latest/download/update.json"
     internal const val MAX_MODULE_PROP_BYTES = 4 * 1024
     internal const val MAX_RUNTIME_MANIFEST_BYTES = 256 * 1024
     private const val RUNTIME_MANIFEST_SCHEMA = "schema|1|zapret2-runtime"

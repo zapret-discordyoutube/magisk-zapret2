@@ -1,8 +1,8 @@
 # Локальный стабильный релиз
 
-Стабильный production-канал не зависит от завершения GitHub Actions. Actions после
+Стабильный production-канал не зависит от завершения Forgejo Actions. Actions после
 push в `main` в фоне повторяет тесты и сборку и сохраняет run artifacts, но не имеет
-права создавать теги или GitHub Releases.
+права создавать теги или Forgejo Releases.
 
 ## Порядок выпуска
 
@@ -51,5 +51,5 @@ snapshot, не меняя checkout. Она проходит те же локал
 production-подпись, чтобы APK можно было установить поверх stable. Артефакты имеют
 версию `v<VERSION>-dev.<timestamp>.<sha>` и сохраняются в `.artifacts/dev-builds/`.
 
-Dev-контур не создаёт `update.json`, Git tag, GitHub Release или `Latest` и не
+Dev-контур не создаёт `update.json`, Git tag, Forgejo Release или `Latest` и не
 публикуется через stable publisher.

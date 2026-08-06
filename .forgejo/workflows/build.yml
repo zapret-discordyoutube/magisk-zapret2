@@ -12,12 +12,12 @@ permissions:
 jobs:
   shell-tests:
     name: Shell integration tests
-    runs-on: ubuntu-latest
+    runs-on: android
     needs: fetch-upstream
 
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: https://data.forgejo.org/actions/checkout@v6
 
       - name: Validate owned source hygiene
         run: |
@@ -31,7 +31,7 @@ jobs:
           bash tests/release/source-policy.sh
 
       - name: Download verified upstream payload
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: upstream-zapret2-payload
           path: upstream-payload
@@ -56,11 +56,11 @@ jobs:
           bash -n upstream/fetch-release.sh
           bash tests/release/release-channel.sh
           chmod +x tests/shell/run.sh
-          sudo sh tests/shell/run.sh
+          sh tests/shell/run.sh
 
   prepare-version:
     name: Prepare Version
-    runs-on: ubuntu-latest
+    runs-on: android
     outputs:
       version: ${{ steps.version.outputs.version }}
       version_code: ${{ steps.version.outputs.version_code }}
@@ -68,7 +68,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: https://data.forgejo.org/actions/checkout@v6
 
       - name: Read canonical release version
         id: version
@@ -85,22 +85,12 @@ jobs:
 
   build-apk:
     name: Build Android APK
-    runs-on: ubuntu-latest
+    runs-on: android
     needs: [prepare-version, shell-tests]
 
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-          cache: 'gradle'
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+        uses: https://data.forgejo.org/actions/checkout@v6
 
       - name: Run Android unit tests
         run: |
@@ -209,11 +199,11 @@ jobs:
 
       - name: Remove private signing material
         if: always()
-        run: rm -f keystore.jks
+        run: find . -maxdepth 1 -type f -name keystore.jks -delete
         working-directory: android-app
 
       - name: Upload APK
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: zapret2-apk
           path: |
@@ -222,7 +212,7 @@ jobs:
 
   fetch-upstream:
     name: Fetch latest upstream zapret2 release
-    runs-on: ubuntu-latest
+    runs-on: android
     outputs:
       sha: ${{ steps.upstream.outputs.sha }}
       tag: ${{ steps.upstream.outputs.tag }}
@@ -230,7 +220,7 @@ jobs:
 
     steps:
       - name: Checkout module
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: https://data.forgejo.org/actions/checkout@v6
 
       - name: Fetch and verify upstream payload
         id: upstream
@@ -240,7 +230,7 @@ jobs:
           upstream/fetch-release.sh "$GITHUB_WORKSPACE/upstream-payload"
 
       - name: Upload verified upstream payload
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: upstream-zapret2-payload
           path: upstream-payload
@@ -249,21 +239,21 @@ jobs:
 
   package-module:
     name: Package Magisk Module
-    runs-on: ubuntu-latest
+    runs-on: android
     needs: [prepare-version, fetch-upstream, build-apk]
 
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: https://data.forgejo.org/actions/checkout@v6
 
       - name: Download verified upstream payload
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: upstream-zapret2-payload
           path: upstream-payload
 
       - name: Download APK
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: zapret2-apk
           path: apk-artifact
@@ -313,7 +303,7 @@ jobs:
           # Set module version from CI metadata
           sed -i "s/^version=.*/version=v${VERSION}/" module.prop
           sed -i "s/^versionCode=.*/versionCode=${VERSION_CODE}/" module.prop
-          sed -i "s|^updateJson=.*|updateJson=https://github.com/youtubediscord/magisk-zapret2/releases/latest/download/update.json|" module.prop
+          sed -i "s|^updateJson=.*|updateJson=https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/latest/download/update.json|" module.prop
 
           # Validate custom Lua files against upstream API
           echo "Validating custom Lua compatibility with upstream..."
@@ -373,11 +363,11 @@ jobs:
           # developer-owned Actions checkout.
           PACKAGE_AUDIT_ROOT="$(mktemp -d)"
           package_contract_assemble_package "$PWD" "$PACKAGE_AUDIT_ROOT"
-          sudo chown -R 0:0 "$PACKAGE_AUDIT_ROOT"
-          sudo find "$PACKAGE_AUDIT_ROOT" -type d -exec chmod 0755 {} +
+          chown -R 0:0 "$PACKAGE_AUDIT_ROOT"
+          find "$PACKAGE_AUDIT_ROOT" -type d -exec chmod 0755 {} +
           package_contract_validate_all "$PACKAGE_AUDIT_ROOT" package
           package_contract_validate_modes "$PACKAGE_AUDIT_ROOT" package
-          sudo rm -rf "$PACKAGE_AUDIT_ROOT"
+          find "$PACKAGE_AUDIT_ROOT" -depth -delete
 
       - name: Create ZIP
         env:
@@ -409,12 +399,12 @@ jobs:
           # Update update.json with current version and direct asset URL
           sed -i "s/\"version\": \"v[^\"]*\"/\"version\": \"${VERSION_TAG}\"/" update.json
           sed -i "s/\"versionCode\": [0-9]*/\"versionCode\": ${VERSION_CODE}/" update.json
-          sed -i "s|\"zipUrl\": \"[^\"]*\"|\"zipUrl\": \"https://github.com/youtubediscord/magisk-zapret2/releases/download/${VERSION_TAG}/${ZIP_NAME}\"|" update.json
+          sed -i "s|\"zipUrl\": \"[^\"]*\"|\"zipUrl\": \"https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/download/${VERSION_TAG}/${ZIP_NAME}\"|" update.json
 
           . ./zapret2/scripts/package-contract.sh
           PACKAGE_ASSEMBLY_ROOT="$(mktemp -d)"
           package_contract_step package_contract_assemble_package "$PWD" "$PACKAGE_ASSEMBLY_ROOT"
-          rm -f "$ZIP_NAME"
+          find . -maxdepth 1 -type f -name "$ZIP_NAME" -delete
           (
             cd "$PACKAGE_ASSEMBLY_ROOT"
             # Whole assembly root: it already contains exactly the manifest.
@@ -428,8 +418,8 @@ jobs:
           PACKAGE_VALIDATE_ROOT="$(mktemp -d)"
           package_contract_step package_contract_validate_zip_names "$PWD" "$ZIP_LIST"
           unzip -q "$ZIP_NAME" -d "$PACKAGE_VALIDATE_ROOT"
-          sudo chown -R 0:0 "$PACKAGE_VALIDATE_ROOT"
-          sudo find "$PACKAGE_VALIDATE_ROOT" -type d -exec chmod 0755 {} +
+          chown -R 0:0 "$PACKAGE_VALIDATE_ROOT"
+          find "$PACKAGE_VALIDATE_ROOT" -type d -exec chmod 0755 {} +
           package_contract_step package_contract_validate_all "$PACKAGE_VALIDATE_ROOT" package
           package_contract_step package_contract_validate_exact_tree "$PACKAGE_VALIDATE_ROOT" package
           package_contract_step package_contract_validate_modes "$PACKAGE_VALIDATE_ROOT" package
@@ -455,9 +445,9 @@ jobs:
           verify_provenance_entry 'zapret2/upstream-zapret2.commit' "$UPSTREAM_ZAPRET2_SHA"
           verify_provenance_entry 'zapret2/upstream-zapret2.release' "$UPSTREAM_ZAPRET2_TAG"
           verify_provenance_entry 'zapret2/upstream-zapret2.archive.sha256' "$UPSTREAM_ZAPRET2_ARCHIVE_SHA256"
-          rm -f "$ZIP_LIST" "$WRAPPER_EXPECTED" "$WRAPPER_ACTUAL"
-          rm -rf "$PACKAGE_ASSEMBLY_ROOT"
-          sudo rm -rf "$PACKAGE_VALIDATE_ROOT"
+          find "$ZIP_LIST" "$WRAPPER_EXPECTED" "$WRAPPER_ACTUAL" -maxdepth 0 -type f -delete
+          find "$PACKAGE_ASSEMBLY_ROOT" -depth -delete
+          find "$PACKAGE_VALIDATE_ROOT" -depth -delete
 
           sha256sum "$ZIP_NAME" > "$ZIP_NAME.sha256"
           sha256sum -c "$ZIP_NAME.sha256"
@@ -472,7 +462,7 @@ jobs:
           sha256sum -c zapret2-control-${VERSION_TAG}.apk.sha256
 
       - name: Upload module
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: zapret2-magisk-module
           path: |
@@ -480,7 +470,7 @@ jobs:
             zapret2-magisk-*.zip.sha256
 
       - name: Upload APK artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: zapret2-control-apk
           path: |
@@ -488,7 +478,7 @@ jobs:
             zapret2-control-*.apk.sha256
 
       - name: Upload release metadata
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: zapret2-release-metadata
           path: update.json

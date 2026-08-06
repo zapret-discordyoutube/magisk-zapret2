@@ -1,14 +1,14 @@
 # Zapret2 для Android
 
 <p align="center">
-  <a href="https://github.com/youtubediscord/magisk-zapret2/releases/latest"><img alt="Последний релиз" src="https://img.shields.io/github/v/release/youtubediscord/magisk-zapret2?style=for-the-badge&logo=github&color=0969DA&label=%D0%A0%D0%B5%D0%BB%D0%B8%D0%B7"></a>
-  <a href="https://github.com/youtubediscord/magisk-zapret2/releases"><img alt="Всего скачиваний" src="https://img.shields.io/github/downloads/youtubediscord/magisk-zapret2/total?style=for-the-badge&logo=github&color=2EA043&label=%D0%A1%D0%BA%D0%B0%D1%87%D0%B8%D0%B2%D0%B0%D0%BD%D0%B8%D0%B9"></a>
-  <a href="https://github.com/youtubediscord/magisk-zapret2/stargazers"><img alt="Звёзды на GitHub" src="https://img.shields.io/github/stars/youtubediscord/magisk-zapret2?style=for-the-badge&logo=github&color=FFD700&label=%D0%97%D0%B2%D1%91%D0%B7%D0%B4%D1%8B"></a>
-  <a href="https://github.com/youtubediscord/magisk-zapret2/commits/main"><img alt="Последний коммит" src="https://img.shields.io/github/last-commit/youtubediscord/magisk-zapret2?style=for-the-badge&logo=github&color=8250DF&label=%D0%9E%D0%B1%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%BE"></a>
+  <a href="https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/latest"><img alt="Последний релиз" src="https://img.shields.io/badge/Forgejo-%D0%A0%D0%B5%D0%BB%D0%B8%D0%B7%D1%8B-609926?style=for-the-badge&logo=forgejo&logoColor=white"></a>
+  <a href="https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2"><img alt="Исходный код" src="https://img.shields.io/badge/Forgejo-%D0%98%D1%81%D1%85%D0%BE%D0%B4%D0%BD%D1%8B%D0%B9_%D0%BA%D0%BE%D0%B4-609926?style=for-the-badge&logo=forgejo&logoColor=white"></a>
+  <a href="https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/stars"><img alt="Звёзды в Forgejo" src="https://img.shields.io/badge/Forgejo-%D0%97%D0%B2%D1%91%D0%B7%D0%B4%D1%8B-FFD700?style=for-the-badge&logo=forgejo&logoColor=black"></a>
+  <a href="https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/commits/branch/main"><img alt="История изменений" src="https://img.shields.io/badge/Forgejo-%D0%9A%D0%BE%D0%BC%D0%BC%D0%B8%D1%82%D1%8B-8250DF?style=for-the-badge&logo=forgejo&logoColor=white"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/youtubediscord/magisk-zapret2/actions/workflows/build.yml"><img alt="Сборка" src="https://img.shields.io/github/actions/workflow/status/youtubediscord/magisk-zapret2/build.yml?branch=main&style=for-the-badge&logo=githubactions&logoColor=white&label=%D0%A1%D0%B1%D0%BE%D1%80%D0%BA%D0%B0"></a>
+  <a href="https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/actions"><img alt="Сборка" src="https://img.shields.io/badge/Forgejo_Actions-%D0%A1%D0%B1%D0%BE%D1%80%D0%BA%D0%B0-609926?style=for-the-badge&logo=forgejo&logoColor=white"></a>
   <a href="LICENSE.md"><img alt="Лицензия" src="https://img.shields.io/badge/Лицензия-AGPL--3.0--only-BC4C00?style=for-the-badge&logo=gnu&logoColor=white"></a>
   <a href="https://github.com/bol-van/zapret2"><img alt="Upstream" src="https://img.shields.io/badge/Upstream-bol--van%2Fzapret2-24292F?style=for-the-badge&logo=github&logoColor=white"></a>
 </p>
@@ -24,7 +24,7 @@ Root-модуль для Magisk, KernelSU и APatch, предназначенн�
 [`nfqws2`](https://github.com/bol-van/zapret2) с Lua-стратегиями, а приложение
 **Zapret2 Control** позволяет управлять модулем без терминала.
 
-<img width="1916" height="821" alt="Интерфейс Zapret2 Control" src="https://github.com/user-attachments/assets/d0852896-8aca-4d1e-ad1b-8f269003c5c6" />
+<img width="1916" height="821" alt="Интерфейс Zapret2 Control" src="assets/zapret2-control-ui.png" />
 
 > [!IMPORTANT]
 > Zapret2 — не VPN. Он не меняет ваш IP-адрес, не скрывает трафик от провайдера и
@@ -51,7 +51,7 @@ Root-модуль для Magisk, KernelSU и APatch, предназначенн�
 ### 1. Скачайте файлы
 
 Откройте страницу
-**[последнего релиза](https://github.com/youtubediscord/magisk-zapret2/releases/latest)**
+**[последнего релиза](https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/latest)**
 и скачайте:
 
 - `zapret2-magisk-v*.zip` — универсальный root-модуль (историческое имя файла);

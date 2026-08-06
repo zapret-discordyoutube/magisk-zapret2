@@ -9,7 +9,7 @@ class ReleaseCiPolicyTest {
 
     @Test
     fun sourceWarningsAndWhitespaceFailClosed() {
-        val workflow = repositoryFile(".github/workflows/build.yml").readText()
+        val workflow = repositoryFile(".forgejo/workflows/build.yml").readText()
         val appBuild = repositoryFile("android-app/app/build.gradle.kts").readText()
         val attributes = repositoryFile(".gitattributes").readLines().toSet()
 
@@ -37,7 +37,7 @@ class ReleaseCiPolicyTest {
 
     @Test
     fun committedSecretsAndReleaseDebugConfigurationFailClosed() {
-        val workflow = repositoryFile(".github/workflows/build.yml").readText()
+        val workflow = repositoryFile(".forgejo/workflows/build.yml").readText()
         val appBuild = repositoryFile("android-app/app/build.gradle.kts").readText()
         val manifest = repositoryFile("android-app/app/src/main/AndroidManifest.xml").readText()
         val proguardRules = repositoryFile("android-app/app/proguard-rules.pro").readText()
@@ -64,7 +64,7 @@ class ReleaseCiPolicyTest {
 
     @Test
     fun apkCertificateParser_isIndependentOfApksignerSchemeLabels() {
-        val workflow = repositoryFile(".github/workflows/build.yml").readText()
+        val workflow = repositoryFile(".forgejo/workflows/build.yml").readText()
         val certificateCheck = workflow
             .substringAfter("ACTUAL_CERT=\"\$(")
             .substringBefore("EXPECTED_CERT=\"")

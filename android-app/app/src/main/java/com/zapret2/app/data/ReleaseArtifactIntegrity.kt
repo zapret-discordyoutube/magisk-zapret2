@@ -7,16 +7,27 @@ import java.util.Locale
 internal object ReleaseArtifactIntegrity {
     private val SHA256 = Regex("^[0-9a-fA-F]{64}$")
 
-    /** Release assets are trusted only with GitHub's exact sha256 digest metadata. */
-    fun parseSha256Digest(advertised: String?): Result<String> {
-        if (advertised == null) {
-            return Result.failure(IllegalArgumentException("Release artifact SHA-256 digest is missing"))
+    fun isSha256(value: String): Boolean = SHA256.matches(value)
+
+    /** Parse the exact one-file format produced by `sha256sum file > file.sha256`. */
+    fun parseSha256Sidecar(contents: String, expectedFileName: String): Result<String> {
+        if (!RootFileIo.isSimpleFileName(expectedFileName)) {
+            return Result.failure(IllegalArgumentException("Release artifact name is invalid"))
         }
-        val parts = advertised.trim().split(':', limit = 2)
-        if (parts.size != 2 || parts[0] != "sha256" || !SHA256.matches(parts[1])) {
-            return Result.failure(IllegalArgumentException("Malformed release artifact digest"))
+        val normalized = contents.removeSuffix("\n").removeSuffix("\r")
+        if ('\n' in normalized || '\r' in normalized || normalized.any(Char::isISOControl)) {
+            return Result.failure(IllegalArgumentException("Checksum sidecar has multiple or invalid lines"))
         }
-        return Result.success(parts[1].lowercase(Locale.ROOT))
+        val separator = normalized.indexOfFirst { it == ' ' || it == '\t' }
+        if (separator != 64) {
+            return Result.failure(IllegalArgumentException("Checksum sidecar digest is malformed"))
+        }
+        val digest = normalized.substring(0, separator)
+        val advertisedName = normalized.substring(separator).trimStart(' ', '\t').removePrefix("*")
+        if (!SHA256.matches(digest) || advertisedName != expectedFileName) {
+            return Result.failure(IllegalArgumentException("Checksum sidecar does not match the release artifact"))
+        }
+        return Result.success(digest.lowercase(Locale.ROOT))
     }
 
     fun sha256(file: File): String {

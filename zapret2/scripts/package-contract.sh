@@ -11,7 +11,7 @@ PACKAGE_CONTRACT_OWNER_PROTOCOL=7
 PACKAGE_CONTRACT_MAX_MANIFEST_BYTES=262144
 PACKAGE_CONTRACT_MAX_MODULE_PROP_BYTES=4096
 PACKAGE_CONTRACT_MAX_SHELL_EXEC_BYTES=262144
-PACKAGE_CONTRACT_UPDATE_JSON="https://github.com/youtubediscord/magisk-zapret2/releases/latest/download/update.json"
+PACKAGE_CONTRACT_UPDATE_JSON="https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/latest/download/update.json"
 # Mounted /system/bin wrappers no longer have a module-relative $0. All three
 # supported managers define this same active root, so the package contract owns
 # the one intentional absolute entrypoint path.

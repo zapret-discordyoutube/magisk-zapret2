@@ -46,107 +46,59 @@ class ReleaseArtifactIntegrityTest {
     }
 
     @Test
-    fun releaseAssetUrl_acceptsOnlyExactGithubReleaseAndCdnHosts() {
+    fun releaseAssetUrl_acceptsOnlyTheExactForgejoRepositoryReleasePath() {
         listOf(
-            "https://github.com/youtubediscord/magisk-zapret2/releases/download/v1/app.apk",
-            "https://objects.githubusercontent.com/github-production-release-asset/file",
-            "https://release-assets.githubusercontent.com/github-production-release-asset/file?sp=r",
-            "https://github-releases.githubusercontent.com/archive/module.zip",
-            "https://github.com:443/youtubediscord/magisk-zapret2/releases/download/v1/module.zip",
+            "https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/download/v1/app.apk",
+            "https://git.zapret.moe:443/zapretdiscordyoutube/magisk-zapret2/releases/download/v1/module.zip?download=1",
         ).forEach { assertTrue(it, isTrustedReleaseAssetUrl(it)) }
-        assertTrue(
-            isTrustedReleaseAssetUrl(
-                "https://github.com/youtubediscord/magisk-zapret2/releases/download/v1/app.apk",
-                allowCdnRedirects = false,
-            ),
-        )
-        assertFalse(
-            isTrustedReleaseAssetUrl(
-                "https://release-assets.githubusercontent.com/github-production-release-asset/file",
-                allowCdnRedirects = false,
-            ),
-        )
 
         listOf(
-            "http://github.com/youtubediscord/magisk-zapret2/releases/download/v1/app.apk",
-            "https://github.com/other/repository/releases/download/v1/app.apk",
-            "https://github.com/youtubediscord/magisk-zapret2/releases/app.apk",
-            "https://api.github.com/repos/owner/repository/releases/assets/1",
+            "http://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/download/v1/app.apk",
+            "https://git.zapret.moe/other/repository/releases/download/v1/app.apk",
+            "https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/app.apk",
+            "https://git.zapret.moe/api/v1/repos/owner/repository/releases/assets/1",
             "https://example.test/app.apk",
-            "https://github.com.evil.test/app.apk",
-            "https://user@github.com/app.apk",
-            "https://github.com:444/app.apk",
-            "https://github.com/app.apk#fragment",
+            "https://git.zapret.moe.evil.test/zapretdiscordyoutube/magisk-zapret2/releases/download/v1/app.apk",
+            "https://user@git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/download/v1/app.apk",
+            "https://git.zapret.moe:444/zapretdiscordyoutube/magisk-zapret2/releases/download/v1/app.apk",
+            "https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/download/v1/app.apk#fragment",
             "https://127.0.0.1/app.apk",
             "https://[::1]/app.apk",
-            "https://github.com/app.apk\nX-Test: injected",
-            "https://github.com/${"a".repeat(2_100)}",
+            "https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/download/v1/app.apk\nX-Test: injected",
+            "https://git.zapret.moe/${"a".repeat(2_100)}",
         ).forEach { assertFalse(it, isTrustedReleaseAssetUrl(it)) }
     }
 
-    /**
-     * The authority checks, on the branch where they are the only thing left.
-     *
-     * `isTrustedReleaseAssetUrl` rejects a userInfo, a fragment and any port but 443 on top of the
-     * host and path rules. On the `github.com` branch those three are redundant against a release
-     * path — the sweep above spells them with `/app.apk`, which the
-     * `/youtubediscord/magisk-zapret2/releases/download/` prefix already refuses, so it proves the
-     * prefix rule three more times and never reaches them.
-     *
-     * The CDN branch is where they carry the whole load. Every redirect the downloader follows is
-     * re-checked with `allowCdnRedirects = true`, and on that branch *any* path on a
-     * `*.githubusercontent.com` host is accepted, because release assets are served from opaque
-     * generated paths. `https://attacker@objects.githubusercontent.com/x` and
-     * `https://objects.githubusercontent.com:8443/x` are then well-formed trusted-host URLs whose
-     * only defect is the authority — an embedded credential the app would send upstream, or a
-     * port that is not the TLS service the host name vouches for. A `Location:` header is exactly
-     * where such a URL arrives from.
-     */
     @Test
-    fun releaseAssetUrl_rejectsCredentialsPortsAndFragmentsOnTheRedirectBranch() {
-        val cdnHosts = listOf(
-            "objects.githubusercontent.com",
-            "release-assets.githubusercontent.com",
-            "github-releases.githubusercontent.com",
-        )
-
-        cdnHosts.forEach { host ->
-            // The path is opaque on this branch, so nothing else can refuse these.
-            assertTrue(host, isTrustedReleaseAssetUrl("https://$host/github-production/asset"))
-            assertTrue(host, isTrustedReleaseAssetUrl("https://$host:443/github-production/asset"))
-
-            listOf(
-                "https://attacker@$host/github-production/asset",
-                "https://attacker:secret@$host/github-production/asset",
-                "https://$host:8443/github-production/asset",
-                "https://$host:80/github-production/asset",
-                "https://$host/github-production/asset#fragment",
-            ).forEach { assertFalse(it, isTrustedReleaseAssetUrl(it)) }
-        }
-
-        // Same three defects on a genuine release path, so the release branch is proven too
-        // rather than being refused by its path prefix a fourth time.
+    fun releaseAssetUrl_rejectsCredentialsPortsAndFragmentsAfterAForgejoRedirect() {
         val releaseAsset =
-            "https://github.com/youtubediscord/magisk-zapret2/releases/download/v1/module.zip"
-        assertTrue(isTrustedReleaseAssetUrl(releaseAsset, allowCdnRedirects = false))
+            "https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/download/v1/module.zip"
+        assertTrue(isTrustedReleaseAssetUrl(releaseAsset))
         listOf(
             releaseAsset.replace("https://", "https://attacker@"),
-            releaseAsset.replace("github.com", "github.com:8443"),
+            releaseAsset.replace("git.zapret.moe", "git.zapret.moe:8443"),
             "$releaseAsset#fragment",
         ).forEach {
             assertFalse(it, isTrustedReleaseAssetUrl(it))
-            assertFalse(it, isTrustedReleaseAssetUrl(it, allowCdnRedirects = false))
         }
     }
 
     @Test
-    fun digestMetadata_requiresExactSha256AndRejectsMissingOrMalformedValues() {
-        assertTrue(ReleaseArtifactIntegrity.parseSha256Digest(null).isFailure)
+    fun checksumSidecar_requiresExactSha256AndExactFileName() {
         val uppercase = "AB".repeat(32)
-        assertEquals("ab".repeat(32), ReleaseArtifactIntegrity.parseSha256Digest("sha256:$uppercase").getOrThrow())
-        assertTrue(ReleaseArtifactIntegrity.parseSha256Digest("").isFailure)
-        assertTrue(ReleaseArtifactIntegrity.parseSha256Digest("md5:${"ab".repeat(16)}").isFailure)
-        assertTrue(ReleaseArtifactIntegrity.parseSha256Digest("sha256:1234").isFailure)
+        assertEquals(
+            "ab".repeat(32),
+            ReleaseArtifactIntegrity.parseSha256Sidecar("$uppercase  app.apk\n", "app.apk").getOrThrow(),
+        )
+        assertEquals(
+            "ab".repeat(32),
+            ReleaseArtifactIntegrity.parseSha256Sidecar("$uppercase *app.apk\r\n", "app.apk").getOrThrow(),
+        )
+        assertTrue(ReleaseArtifactIntegrity.parseSha256Sidecar("", "app.apk").isFailure)
+        assertTrue(ReleaseArtifactIntegrity.parseSha256Sidecar("1234  app.apk", "app.apk").isFailure)
+        assertTrue(ReleaseArtifactIntegrity.parseSha256Sidecar("$uppercase  other.apk", "app.apk").isFailure)
+        assertTrue(ReleaseArtifactIntegrity.parseSha256Sidecar("$uppercase  app.apk\n$uppercase  other.apk", "app.apk").isFailure)
+        assertTrue(ReleaseArtifactIntegrity.parseSha256Sidecar("$uppercase  app.apk", "../app.apk").isFailure)
     }
 
     @Test

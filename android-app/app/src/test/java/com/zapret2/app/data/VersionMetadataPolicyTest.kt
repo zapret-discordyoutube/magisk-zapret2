@@ -32,7 +32,7 @@ class VersionMetadataPolicyTest {
 
     @Test
     fun ciAndLocalBuilder_publishTheSameVersionTuple() {
-        val workflow = repositoryFile(".github/workflows/build.yml").readText()
+        val workflow = repositoryFile(".forgejo/workflows/build.yml").readText()
         val builder = repositoryFile("build.sh").readText()
 
         assertTrue(workflow.contains("sh tools/release-version.sh"))
@@ -45,7 +45,7 @@ class VersionMetadataPolicyTest {
 
     @Test
     fun ciValidatesCanonicalSourceBeforeStampingTheReleaseVersion() {
-        val workflow = repositoryFile(".github/workflows/build.yml").readText()
+        val workflow = repositoryFile(".forgejo/workflows/build.yml").readText()
         val unitTests = workflow.indexOf("- name: Run Android unit tests")
         val debugBuild = workflow.indexOf("- name: Build Debug APK")
         val lint = workflow.indexOf("- name: Run Android lint")

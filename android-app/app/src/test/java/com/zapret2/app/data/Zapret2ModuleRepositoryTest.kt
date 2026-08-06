@@ -86,7 +86,7 @@ class Zapret2ModuleRepositoryTest {
             versionCode=2000000
             author=bol-van
             description=DPI bypass
-            updateJson=https://github.com/youtubediscord/magisk-zapret2/releases/latest/download/update.json
+            updateJson=https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/latest/download/update.json
         """.trimIndent() + "\n"
 
         assertEquals("v2.0.0", repository.parseModulePropVersion(valid))

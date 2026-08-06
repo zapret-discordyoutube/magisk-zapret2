@@ -497,7 +497,7 @@
     <string name="about_telegram_handle" translatable="false">@bypassblock</string>
     <string name="about_vpn_handle" translatable="false">@zapretvpns_bot</string>
     <string name="about_upstream_repo" translatable="false">bol-van/zapret</string>
-    <string name="about_maintainer" translatable="false">youtubediscord</string>
+    <string name="about_maintainer" translatable="false">zapretdiscordyoutube</string>
     <string name="hosts_system_path" translatable="false">/system/etc/hosts</string>
     <string name="term_nfqueue" translatable="false">NFQUEUE</string>
     <string name="term_iptables" translatable="false">iptables</string>

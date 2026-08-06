@@ -23,31 +23,20 @@ import java.util.UUID
 import java.util.zip.ZipFile
 
 private const val RELEASE_DOWNLOAD_PATH_PREFIX =
-    "/youtubediscord/magisk-zapret2/releases/download/"
+    "/zapretdiscordyoutube/magisk-zapret2/releases/download/"
 private const val MAX_DOWNLOAD_BYTES = 512L * 1024L * 1024L
 
-private val TRUSTED_RELEASE_CDN_HOSTS = setOf(
-    "objects.githubusercontent.com",
-    "release-assets.githubusercontent.com",
-    "github-releases.githubusercontent.com",
-)
+private const val FORGEJO_RELEASE_HOST = "git.zapret.moe"
 
-/** Exact network boundary for GitHub release assets and their GitHub-owned CDN redirects. */
-internal fun isTrustedReleaseAssetUrl(
-    value: String,
-    allowCdnRedirects: Boolean = true,
-): Boolean {
+/** Exact network boundary for files published by this project's Forgejo releases. */
+internal fun isTrustedReleaseAssetUrl(value: String): Boolean {
     if (value.isEmpty() || value.length > 2_048 || value.any(Char::isISOControl)) return false
     return try {
         val parsed = URL(value)
         val host = parsed.host.lowercase(Locale.ROOT)
-        val trustedLocation = when {
-            host == "github.com" -> parsed.path.startsWith(RELEASE_DOWNLOAD_PATH_PREFIX)
-            allowCdnRedirects -> host in TRUSTED_RELEASE_CDN_HOSTS
-            else -> false
-        }
         parsed.protocol == "https" &&
-            trustedLocation &&
+            host == FORGEJO_RELEASE_HOST &&
+            parsed.path.startsWith(RELEASE_DOWNLOAD_PATH_PREFIX) &&
             parsed.userInfo == null &&
             parsed.ref == null &&
             parsed.port in setOf(-1, 443)
@@ -249,17 +238,18 @@ private fun comparePreRelease(left: String, right: String): Int {
 }
 
 /**
- * Manager for checking and installing updates from GitHub Releases.
+ * Manager for checking and installing updates from Forgejo Releases.
  * Handles both APK updates and root-module updates.
  */
 class UpdateManager(private val context: Context) {
 
     companion object {
-        private const val GITHUB_API_URL = "https://api.github.com/repos/youtubediscord/magisk-zapret2/releases/latest"
+        private const val FORGEJO_API_URL = "https://git.zapret.moe/api/v1/repos/zapretdiscordyoutube/magisk-zapret2/releases/latest"
         private const val CONNECT_TIMEOUT = 15000
         private const val READ_TIMEOUT = 30000
         private const val BUFFER_SIZE = 8192
         private const val MAX_RELEASE_RESPONSE_BYTES = 2 * 1024 * 1024
+        private const val MAX_CHECKSUM_RESPONSE_BYTES = 4 * 1024
         private const val MAX_CHANGELOG_CHARS = 64 * 1024
         private const val MAX_RELEASE_ASSETS = 1_000
         private const val MAX_ARCHIVE_ENTRIES = 20_000
@@ -277,7 +267,7 @@ class UpdateManager(private val context: Context) {
     private class DownloadTooLargeException : IllegalStateException()
 
     /**
-     * Data class representing a release from GitHub.
+     * Data class representing a release from Forgejo.
      */
     data class ReleaseArtifact(
         val url: String,
@@ -333,7 +323,7 @@ class UpdateManager(private val context: Context) {
     }
 
     /**
-     * Checks for available updates from GitHub Releases.
+     * Checks for available updates from Forgejo Releases.
      * Compares the current app version with the latest release version.
      *
      * @return UpdateResult indicating if an update is available, up to date, or error
@@ -375,21 +365,21 @@ class UpdateManager(private val context: Context) {
     }
 
     /**
-     * Fetches the latest release information from GitHub API.
+     * Fetches the latest release information from the Forgejo API.
      *
      * @return A typed release or presentation-safe failure reason
      */
     private suspend fun fetchLatestRelease(): ReleaseFetchResult = withContext(Dispatchers.IO) {
         var connection: HttpURLConnection? = null
         try {
-            val url = URL(GITHUB_API_URL)
+            val url = URL(FORGEJO_API_URL)
             connection = url.openConnection() as HttpURLConnection
             connection.apply {
                 requestMethod = "GET"
                 connectTimeout = CONNECT_TIMEOUT
                 readTimeout = READ_TIMEOUT
                 instanceFollowRedirects = false
-                setRequestProperty("Accept", "application/vnd.github.v3+json")
+                setRequestProperty("Accept", "application/json")
                 setRequestProperty("User-Agent", "Zapret2-Android/${BuildConfig.VERSION_NAME}")
             }
 
@@ -428,9 +418,12 @@ class UpdateManager(private val context: Context) {
     }
 
     /**
-     * Parses the GitHub API JSON response into a Release object.
+     * Parses the Forgejo API JSON response and authenticates every installable file with its
+     * separately published sha256sum sidecar. Forgejo 16 does not expose an asset digest in the
+     * release API, so accepting a missing synthetic `digest` field would silently disable the
+     * integrity boundary that existed on GitHub.
      *
-     * @param json Raw JSON string from GitHub API
+     * @param json Raw JSON string from the Forgejo API
      * @return Release object with parsed data
      */
     private fun parseReleaseJson(json: String): Release {
@@ -446,8 +439,11 @@ class UpdateManager(private val context: Context) {
             throw org.json.JSONException("Release changelog is too large or invalid")
         }
 
-        var apkArtifact: ReleaseArtifact? = null
-        var moduleArtifact: ReleaseArtifact? = null
+        data class PendingArtifact(val name: String, val kind: String, val url: String)
+
+        var pendingApk: PendingArtifact? = null
+        var pendingModule: PendingArtifact? = null
+        val assetUrlsByName = mutableMapOf<String, String>()
 
         val assets = jsonObject.optJSONArray("assets")
         if (assets != null) {
@@ -460,41 +456,79 @@ class UpdateManager(private val context: Context) {
                 if (name.length > 256 || name.any(Char::isISOControl)) {
                     throw org.json.JSONException("Release asset name is invalid")
                 }
+                val downloadUrl = asset.optString("browser_download_url", "")
+                    .takeIf(::isTrustedReleaseAssetUrl)
+                    ?: throw org.json.JSONException("Release asset has an untrusted URL")
+                if (assetUrlsByName.put(name, downloadUrl) != null) {
+                    throw org.json.JSONException("Release has duplicate asset names")
+                }
+
                 val installableKind = when {
                     name.endsWith(".apk", ignoreCase = true) -> "APK"
                     name.endsWith(".zip", ignoreCase = true) && name.contains("magisk", ignoreCase = true) -> "module"
                     else -> null
                 } ?: continue
-                val downloadUrl = asset.optString("browser_download_url", "")
-                    .takeIf { isTrustedReleaseAssetUrl(it, allowCdnRedirects = false) }
-                    ?: throw org.json.JSONException("$installableKind asset has an untrusted release URL")
-                val advertisedDigest = asset.optString("digest", "").takeIf { it.isNotBlank() }
-                val trustedDigest = ReleaseArtifactIntegrity.parseSha256Digest(advertisedDigest)
-                    .getOrElse { throw org.json.JSONException("$installableKind asset: ${it.message}") }
-                val releaseArtifact = ReleaseArtifact(downloadUrl, trustedDigest)
+                val pendingArtifact = PendingArtifact(name, installableKind, downloadUrl)
 
                 when (installableKind) {
                     "APK" -> {
-                        if (apkArtifact != null) throw org.json.JSONException("Release has multiple APK assets")
-                        apkArtifact = releaseArtifact
+                        if (pendingApk != null) throw org.json.JSONException("Release has multiple APK assets")
+                        pendingApk = pendingArtifact
                     }
                     "module" -> {
-                        if (moduleArtifact != null) throw org.json.JSONException("Release has multiple module assets")
-                        moduleArtifact = releaseArtifact
+                        if (pendingModule != null) throw org.json.JSONException("Release has multiple module assets")
+                        pendingModule = pendingArtifact
                     }
                 }
             }
         }
-        if (apkArtifact == null && moduleArtifact == null) {
+        if (pendingApk == null && pendingModule == null) {
             throw org.json.JSONException("Release contains no trusted installable assets")
+        }
+
+        fun authenticate(candidate: PendingArtifact?): ReleaseArtifact? {
+            candidate ?: return null
+            val checksumUrl = assetUrlsByName["${candidate.name}.sha256"]
+                ?: throw org.json.JSONException("${candidate.kind} asset has no sha256sum sidecar")
+            val checksum = fetchReleaseChecksum(checksumUrl, candidate.name)
+            return ReleaseArtifact(candidate.url, checksum)
         }
 
         return Release(
             version = tagName,
-            apkArtifact = apkArtifact,
-            moduleArtifact = moduleArtifact,
+            apkArtifact = authenticate(pendingApk),
+            moduleArtifact = authenticate(pendingModule),
             changelog = body,
         )
+    }
+
+    /** Download and validate one tiny checksum sidecar before the large artifact is accepted. */
+    private fun fetchReleaseChecksum(url: String, expectedFileName: String): String {
+        if (!isTrustedReleaseAssetUrl(url)) {
+            throw org.json.JSONException("Checksum sidecar has an untrusted URL")
+        }
+        var connection: HttpURLConnection? = null
+        try {
+            connection = URL(url).openConnection() as HttpURLConnection
+            connection.apply {
+                requestMethod = "GET"
+                connectTimeout = CONNECT_TIMEOUT
+                readTimeout = READ_TIMEOUT
+                instanceFollowRedirects = false
+                setRequestProperty("Accept", "text/plain")
+                setRequestProperty("User-Agent", "Zapret2-Android/${BuildConfig.VERSION_NAME}")
+            }
+            if (connection.responseCode != HttpURLConnection.HTTP_OK) {
+                throw org.json.JSONException("Checksum sidecar could not be downloaded")
+            }
+            val text = connection.inputStream.use { stream ->
+                stream.readBoundedBytes(MAX_CHECKSUM_RESPONSE_BYTES)?.toString(Charsets.UTF_8)
+            } ?: throw org.json.JSONException("Checksum sidecar is too large")
+            return ReleaseArtifactIntegrity.parseSha256Sidecar(text, expectedFileName)
+                .getOrElse { throw org.json.JSONException(it.message) }
+        } finally {
+            disconnectBestEffort(connection)
+        }
     }
 
     /**
@@ -520,9 +554,9 @@ class UpdateManager(private val context: Context) {
             if (!RootFileIo.isSimpleFileName(fileName)) {
                 return@withContext DownloadResult.Error(DownloadFailureReason.SECURITY_POLICY_REJECTED)
             }
-            // Follow GitHub redirects (github.com -> objects.githubusercontent.com)
+            // Resolve only redirects that remain inside this exact Forgejo release path.
             var currentUrl = URL(url)
-            if (!isTrustedReleaseAssetUrl(currentUrl.toExternalForm(), allowCdnRedirects = false)) {
+            if (!isTrustedReleaseAssetUrl(currentUrl.toExternalForm())) {
                 return@withContext DownloadResult.Error(DownloadFailureReason.SECURITY_POLICY_REJECTED)
             }
             var redirectCount = 0
@@ -583,7 +617,7 @@ class UpdateManager(private val context: Context) {
                 return@withContext DownloadResult.Error(DownloadFailureReason.SECURITY_POLICY_REJECTED)
             }
             partialFile = downloadPart
-            if (ReleaseArtifactIntegrity.parseSha256Digest("sha256:$expectedSha256").getOrNull() != expectedSha256) {
+            if (!ReleaseArtifactIntegrity.isSha256(expectedSha256)) {
                 return@withContext DownloadResult.Error(DownloadFailureReason.SECURITY_POLICY_REJECTED)
             }
             val downloadDigest = MessageDigest.getInstance("SHA-256")

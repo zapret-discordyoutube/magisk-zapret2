@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# Publish a locally qualified build as the canonical stable GitHub release.
+# Publish a locally qualified build as the canonical stable Forgejo release.
 set -euo pipefail
 umask 077
 
 readonly DEFAULT_SIGNING_DIR="/home/codex-pve/.config/zapret2-signing"
+readonly DEFAULT_TOKEN_FILE="/home/codex-pve/.config/forgejo/release-token"
 readonly DEFAULT_SDK_DIR="/opt/android-sdk"
-readonly RELEASE_REPO="youtubediscord/magisk-zapret2"
+readonly FORGEJO_API_ROOT="https://git.zapret.moe/api/v1"
+readonly RELEASE_REPO="zapretdiscordyoutube/magisk-zapret2"
+readonly RELEASE_WEB_ROOT="https://git.zapret.moe/$RELEASE_REPO"
 
 usage() {
     cat >&2 <<'USAGE'
@@ -14,14 +17,15 @@ Usage: publish-stable-release.sh [options]
 Options:
   --repo PATH          Repository checkout (default: current directory)
   --signing-dir PATH   Durable production signing directory
+  --token-file PATH    Forgejo write:repository token file
   --artifacts PATH     Qualified build directory
                        (default: REPO/.artifacts/local-releases/vVERSION)
   -h, --help           Show this help
 
 The source commit must be the clean, pushed origin/main tip. Run
-build-local-release.sh --channel stable first. This command creates the immutable
-vVERSION stable release, marks it Latest, and uploads the APK, module ZIP, checksums,
-and update.json.
+build-local-release.sh --channel stable first. This command creates an immutable
+vVERSION Forgejo release, verifies that it is Latest, and uploads the APK, module
+ZIP, checksum sidecars, and update.json.
 USAGE
 }
 
@@ -41,15 +45,17 @@ normalize_digest() {
 
 repo_arg="$PWD"
 signing_arg="$DEFAULT_SIGNING_DIR"
+token_arg="$DEFAULT_TOKEN_FILE"
 artifacts_arg=""
 
 while (($#)); do
     case "$1" in
-        --repo|--signing-dir|--artifacts)
+        --repo|--signing-dir|--token-file|--artifacts)
             (($# >= 2)) || fail "missing value for $1"
             case "$1" in
                 --repo) repo_arg="$2" ;;
                 --signing-dir) signing_arg="$2" ;;
+                --token-file) token_arg="$2" ;;
                 --artifacts) artifacts_arg="$2" ;;
             esac
             shift 2
@@ -64,9 +70,59 @@ while (($#)); do
     esac
 done
 
-for command_name in git gh jq stat sha256sum awk sed sort tr find mktemp unzip grep cmp; do
+for command_name in git curl jq stat sha256sum awk sed sort tr find mktemp unzip grep cmp; do
     require_command "$command_name"
 done
+
+[[ -f "$token_arg" && ! -L "$token_arg" && -s "$token_arg" ]] ||
+    fail "Forgejo release token file is missing or unsafe"
+[[ "$(stat -c '%a' "$token_arg")" == "600" ]] ||
+    fail "Forgejo release token file mode must be 600"
+IFS= read -r FORGEJO_TOKEN < "$token_arg"
+readonly FORGEJO_TOKEN
+[[ -n "$FORGEJO_TOKEN" && "$FORGEJO_TOKEN" != *[[:space:]]* ]] ||
+    fail "Forgejo release token is malformed"
+
+api_status() {
+    local method="$1" path="$2" output="$3" body_file="${4:-}"
+    local -a request=(
+        curl -sS -o "$output" -w '%{http_code}'
+        --proto '=https'
+        -X "$method"
+        -H "Authorization: token $FORGEJO_TOKEN"
+        -H 'Accept: application/json'
+    )
+    if [[ -n "$body_file" ]]; then
+        request+=(
+            -H 'Content-Type: application/json'
+            --data-binary "@$body_file"
+        )
+    fi
+    request+=("$FORGEJO_API_ROOT$path")
+    "${request[@]}"
+}
+
+api_json() {
+    local method="$1" path="$2" output="$3" body_file="${4:-}"
+    local status
+    status="$(api_status "$method" "$path" "$output" "$body_file")" ||
+        fail "Forgejo API request failed: $method $path"
+    case "$method:$status" in
+        GET:200|POST:201|PATCH:200) ;;
+        *) fail "Forgejo API rejected $method $path with HTTP $status" ;;
+    esac
+}
+
+api_optional_get() {
+    local path="$1" output="$2" status
+    status="$(api_status GET "$path" "$output")" ||
+        fail "Forgejo API request failed: GET $path"
+    case "$status" in
+        200) return 0 ;;
+        404) return 1 ;;
+        *) fail "Forgejo API rejected GET $path with HTTP $status" ;;
+    esac
+}
 
 [[ -d "$repo_arg" && ! -L "$repo_arg" ]] ||
     fail "repository path is not a regular directory"
@@ -153,8 +209,8 @@ unzip -tq "$ZIP_PATH" >/dev/null || fail "module ZIP integrity check failed"
 [[ "$(unzip -p "$ZIP_PATH" module.prop | sed -n 's/^versionCode=//p')" == "$VERSION_CODE" ]] ||
     fail "module ZIP versionCode does not match $VERSION_CODE"
 
-EXPECTED_ZIP_URL="https://github.com/$RELEASE_REPO/releases/download/$VERSION_TAG/$ZIP_NAME"
-EXPECTED_CHANGELOG="https://github.com/$RELEASE_REPO/releases/tag/$VERSION_TAG"
+EXPECTED_ZIP_URL="$RELEASE_WEB_ROOT/releases/download/$VERSION_TAG/$ZIP_NAME"
+EXPECTED_CHANGELOG="$RELEASE_WEB_ROOT/releases/tag/$VERSION_TAG"
 readonly EXPECTED_ZIP_URL EXPECTED_CHANGELOG
 jq -e \
     --arg version "$VERSION_TAG" \
@@ -209,12 +265,12 @@ readonly ACTUAL_CERT
 [[ "${#ACTUAL_CERT}" -eq 64 && "$ACTUAL_CERT" == "$EXPECTED_CERT" ]] ||
     fail "APK signer does not match the production identity"
 
-REMOTE_WORK="$(mktemp -d /tmp/zapret2-stable-release.XXXXXXXX)"
+REMOTE_WORK="$(mktemp -d /tmp/zapret2-forgejo-release.XXXXXXXX)"
 readonly REMOTE_WORK
 cleanup() {
     case "$REMOTE_WORK" in
-        /tmp/zapret2-stable-release.*)
-            rm -rf -- "$REMOTE_WORK"
+        /tmp/zapret2-forgejo-release.*)
+            find "$REMOTE_WORK" -depth -delete
             ;;
     esac
 }
@@ -229,27 +285,27 @@ REMOTE_TAG="$(
 [[ -z "$REMOTE_TAG" ]] ||
     fail "immutable release tag already exists: $VERSION_TAG"
 
-RELEASE_LOOKUP_ERROR="$REMOTE_WORK/release-lookup.error"
-if gh api "repos/$RELEASE_REPO/releases/tags/$VERSION_TAG" \
-    >"$REMOTE_WORK/release-lookup.json" 2>"$RELEASE_LOOKUP_ERROR"; then
-    fail "immutable GitHub Release already exists: $VERSION_TAG"
-elif ! grep -Fq 'HTTP 404' "$RELEASE_LOOKUP_ERROR"; then
-    fail "unable to determine whether the GitHub Release already exists"
+if api_optional_get "/repos/$RELEASE_REPO/releases/tags/$VERSION_TAG" \
+    "$REMOTE_WORK/release-lookup.json"; then
+    fail "immutable Forgejo Release already exists: $VERSION_TAG"
 fi
 
-LATEST_ERROR="$REMOTE_WORK/latest.error"
-if LATEST_RELEASE="$(
-    gh api "repos/$RELEASE_REPO/releases/latest" 2>"$LATEST_ERROR"
-)"; then
-    LATEST_TAG="$(jq -er '.tag_name | strings' <<<"$LATEST_RELEASE")"
-    LATEST_ASSET_ID="$(
+if api_optional_get "/repos/$RELEASE_REPO/releases/latest" "$REMOTE_WORK/latest.json"; then
+    LATEST_TAG="$(jq -er '.tag_name | strings' "$REMOTE_WORK/latest.json")"
+    LATEST_UPDATE_URL="$(
         jq -er '
             [.assets[] | select(.name == "update.json")] |
-            if length == 1 then .[0].id else error("latest release update.json is not unique") end
-        ' <<<"$LATEST_RELEASE"
+            if length == 1 then .[0].browser_download_url
+            else error("latest release update.json is not unique") end
+        ' "$REMOTE_WORK/latest.json"
     )"
-    gh api "repos/$RELEASE_REPO/releases/assets/$LATEST_ASSET_ID" \
-        -H 'Accept: application/octet-stream' > "$REMOTE_WORK/latest-update.json"
+    case "$LATEST_UPDATE_URL" in
+        "$RELEASE_WEB_ROOT/releases/download/"*) ;;
+        *) fail "Latest release update.json points outside the Forgejo repository" ;;
+    esac
+    curl -fsS --proto '=https' --max-redirs 0 \
+        -H "Authorization: token $FORGEJO_TOKEN" \
+        "$LATEST_UPDATE_URL" > "$REMOTE_WORK/latest-update.json"
     LATEST_VERSION="$(jq -er '.version | strings' "$REMOTE_WORK/latest-update.json")"
     LATEST_VERSION_CODE="$(
         jq -er '.versionCode | select(type == "number" and floor == .)' \
@@ -259,8 +315,6 @@ if LATEST_RELEASE="$(
         fail "Latest release metadata does not match its tag"
     ((VERSION_CODE > LATEST_VERSION_CODE)) ||
         fail "versionCode $VERSION_CODE must exceed Latest versionCode $LATEST_VERSION_CODE"
-elif ! grep -Fq 'HTTP 404' "$LATEST_ERROR"; then
-    fail "unable to inspect the current Latest release"
 fi
 
 # Recheck immediately before the one-way publication boundary.
@@ -269,38 +323,52 @@ REMOTE_TAG="$(
 )" || fail "unable to recheck the remote release tag"
 [[ -z "$REMOTE_TAG" ]] ||
     fail "release tag appeared during validation: $VERSION_TAG"
-if gh api "repos/$RELEASE_REPO/releases/tags/$VERSION_TAG" \
-    >"$REMOTE_WORK/release-recheck.json" 2>"$RELEASE_LOOKUP_ERROR"; then
-    fail "GitHub Release appeared during validation: $VERSION_TAG"
-elif ! grep -Fq 'HTTP 404' "$RELEASE_LOOKUP_ERROR"; then
-    fail "unable to recheck whether the GitHub Release exists"
+if api_optional_get "/repos/$RELEASE_REPO/releases/tags/$VERSION_TAG" \
+    "$REMOTE_WORK/release-recheck.json"; then
+    fail "Forgejo Release appeared during validation: $VERSION_TAG"
 fi
 
 RELEASE_NOTES="$(
-    printf "Production build created locally from exact commit \`%s\`.\n\n" "$SOURCE_SHA"
-    printf "APK signing certificate SHA-256: \`%s\`.\n\n" "$ACTUAL_CERT"
-    printf 'GitHub Actions is an independent background validation and is not a publication dependency.'
+    printf 'Production build created locally from exact commit `%s`.\n\n' "$SOURCE_SHA"
+    printf 'APK signing certificate SHA-256: `%s`.\n\n' "$ACTUAL_CERT"
+    printf 'Forgejo Actions is an independent background validation and is not a publication dependency.'
 )"
+jq -n \
+    --arg tag "$VERSION_TAG" \
+    --arg target "$SOURCE_SHA" \
+    --arg name "Zapret2 $VERSION" \
+    --arg body "$RELEASE_NOTES" \
+    '{tag_name:$tag, target_commitish:$target, name:$name, body:$body,
+      draft:true, prerelease:false, hide_archive_links:false}' \
+    > "$REMOTE_WORK/create-release.json"
+api_json POST "/repos/$RELEASE_REPO/releases" \
+    "$REMOTE_WORK/draft-release.json" "$REMOTE_WORK/create-release.json"
+RELEASE_ID="$(jq -er '.id | numbers' "$REMOTE_WORK/draft-release.json")"
+readonly RELEASE_ID
 
-RELEASE_URL="$(
-    gh release create "$VERSION_TAG" \
-        --repo "$RELEASE_REPO" \
-        --target "$SOURCE_SHA" \
-        --title "Zapret2 $VERSION" \
-        --generate-notes \
-        --notes "$RELEASE_NOTES" \
-        --latest \
-        "$ZIP_PATH" \
-        "$ZIP_SUM_PATH" \
-        "$APK_PATH" \
-        "$APK_SUM_PATH" \
-        "$UPDATE_PATH"
-)"
-readonly RELEASE_URL
+mkdir "$REMOTE_WORK/uploaded"
+for expected_name in "${expected_names[@]}"; do
+    ENCODED_NAME="$(jq -rn --arg value "$expected_name" '$value | @uri')"
+    upload_status="$(
+        curl -sS -o "$REMOTE_WORK/uploaded/$expected_name.json" -w '%{http_code}' \
+            --proto '=https' \
+            -X POST \
+            -H "Authorization: token $FORGEJO_TOKEN" \
+            -H 'Accept: application/json' \
+            -F "attachment=@$ARTIFACT_DIR/$expected_name" \
+            "$FORGEJO_API_ROOT/repos/$RELEASE_REPO/releases/$RELEASE_ID/assets?name=$ENCODED_NAME"
+    )" || fail "upload failed for release asset: $expected_name"
+    [[ "$upload_status" == "201" ]] ||
+        fail "Forgejo rejected release asset $expected_name with HTTP $upload_status"
+done
 
-PUBLISHED_RELEASE="$(
-    gh api "repos/$RELEASE_REPO/releases/tags/$VERSION_TAG"
-)"
+jq -n '{draft:false, prerelease:false}' > "$REMOTE_WORK/publish-release.json"
+api_json PATCH "/repos/$RELEASE_REPO/releases/$RELEASE_ID" \
+    "$REMOTE_WORK/published-release.json" "$REMOTE_WORK/publish-release.json"
+
+api_json GET "/repos/$RELEASE_REPO/releases/tags/$VERSION_TAG" \
+    "$REMOTE_WORK/verified-release.json"
+PUBLISHED_RELEASE="$REMOTE_WORK/verified-release.json"
 jq -e \
     --arg tag "$VERSION_TAG" \
     '(.draft | not) and
@@ -312,7 +380,7 @@ jq -e \
         ("zapret2-control-" + $tag + ".apk.sha256"),
         ("zapret2-magisk-" + $tag + ".zip"),
         ("zapret2-magisk-" + $tag + ".zip.sha256")]' \
-    <<<"$PUBLISHED_RELEASE" >/dev/null ||
+    "$PUBLISHED_RELEASE" >/dev/null ||
     fail "published release does not satisfy the stable asset contract"
 
 PUBLISHED_TAG_SHA="$(
@@ -321,15 +389,27 @@ PUBLISHED_TAG_SHA="$(
 )"
 [[ "$PUBLISHED_TAG_SHA" == "$SOURCE_SHA" ]] ||
     fail "published tag does not target the exact source commit"
-[[ "$(gh api "repos/$RELEASE_REPO/releases/latest" --jq .tag_name)" == "$VERSION_TAG" ]] ||
+
+api_json GET "/repos/$RELEASE_REPO/releases/latest" "$REMOTE_WORK/latest-after.json"
+[[ "$(jq -er '.tag_name' "$REMOTE_WORK/latest-after.json")" == "$VERSION_TAG" ]] ||
     fail "published stable release was not selected as Latest"
 
 mkdir "$REMOTE_WORK/assets"
 for expected_name in "${expected_names[@]}"; do
-    gh release download "$VERSION_TAG" \
-        --repo "$RELEASE_REPO" \
-        --dir "$REMOTE_WORK/assets" \
-        --pattern "$expected_name" >/dev/null
+    asset_url="$(
+        jq -er --arg name "$expected_name" '
+            [.assets[] | select(.name == $name)] |
+            if length == 1 then .[0].browser_download_url
+            else error("release asset is not unique") end
+        ' "$PUBLISHED_RELEASE"
+    )"
+    case "$asset_url" in
+        "$RELEASE_WEB_ROOT/releases/download/$VERSION_TAG/"*) ;;
+        *) fail "published release asset points outside the immutable release" ;;
+    esac
+    curl -fsS --proto '=https' --max-redirs 0 \
+        -H "Authorization: token $FORGEJO_TOKEN" \
+        "$asset_url" > "$REMOTE_WORK/assets/$expected_name"
     cmp -s "$ARTIFACT_DIR/$expected_name" "$REMOTE_WORK/assets/$expected_name" ||
         fail "remote asset bytes differ from the qualified local asset: $expected_name"
 done
@@ -339,6 +419,7 @@ done
 [[ "$(stat -c '%a' "$SIGNING_DIR")" == "700" ]] ||
     fail "signing directory permissions changed during publication"
 
+RELEASE_URL="$(jq -er '.html_url' "$PUBLISHED_RELEASE")"
 printf 'release_url=%s\n' "$RELEASE_URL"
 printf 'source_commit=%s\n' "$SOURCE_SHA"
 printf 'version=%s\n' "$VERSION"

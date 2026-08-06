@@ -634,7 +634,7 @@ policy означает тот же документированный default `
 источников:
 
 - имена и структура winws2-пресетов — ревизия
-  `youtubediscord/zapret@eb98b501acd22623d1570be28574c0110f10df11`;
+  `zapretdiscordyoutube/zapret@eb98b501acd22623d1570be28574c0110f10df11`;
 - Android-списки — переданный архив `lists.zip` с SHA-256
   `e76409252f438d8847891c62b504f706884803f5aebb2235b93c89eedbf810da`;
 - upstream-контракт `nfqws2`, использованный при подготовке этой исходной базы, —
@@ -1015,4 +1015,4 @@ TCP-, UDP- и L7-профиля.
   Android использует собственный compiler + launcher:
   <https://github.com/bol-van/zapret2/blob/v1.0.4/docs/manual.md#общие-принципы-задания-параметров>
 - Формат именованных профилей, используемый исходными winws2-пресетами:
-  <https://github.com/youtubediscord/zapret/tree/eb98b501acd22623d1570be28574c0110f10df11/src/presets/builtin/winws2>
+  <https://git.zapret.moe/zapretdiscordyoutube/zapret/tree/eb98b501acd22623d1570be28574c0110f10df11/src/presets/builtin/winws2>

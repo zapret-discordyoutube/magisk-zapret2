@@ -8,7 +8,7 @@ ROOT_ARG="${1:-$DEFAULT_ROOT}"
     exit 1
 }
 ROOT="$(cd -- "$ROOT_ARG" && pwd -P)"
-WORKFLOW="$ROOT/.github/workflows/build.yml"
+WORKFLOW="$ROOT/.forgejo/workflows/build.yml"
 BUILDER="$ROOT/.codex/skills/build-zapret2-locally/scripts/build-local-release.sh"
 PUBLISHER="$ROOT/.codex/skills/build-zapret2-locally/scripts/publish-stable-release.sh"
 
@@ -26,8 +26,8 @@ bash -n "$BUILDER"
 bash -n "$PUBLISHER"
 bash -n "$ROOT/tests/release/source-policy.sh"
 
-if grep -Fq 'gh release create' "$WORKFLOW"; then
-    fail "background Actions workflow still publishes GitHub Releases"
+if grep -Fq 'forgejo-release@' "$WORKFLOW"; then
+    fail "background Actions workflow still publishes Forgejo Releases"
 fi
 if grep -Fq 'contents: write' "$WORKFLOW"; then
     fail "background Actions workflow still has release write permission"
@@ -55,16 +55,16 @@ for provenance_file in \
     grep -Fq "upstream-payload/$provenance_file zapret2/$provenance_file" "$WORKFLOW" ||
         fail "background validation does not hydrate $provenance_file"
 done
-grep -Fq "gh release create \"\$VERSION_TAG\"" "$PUBLISHER" ||
+grep -Fq 'api_json POST "/repos/$RELEASE_REPO/releases"' "$PUBLISHER" ||
     fail "local stable publisher does not create the canonical SemVer release"
-grep -Fq -- '--latest' "$PUBLISHER" ||
-    fail "local stable publisher does not select the release as Latest"
+grep -Fq '/releases/latest' "$PUBLISHER" ||
+    fail "local stable publisher does not verify that Forgejo selected the release as Latest"
 if grep -Fq -- '--prerelease' "$PUBLISHER"; then
     fail "local stable publisher marks the release as a prerelease"
 fi
 grep -Fq "\"\$UPDATE_PATH\"" "$PUBLISHER" ||
     fail "local stable publisher does not upload update.json"
-if grep -Fq 'gh release create' "$BUILDER"; then
+if grep -Eq '(gh release create|api_json POST)' "$BUILDER"; then
     fail "local builder can publish instead of remaining build-only"
 fi
 

@@ -1,6 +1,6 @@
 ---
 name: build-zapret2-locally
-description: Build, verify, and optionally publish Zapret2 stable artifacts, or build development artifacts from the current worktree, entirely on the trusted local machine. Use for stable/release/production builds, dev/development/test builds, APK or Magisk ZIP assembly, signing verification, stable GitHub publication, or diagnosis of either local build channel. GitHub Actions is background validation only.
+description: Build, verify, and optionally publish Zapret2 stable artifacts, or build development artifacts from the current worktree, entirely on the trusted local machine. Use for stable/release/production builds, dev/development/test builds, APK or Magisk ZIP assembly, signing verification, stable Forgejo publication, or diagnosis of either local build channel. Forgejo Actions is background validation only.
 ---
 
 # Build Zapret2 Locally
@@ -13,6 +13,8 @@ description: Build, verify, and optionally publish Zapret2 stable artifacts, or 
 - Require mode `700` on the directory and `600` on confidential files.
 - Use the existing production signer for both channels so dev APKs remain
   install-compatible with stable. Never substitute another signer.
+- Read signing values from `signing-secrets.json`; the historical GitHub-named
+  private file is not part of the Forgejo release contract.
 
 ## Select the channel
 
@@ -24,7 +26,7 @@ Use `dev` for testing the current worktree, including non-ignored uncommitted an
 untracked source files. Snapshot without modifying the worktree, assign a unique
 `v<VERSION>-dev.<timestamp>.<sha>` identity, run the same local qualifications, and
 produce production-signed APK/ZIP artifacts plus `build-info.json`. Never create
-`update.json`, a tag, a GitHub Release, or `Latest` from dev output.
+  `update.json`, a tag, a Forgejo Release, or `Latest` from dev output.
 
 ## Build locally
 
@@ -66,6 +68,6 @@ the exact pushed source SHA, five exact assets, and the production signer. Creat
 non-draft, non-prerelease Release, mark it `Latest`, then verify the remote tag,
 flags, bytes, update metadata, clean worktree, and preserved signing state.
 
-Treat GitHub Actions as independent background validation. Observe its run after a
+Treat Forgejo Actions as independent background validation. Observe its run after a
 push but never wait for it as a build or publication prerequisite. Never let Actions
 create or mutate tags or Releases.
