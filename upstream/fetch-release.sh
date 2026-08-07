@@ -2,8 +2,7 @@
 set -euo pipefail
 
 readonly UPSTREAM_REPOSITORY="bol-van/zapret2"
-readonly MIRROR_REPOSITORY="zapretdiscordyoutube/zapret2-upstream"
-readonly API_ROOT="https://git.zapret.moe/api/v1/repos/${MIRROR_REPOSITORY}"
+readonly API_ROOT="https://api.github.com/repos/${UPSTREAM_REPOSITORY}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly SCRIPT_DIR
 readonly UPSTREAM_LUA_LIST="${SCRIPT_DIR}/lua-files.txt"
@@ -42,7 +41,7 @@ verify_asset_digest() {
     [[ "$expected" =~ ^[0-9a-fA-F]{64}$ ]] \
         || fail "invalid pinned asset digest for $(basename -- "$file")"
     printf '%s  %s\n' "${expected,,}" "$file" | sha256sum --check --status - \
-        || fail "Forgejo mirror asset digest mismatch for $(basename -- "$file")"
+        || fail "official upstream asset digest mismatch for $(basename -- "$file")"
 }
 
 verify_release_binary_hash() {
@@ -102,19 +101,19 @@ trap 'rm -rf -- "$TEMP_DIR"' EXIT HUP INT TERM
 readonly RELEASE_JSON="$TEMP_DIR/release.json"
 api_get "$API_ROOT/releases/latest" > "$RELEASE_JSON"
 jq -e '.draft == false and .prerelease == false' "$RELEASE_JSON" >/dev/null \
-    || fail "Forgejo mirror latest endpoint returned a non-stable release"
+    || fail "GitHub latest endpoint returned a non-stable upstream release"
 
 RELEASE_TAG="$(jq -er '.tag_name' "$RELEASE_JSON")"
 readonly RELEASE_TAG
 [[ "$RELEASE_TAG" =~ ^v[0-9]+([.][0-9]+){1,3}([._-][0-9A-Za-z]+)*$ ]] \
     || fail "unsafe latest release tag: $RELEASE_TAG"
 [[ "$RELEASE_TAG" == "$REVIEWED_RELEASE_TAG" ]] || fail \
-    "latest mirror release is $RELEASE_TAG, but the nfqws2 parser contract was reviewed for $REVIEWED_RELEASE_TAG; review upstream grammar and update reviewed-release.txt"
+    "latest upstream release is $RELEASE_TAG, but the nfqws2 parser contract was reviewed for $REVIEWED_RELEASE_TAG; review upstream grammar and update reviewed-release.txt"
 
 PINNED_TAG="$(jq -er '.tag' "$PINNED_RELEASE_FILE")"
 readonly PINNED_TAG
 [[ "$PINNED_TAG" == "$RELEASE_TAG" ]] \
-    || fail "pinned metadata describes $PINNED_TAG, but Forgejo published $RELEASE_TAG"
+    || fail "pinned metadata describes $PINNED_TAG, but official GitHub published $RELEASE_TAG"
 RELEASE_SHA="$(jq -er '.source_commit' "$PINNED_RELEASE_FILE")"
 readonly RELEASE_SHA
 [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "invalid release commit SHA"

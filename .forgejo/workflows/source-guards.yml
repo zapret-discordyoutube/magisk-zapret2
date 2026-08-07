@@ -21,6 +21,10 @@ jobs:
         run: |
           set -euo pipefail
           git diff --check
+          if git grep -n -I -E -- 'git\.zapret\.moe/(api/v1/repos/)?zapretdiscordyoutube/[A-Za-z0-9._-]+-upstream' -- ':!.forgejo/workflows/source-guards.yml'; then
+            echo 'Use the official third-party source instead of our retired mirror.' >&2
+            exit 1
+          fi
           bash tests/release/source-policy.sh
           bash -n upstream/fetch-release.sh
           bash tests/release/release-channel.sh
