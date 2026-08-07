@@ -23,7 +23,7 @@ jobs:
         run: |
           set -euo pipefail
           EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
-          git diff --check "$EMPTY_TREE" "$GITHUB_SHA" -- .
+          git diff --check "$EMPTY_TREE" "$FORGEJO_SHA" -- .
 
       - name: Reject committed secrets and release debug flags
         run: |
@@ -80,7 +80,7 @@ jobs:
           VERSION_TAG=$(sed -n 's/^version_tag=//p' <<<"$VERSION_METADATA")
           [[ -n "$VERSION" && -n "$VERSION_CODE" && -n "$VERSION_TAG" ]]
 
-          printf '%s\n' "$VERSION_METADATA" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$VERSION_METADATA" >> "$FORGEJO_OUTPUT"
           echo "Validating ${VERSION_TAG} (versionCode=${VERSION_CODE})"
 
   build-apk:
@@ -227,7 +227,7 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x upstream/fetch-release.sh
-          upstream/fetch-release.sh "$GITHUB_WORKSPACE/upstream-payload"
+          upstream/fetch-release.sh "$FORGEJO_WORKSPACE/upstream-payload"
 
       - name: Upload verified upstream payload
         uses: https://data.forgejo.org/forgejo/upload-artifact@v4
@@ -408,7 +408,7 @@ jobs:
           (
             cd "$PACKAGE_ASSEMBLY_ROOT"
             # Whole assembly root: it already contains exactly the manifest.
-            zip -r "$GITHUB_WORKSPACE/$ZIP_NAME" .
+            zip -r "$FORGEJO_WORKSPACE/$ZIP_NAME" .
           )
 
           # Print and assert the distributable layout, file type, mode, and

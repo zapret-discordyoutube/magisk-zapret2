@@ -164,7 +164,7 @@ fun AboutScreen() {
 private enum class AboutDestination(val httpsUrl: String) {
     TELEGRAM_GROUP("https://t.me/bypassblock"),
     VPN_BOT("https://t.me/zapretvpns_bot"),
-    UPSTREAM_REPOSITORY("https://github.com/bol-van/zapret"),
+    UPSTREAM_REPOSITORY("https://git.zapret.moe/zapretdiscordyoutube/zapret2-upstream"),
     MAINTAINER("https://git.zapret.moe/zapretdiscordyoutube"),
     LICENSING("https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/blob/main/docs/LICENSING.md"),
 }

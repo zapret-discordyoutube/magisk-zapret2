@@ -2,12 +2,14 @@
 set -euo pipefail
 
 readonly UPSTREAM_REPOSITORY="bol-van/zapret2"
-readonly API_ROOT="https://api.github.com/repos/${UPSTREAM_REPOSITORY}"
+readonly MIRROR_REPOSITORY="zapretdiscordyoutube/zapret2-upstream"
+readonly API_ROOT="https://git.zapret.moe/api/v1/repos/${MIRROR_REPOSITORY}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly SCRIPT_DIR
 readonly UPSTREAM_LUA_LIST="${SCRIPT_DIR}/lua-files.txt"
 readonly BINARY_MAP="${SCRIPT_DIR}/android-binaries.tsv"
 readonly REVIEWED_RELEASE_FILE="${SCRIPT_DIR}/reviewed-release.txt"
+readonly PINNED_RELEASE_FILE="${SCRIPT_DIR}/pinned-release.json"
 
 usage() {
     printf 'Usage: %s OUTPUT_DIRECTORY\n' "$0" >&2
@@ -24,8 +26,7 @@ require_command() {
 
 api_get() {
     curl --fail --silent --show-error --location --retry 3 \
-        --header 'Accept: application/vnd.github+json' \
-        --header 'X-GitHub-Api-Version: 2022-11-28' \
+        --header 'Accept: application/json' \
         --header 'User-Agent: magisk-zapret2-upstream-fetch' \
         "$1"
 }
@@ -37,14 +38,11 @@ download() {
 }
 
 verify_asset_digest() {
-    local digest="$1" file="$2" hex=""
-    case "$digest" in
-        sha256:[0-9a-fA-F]*) hex="${digest#sha256:}" ;;
-        *) fail "GitHub did not publish a SHA-256 digest for $(basename -- "$file")" ;;
-    esac
-    [[ "$hex" =~ ^[0-9a-fA-F]{64}$ ]] || fail "invalid GitHub asset digest for $(basename -- "$file")"
-    printf '%s  %s\n' "${hex,,}" "$file" | sha256sum --check --status - \
-        || fail "GitHub asset digest mismatch for $(basename -- "$file")"
+    local expected="$1" file="$2"
+    [[ "$expected" =~ ^[0-9a-fA-F]{64}$ ]] \
+        || fail "invalid pinned asset digest for $(basename -- "$file")"
+    printf '%s  %s\n' "${expected,,}" "$file" | sha256sum --check --status - \
+        || fail "Forgejo mirror asset digest mismatch for $(basename -- "$file")"
 }
 
 verify_release_binary_hash() {
@@ -82,6 +80,8 @@ done
 [[ -f "$BINARY_MAP" && ! -L "$BINARY_MAP" ]] || fail "invalid Android binary map"
 [[ -f "$REVIEWED_RELEASE_FILE" && ! -L "$REVIEWED_RELEASE_FILE" ]] \
     || fail "invalid reviewed upstream release contract"
+[[ -f "$PINNED_RELEASE_FILE" && ! -L "$PINNED_RELEASE_FILE" ]] \
+    || fail "invalid pinned upstream release metadata"
 REVIEWED_RELEASE_TAG="$(<"$REVIEWED_RELEASE_FILE")"
 readonly REVIEWED_RELEASE_TAG
 [[ "$REVIEWED_RELEASE_TAG" =~ ^v[0-9]+([.][0-9]+){1,3}([._-][0-9A-Za-z]+)*$ ]] \
@@ -102,27 +102,38 @@ trap 'rm -rf -- "$TEMP_DIR"' EXIT HUP INT TERM
 readonly RELEASE_JSON="$TEMP_DIR/release.json"
 api_get "$API_ROOT/releases/latest" > "$RELEASE_JSON"
 jq -e '.draft == false and .prerelease == false' "$RELEASE_JSON" >/dev/null \
-    || fail "GitHub latest endpoint returned a non-stable release"
+    || fail "Forgejo mirror latest endpoint returned a non-stable release"
 
 RELEASE_TAG="$(jq -er '.tag_name' "$RELEASE_JSON")"
 readonly RELEASE_TAG
 [[ "$RELEASE_TAG" =~ ^v[0-9]+([.][0-9]+){1,3}([._-][0-9A-Za-z]+)*$ ]] \
     || fail "unsafe latest release tag: $RELEASE_TAG"
 [[ "$RELEASE_TAG" == "$REVIEWED_RELEASE_TAG" ]] || fail \
-    "latest stable is $RELEASE_TAG, but the nfqws2 parser contract was reviewed for $REVIEWED_RELEASE_TAG; review upstream grammar and update reviewed-release.txt"
+    "latest mirror release is $RELEASE_TAG, but the nfqws2 parser contract was reviewed for $REVIEWED_RELEASE_TAG; review upstream grammar and update reviewed-release.txt"
 
-RELEASE_SHA="$(api_get "$API_ROOT/commits/$RELEASE_TAG" | jq -er '.sha')"
+PINNED_TAG="$(jq -er '.tag' "$PINNED_RELEASE_FILE")"
+readonly PINNED_TAG
+[[ "$PINNED_TAG" == "$RELEASE_TAG" ]] \
+    || fail "pinned metadata describes $PINNED_TAG, but Forgejo published $RELEASE_TAG"
+RELEASE_SHA="$(jq -er '.source_commit' "$PINNED_RELEASE_FILE")"
 readonly RELEASE_SHA
 [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "invalid release commit SHA"
 
-readonly ARCHIVE_NAME="zapret2-${RELEASE_TAG}.tar.gz"
+ARCHIVE_NAME="$(jq -er '.assets.archive.name' "$PINNED_RELEASE_FILE")"
+readonly ARCHIVE_NAME
+[[ "$ARCHIVE_NAME" == "zapret2-${RELEASE_TAG}.tar.gz" ]] \
+    || fail "unsafe or unexpected archive name: $ARCHIVE_NAME"
 ARCHIVE_URL="$(jq -er --arg name "$ARCHIVE_NAME" '.assets[] | select(.name == $name) | .browser_download_url' "$RELEASE_JSON")"
 readonly ARCHIVE_URL
-ARCHIVE_DIGEST="$(jq -er --arg name "$ARCHIVE_NAME" '.assets[] | select(.name == $name) | .digest' "$RELEASE_JSON")"
+ARCHIVE_DIGEST="$(jq -er '.assets.archive.sha256' "$PINNED_RELEASE_FILE")"
 readonly ARCHIVE_DIGEST
-CHECKSUM_URL="$(jq -er '.assets[] | select(.name == "sha256sum.txt") | .browser_download_url' "$RELEASE_JSON")"
+CHECKSUM_NAME="$(jq -er '.assets.checksums.name' "$PINNED_RELEASE_FILE")"
+readonly CHECKSUM_NAME
+[[ "$CHECKSUM_NAME" == "sha256sum.txt" ]] \
+    || fail "unsafe or unexpected checksum asset name: $CHECKSUM_NAME"
+CHECKSUM_URL="$(jq -er --arg name "$CHECKSUM_NAME" '.assets[] | select(.name == $name) | .browser_download_url' "$RELEASE_JSON")"
 readonly CHECKSUM_URL
-CHECKSUM_DIGEST="$(jq -er '.assets[] | select(.name == "sha256sum.txt") | .digest' "$RELEASE_JSON")"
+CHECKSUM_DIGEST="$(jq -er '.assets.checksums.sha256' "$PINNED_RELEASE_FILE")"
 readonly CHECKSUM_DIGEST
 readonly ARCHIVE_FILE="$TEMP_DIR/$ARCHIVE_NAME"
 readonly CHECKSUM_FILE="$TEMP_DIR/sha256sum.txt"
@@ -181,15 +192,15 @@ done < "$BINARY_MAP"
 
 printf '%s\n' "$RELEASE_SHA" > "$OUTPUT_DIR/upstream-zapret2.commit"
 printf '%s\n' "$RELEASE_TAG" > "$OUTPUT_DIR/upstream-zapret2.release"
-printf '%s\n' "${ARCHIVE_DIGEST#sha256:}" > "$OUTPUT_DIR/upstream-zapret2.archive.sha256"
+printf '%s\n' "$ARCHIVE_DIGEST" > "$OUTPUT_DIR/upstream-zapret2.archive.sha256"
 chmod 0644 "$OUTPUT_DIR"/upstream-zapret2.*
 
-if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+if [[ -n "${FORGEJO_OUTPUT:-}" ]]; then
     {
         printf 'sha=%s\n' "$RELEASE_SHA"
         printf 'tag=%s\n' "$RELEASE_TAG"
-        printf 'archive_sha256=%s\n' "${ARCHIVE_DIGEST#sha256:}"
-    } >> "$GITHUB_OUTPUT"
+        printf 'archive_sha256=%s\n' "$ARCHIVE_DIGEST"
+    } >> "$FORGEJO_OUTPUT"
 fi
 
 printf 'Fetched %s@%s (%s)\n' "$UPSTREAM_REPOSITORY" "$RELEASE_SHA" "$RELEASE_TAG"

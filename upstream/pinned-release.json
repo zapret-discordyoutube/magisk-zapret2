@@ -1,0 +1,14 @@
+{
+  "tag": "v1.0.4",
+  "source_commit": "2c21faa80e1acb71ddceb8b49176f266b7d33f05",
+  "assets": {
+    "archive": {
+      "name": "zapret2-v1.0.4.tar.gz",
+      "sha256": "0043987a6ae2ccdc0f2db74cd748b23d93f6713a214c19671222021fe8df8607"
+    },
+    "checksums": {
+      "name": "sha256sum.txt",
+      "sha256": "598a8ccd94655ed0ff9a362ee81a9ec5916f2c876e7e2381481ce7afe7b927b1"
+    }
+  }
+}

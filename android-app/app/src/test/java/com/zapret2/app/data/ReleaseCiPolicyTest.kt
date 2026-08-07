@@ -13,7 +13,7 @@ class ReleaseCiPolicyTest {
         val appBuild = repositoryFile("android-app/app/build.gradle.kts").readText()
         val attributes = repositoryFile(".gitattributes").readLines().toSet()
 
-        assertTrue(workflow.contains("git diff --check \"\$EMPTY_TREE\" \"\$GITHUB_SHA\" -- ."))
+        assertTrue(workflow.contains("git diff --check \"\$EMPTY_TREE\" \"\$FORGEJO_SHA\" -- ."))
         assertTrue(appBuild.contains("allWarningsAsErrors.set(true)"))
         assertTrue(appBuild.contains("warningsAsErrors = true"))
         assertTrue(appBuild.contains("informational += setOf("))

@@ -64,7 +64,7 @@ if grep -Fq -- '--prerelease' "$PUBLISHER"; then
 fi
 grep -Fq "\"\$UPDATE_PATH\"" "$PUBLISHER" ||
     fail "local stable publisher does not upload update.json"
-if grep -Eq '(gh release create|api_json POST)' "$BUILDER"; then
+if grep -Eq '(forgejo-cli release create|api_json POST)' "$BUILDER"; then
     fail "local builder can publish instead of remaining build-only"
 fi
 
