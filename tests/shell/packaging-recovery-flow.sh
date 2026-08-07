@@ -340,7 +340,13 @@ case "$*" in
 esac
 EOF
 cp "$MOCK/iptables" "$MOCK/ip6tables"
-chmod 0755 "$MOCK/iptables" "$MOCK/ip6tables"
+# Rollback requires the query and atomic-restore frontends to belong to the
+# same mocked firewall backend.  The empty baseline means restore is not
+# executed, but its discoverability is part of the production precondition.
+cp "$MOCK/iptables" "$MOCK/iptables-restore"
+cp "$MOCK/iptables" "$MOCK/ip6tables-restore"
+chmod 0755 "$MOCK/iptables" "$MOCK/ip6tables" \
+    "$MOCK/iptables-restore" "$MOCK/ip6tables-restore"
 if ! PATH="$MOCK:$PATH" STATE_DIR="$LIVE_STATE" \
     sh "$LIVE/zapret2/scripts/zapret-full-rollback.sh" --machine > "$CASE/rollback.out"; then
     sed -n '1,40p' "$CASE/rollback.out" >&2
