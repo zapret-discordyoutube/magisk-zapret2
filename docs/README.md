@@ -24,7 +24,7 @@ Root-модуль для Magisk, KernelSU и APatch, предназначенн�
 [`nfqws2`](https://github.com/bol-van/zapret2) с Lua-стратегиями, а приложение
 **Zapret2 Control** позволяет управлять модулем без терминала.
 
-<img width="1916" height="821" alt="Интерфейс Zapret2 Control" src="assets/zapret2-control-ui.png" />
+![Интерфейс Zapret2 Control](assets/zapret2-control-ui.png)
 
 > [!IMPORTANT]
 > Zapret2 — не VPN. Он не меняет ваш IP-адрес, не скрывает трафик от провайдера и
