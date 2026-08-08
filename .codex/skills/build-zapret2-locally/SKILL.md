@@ -5,6 +5,17 @@ description: Build, verify, and optionally publish Zapret2 stable artifacts, or 
 
 # Build Zapret2 Locally
 
+## Commit readiness and stable scope
+
+A commit is a readiness boundary. Never create an intermediate, checkpoint, or
+partially verified commit. During a stable release, inspect the entire shared
+working tree, finish and validate every intentional source change, and include
+every ready change regardless of who authored it. If an intentional source
+change is incomplete or unsafe, stop the stable release until it is resolved
+instead of hiding, stashing, or excluding it. Generated artifacts, caches,
+signing material, credentials, and other local-only state are never part of the
+source commit.
+
 ## Protect signing state
 
 - Treat `/home/codex-pve/.config/zapret2-signing` as durable private state.
@@ -18,9 +29,16 @@ description: Build, verify, and optionally publish Zapret2 stable artifacts, or 
 
 ## Select the channel
 
-Use `stable` for a production candidate. Require a clean `main` exactly equal to
-`origin/main`. Build the immutable commit, run every local qualification, produce
-release-bound `update.json`, and allow publication only after explicit authorization.
+Use `stable` for a production candidate. First inspect every tracked and
+untracked path and treat all intentional source changes as release scope
+regardless of author. Finish and validate them all or stop. Stage every reviewed,
+ready source change by explicit path, review the staged diff, and create one
+concise commit only after the complete source task and its required checks have
+succeeded. Fetch and integrate `origin/main` without force-pushing, repeat the
+relevant verification, push the final snapshot, and then require a clean `main`
+exactly equal to `origin/main`. Build that immutable commit, run every local
+qualification, produce release-bound `update.json`, and allow publication only
+after explicit authorization.
 
 Use `dev` for testing the current worktree, including non-ignored uncommitted and
 untracked source files. Snapshot without modifying the worktree, assign a unique
@@ -67,6 +85,10 @@ Require an increasing `versionCode`, an absent immutable `v<VERSION>` tag/Releas
 the exact pushed source SHA, five exact assets, and the production signer. Create a
 non-draft, non-prerelease Release, mark it `Latest`, then verify the remote tag,
 flags, bytes, update metadata, clean worktree, and preserved signing state.
+
+Write the stable change list from the complete range after the previous stable
+tag plus the final reviewed working-tree changes. Include meaningful user-visible
+work from every author; do not describe only the most recent agent's task.
 
 Treat Forgejo Actions as independent background validation. Observe its run after a
 push but never wait for it as a build or publication prerequisite. Never let Actions
