@@ -1,6 +1,6 @@
 ---
 name: build-zapret2-locally
-description: Build, verify, and optionally publish Zapret2 stable artifacts, or build development artifacts from the current worktree, entirely on the trusted local machine. Use for stable/release/production builds, dev/development/test builds, APK or Magisk ZIP assembly, signing verification, stable Forgejo publication, or diagnosis of either local build channel. Forgejo Actions is background validation only.
+description: Build, verify, and optionally publish Zapret2 stable artifacts, including its Android control APK in the self-hosted F-Droid repository, or build development artifacts from the current worktree entirely on the trusted local machine. Use for stable/release/production builds, dev/development/test builds, APK or Magisk ZIP assembly, signing verification, stable Forgejo or F-Droid publication, or diagnosis of either local build channel. Forgejo Actions is background validation only.
 ---
 
 # Build Zapret2 Locally
@@ -93,3 +93,20 @@ work from every author; do not describe only the most recent agent's task.
 Treat Forgejo Actions as independent background validation. Observe its run after a
 push but never wait for it as a build or publication prerequisite. Never let Actions
 create or mutate tags or Releases.
+
+After verifying a stable Forgejo Release, publish its exact local
+production-signed control APK to the self-hosted F-Droid repository:
+
+```bash
+/usr/local/bin/zapret-fdroid publish-local \
+  --source zapret2 \
+  --tag v<VERSION> \
+  /home/codex-pve/magisk-zapret2/.artifacts/local-releases/v<VERSION>/zapret2-control-v<VERSION>.apk
+/usr/local/bin/zapret-fdroid verify
+```
+
+Never publish a dev, test, RC, draft, prerelease, debug, Magisk ZIP, or Actions
+artifact to F-Droid. Verify the public index at
+`https://git2.zapret.moe/fdroid/repo/index-v2.json` before reporting success. If
+this step fails, keep the immutable Forgejo Release unchanged, report the exact
+F-Droid blocker, and allow the periodic synchronizer to retry its APK.
