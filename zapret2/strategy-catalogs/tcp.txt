@@ -341,7 +341,7 @@ blobs = tls_google
 --lua-desync=hostfakesplit:host=ozon.ru:tcp_ts=-1000:tcp_md5:repeats=4
 
 [fake_multidisorder]
-name = fake + multidisorder 
+name = fake + multidisorder
 author = loop-uh
 blobs = tls_google
 --lua-desync=fake:blob=tls_google:ip_ttl=-1,3-20:ip6_autottl=-1,3-20
