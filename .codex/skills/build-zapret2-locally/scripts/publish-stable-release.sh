@@ -8,7 +8,9 @@ readonly DEFAULT_TOKEN_FILE="/home/codex-pve/.config/forgejo/release-token"
 readonly DEFAULT_SDK_DIR="/opt/android-sdk"
 readonly FORGEJO_API_ROOT="https://git.zapret.moe/api/v1"
 readonly RELEASE_REPO="zapretdiscordyoutube/magisk-zapret2"
-readonly RELEASE_WEB_ROOT="https://git.zapret.moe/$RELEASE_REPO"
+readonly RELEASE_WEB_ROOT="https://git2.zapret.moe/$RELEASE_REPO"  # адреса в update.json — для людей: рабочее имя git (git.zapret.moe режут по TLS)
+# адреса файлов в ответах API на основном имени Forgejo (ROOT_URL), куда ходит этот скрипт
+readonly FORGEJO_WEB_ROOT="https://git.zapret.moe/$RELEASE_REPO"
 
 usage() {
     cat >&2 <<'USAGE'
@@ -300,7 +302,7 @@ if api_optional_get "/repos/$RELEASE_REPO/releases/latest" "$REMOTE_WORK/latest.
         ' "$REMOTE_WORK/latest.json"
     )"
     case "$LATEST_UPDATE_URL" in
-        "$RELEASE_WEB_ROOT/releases/download/"*) ;;
+        "$FORGEJO_WEB_ROOT/releases/download/"*) ;;
         *) fail "Latest release update.json points outside the Forgejo repository" ;;
     esac
     curl -fsS --proto '=https' --max-redirs 0 \
@@ -404,7 +406,7 @@ for expected_name in "${expected_names[@]}"; do
         ' "$PUBLISHED_RELEASE"
     )"
     case "$asset_url" in
-        "$RELEASE_WEB_ROOT/releases/download/$VERSION_TAG/"*) ;;
+        "$FORGEJO_WEB_ROOT/releases/download/$VERSION_TAG/"*) ;;
         *) fail "published release asset points outside the immutable release" ;;
     esac
     curl -fsS --proto '=https' --max-redirs 0 \
