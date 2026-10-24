@@ -315,7 +315,7 @@ SHA-256 всего файла, а не поиском по имени.
 - `--ipset-exclude=...`.
 
 `--filter-l7` принимает полный набор имён протоколов, опубликованный проверенной
-версией upstream `v1.0.4`: `all`, `unknown`, `known`, `http`, `tls`, `dtls`,
+версией upstream `v1.0.6`: `all`, `unknown`, `known`, `http`, `tls`, `dtls`,
 `quic`, `wireguard`, `dht`, `discord`, `stun`, `xmpp`, `dns`, `mtproto`, `bt`,
 `utp_bt`. Несколько имён разделяются запятыми. L7-фильтр уточняет транспортный
 фильтр и сам по себе не делает профиль смешанным: например,
@@ -1010,9 +1010,9 @@ TCP-, UDP- и L7-профиля.
   <https://github.com/bol-van/zapret2/releases/latest>
 - Upstream `nfqws2`: `--new` начинает новый профиль, `--name` задаёт имя, а
   `--skip` игнорирует профиль; CI читает manual выбранного release:
-  <https://github.com/bol-van/zapret2/blob/v1.0.4/docs/manual.md>
+  <https://github.com/bol-van/zapret2/blob/v1.0.6/docs/manual.md>
 - Upstream `nfqws2`: `@config_file` явно не поддерживается Android-сборкой;
   Android использует собственный compiler + launcher:
-  <https://github.com/bol-van/zapret2/blob/v1.0.4/docs/manual.md#общие-принципы-задания-параметров>
+  <https://github.com/bol-van/zapret2/blob/v1.0.6/docs/manual.md#общие-принципы-задания-параметров>
 - Формат именованных профилей, используемый исходными winws2-пресетами:
   <https://git2.zapret.moe/zapretdiscordyoutube/zapretgui/tree/eb98b501acd22623d1570be28574c0110f10df11/src/presets/builtin/winws2>

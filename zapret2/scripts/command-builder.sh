@@ -241,7 +241,7 @@ validate_l7_filter() {
     old_ifs="$IFS"; IFS=,; set -- $value; IFS="$old_ifs"
     [ "$#" -gt 0 ] || return 1
     for token in "$@"; do
-        # Reviewed against bol-van/zapret2 v1.0.4 protocol_name[].  Keeping the
+        # Reviewed against bol-van/zapret2 v1.0.6 protocol_name[].  Keeping the
         # complete upstream set here prevents the Android wrapper from
         # inventing a smaller language than the nfqws2 binary it launches.
         case "$token" in
