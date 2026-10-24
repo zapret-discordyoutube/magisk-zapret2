@@ -165,8 +165,8 @@ private enum class AboutDestination(val httpsUrl: String) {
     TELEGRAM_GROUP("https://t.me/bypassblock"),
     VPN_BOT("https://t.me/zapretvpns_bot?start=z2app_about"),
     UPSTREAM_REPOSITORY("https://github.com/bol-van/zapret2"),
-    MAINTAINER("https://git.zapret.moe/zapretdiscordyoutube"),
-    LICENSING("https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/blob/main/docs/LICENSING.md"),
+    MAINTAINER("https://git2.zapret.moe/zapretdiscordyoutube"),
+    LICENSING("https://git2.zapret.moe/zapretdiscordyoutube/magisk-zapret2/blob/main/docs/LICENSING.md"),
 }
 
 @Composable

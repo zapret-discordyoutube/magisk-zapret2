@@ -50,6 +50,9 @@ class ReleaseArtifactIntegrityTest {
         listOf(
             "https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/download/v1/app.apk",
             "https://git.zapret.moe:443/zapretdiscordyoutube/magisk-zapret2/releases/download/v1/module.zip?download=1",
+            // The API answered under a mirror returns asset URLs on that mirror.
+            "https://git2.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/download/v1/app.apk",
+            "https://git4.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/download/v1/module.zip",
         ).forEach { assertTrue(it, isTrustedReleaseAssetUrl(it)) }
 
         listOf(
@@ -59,6 +62,8 @@ class ReleaseArtifactIntegrityTest {
             "https://git.zapret.moe/api/v1/repos/owner/repository/releases/assets/1",
             "https://example.test/app.apk",
             "https://git.zapret.moe.evil.test/zapretdiscordyoutube/magisk-zapret2/releases/download/v1/app.apk",
+            "https://git9.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/download/v1/app.apk",
+            "https://xgit2.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/download/v1/app.apk",
             "https://user@git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/download/v1/app.apk",
             "https://git.zapret.moe:444/zapretdiscordyoutube/magisk-zapret2/releases/download/v1/app.apk",
             "https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/download/v1/app.apk#fragment",
@@ -294,6 +299,16 @@ class ReleaseArtifactIntegrityTest {
                 "2.0.0",
                 digest.uppercase(),
             ),
+        )
+    }
+
+    @Test
+    fun releaseApi_triesTheMirrorsBeforeTheBlockedMainName() {
+        assertEquals("git2.zapret.moe", FORGEJO_RELEASE_HOSTS.first())
+        assertEquals("git.zapret.moe", FORGEJO_RELEASE_HOSTS.last())
+        assertEquals(
+            "https://git3.zapret.moe/api/v1/repos/zapretdiscordyoutube/magisk-zapret2/releases/latest",
+            releaseApiUrl("git3.zapret.moe"),
         )
     }
 }

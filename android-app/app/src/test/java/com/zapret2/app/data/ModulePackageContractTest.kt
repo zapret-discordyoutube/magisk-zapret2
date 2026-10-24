@@ -330,7 +330,7 @@ class ModulePackageContractTest {
 
         moduleProp.writeText(
             validModuleProp().replace(
-                "https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/latest/download/update.json",
+                "https://git2.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/latest/download/update.json",
                 "https://example.test/update.json",
             ),
         )
@@ -685,7 +685,7 @@ class ModulePackageContractTest {
         versionCode=1000100
         author=bol-van
         description=DPI bypass using nfqws2 with Lua strategies and the Zapret2 Android app.
-        updateJson=https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/latest/download/update.json
+        updateJson=https://git2.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/latest/download/update.json
     """.trimIndent() + "\n"
 
     private fun sourceManifest(): String {

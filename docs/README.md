@@ -1,14 +1,14 @@
 # Zapret2 для Android
 
 <p align="center">
-  <a href="https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/latest"><img alt="Последний релиз" src="https://img.shields.io/badge/Forgejo-%D0%A0%D0%B5%D0%BB%D0%B8%D0%B7%D1%8B-609926?style=for-the-badge&logo=forgejo&logoColor=white"></a>
-  <a href="https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2"><img alt="Исходный код" src="https://img.shields.io/badge/Forgejo-%D0%98%D1%81%D1%85%D0%BE%D0%B4%D0%BD%D1%8B%D0%B9_%D0%BA%D0%BE%D0%B4-609926?style=for-the-badge&logo=forgejo&logoColor=white"></a>
-  <a href="https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/stars"><img alt="Звёзды в Forgejo" src="https://img.shields.io/badge/Forgejo-%D0%97%D0%B2%D1%91%D0%B7%D0%B4%D1%8B-FFD700?style=for-the-badge&logo=forgejo&logoColor=black"></a>
-  <a href="https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/commits/branch/main"><img alt="История изменений" src="https://img.shields.io/badge/Forgejo-%D0%9A%D0%BE%D0%BC%D0%BC%D0%B8%D1%82%D1%8B-8250DF?style=for-the-badge&logo=forgejo&logoColor=white"></a>
+  <a href="https://git2.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/latest"><img alt="Последний релиз" src="https://img.shields.io/badge/Forgejo-%D0%A0%D0%B5%D0%BB%D0%B8%D0%B7%D1%8B-609926?style=for-the-badge&logo=forgejo&logoColor=white"></a>
+  <a href="https://git2.zapret.moe/zapretdiscordyoutube/magisk-zapret2"><img alt="Исходный код" src="https://img.shields.io/badge/Forgejo-%D0%98%D1%81%D1%85%D0%BE%D0%B4%D0%BD%D1%8B%D0%B9_%D0%BA%D0%BE%D0%B4-609926?style=for-the-badge&logo=forgejo&logoColor=white"></a>
+  <a href="https://git2.zapret.moe/zapretdiscordyoutube/magisk-zapret2/stars"><img alt="Звёзды в Forgejo" src="https://img.shields.io/badge/Forgejo-%D0%97%D0%B2%D1%91%D0%B7%D0%B4%D1%8B-FFD700?style=for-the-badge&logo=forgejo&logoColor=black"></a>
+  <a href="https://git2.zapret.moe/zapretdiscordyoutube/magisk-zapret2/commits/branch/main"><img alt="История изменений" src="https://img.shields.io/badge/Forgejo-%D0%9A%D0%BE%D0%BC%D0%BC%D0%B8%D1%82%D1%8B-8250DF?style=for-the-badge&logo=forgejo&logoColor=white"></a>
 </p>
 
 <p align="center">
-  <a href="https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/actions"><img alt="Сборка" src="https://img.shields.io/badge/Forgejo_Actions-%D0%A1%D0%B1%D0%BE%D1%80%D0%BA%D0%B0-609926?style=for-the-badge&logo=forgejo&logoColor=white"></a>
+  <a href="https://git2.zapret.moe/zapretdiscordyoutube/magisk-zapret2/actions"><img alt="Сборка" src="https://img.shields.io/badge/Forgejo_Actions-%D0%A1%D0%B1%D0%BE%D1%80%D0%BA%D0%B0-609926?style=for-the-badge&logo=forgejo&logoColor=white"></a>
   <a href="LICENSE.md"><img alt="Лицензия" src="https://img.shields.io/badge/Лицензия-AGPL--3.0--only-BC4C00?style=for-the-badge&logo=gnu&logoColor=white"></a>
   <a href="https://github.com/bol-van/zapret2"><img alt="Upstream" src="https://img.shields.io/badge/Upstream-bol--van%2Fzapret2-24292F?style=for-the-badge&logo=github&logoColor=white"></a>
 </p>
@@ -51,7 +51,7 @@ Root-модуль для Magisk, KernelSU и APatch, предназначенн�
 ### 1. Скачайте файлы
 
 Откройте страницу
-**[последнего релиза](https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/latest)**
+**[последнего релиза](https://git2.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/latest)**
 и скачайте:
 
 - `zapret2-magisk-v*.zip` — универсальный root-модуль (историческое имя файла);

@@ -26,7 +26,15 @@ private const val RELEASE_DOWNLOAD_PATH_PREFIX =
     "/zapretdiscordyoutube/magisk-zapret2/releases/download/"
 private const val MAX_DOWNLOAD_BYTES = 512L * 1024L * 1024L
 
-private const val FORGEJO_RELEASE_HOST = "git.zapret.moe"
+/**
+ * Names of the project's Forgejo: one site under several names. git.zapret.moe is dropped by
+ * name (TLS SNI) in Russia, so the numbered mirrors go first; the API answered under a mirror
+ * returns asset URLs on that same mirror.
+ */
+internal val FORGEJO_RELEASE_HOSTS = listOf("git2.zapret.moe", "git3.zapret.moe", "git4.zapret.moe", "git.zapret.moe")
+
+internal fun releaseApiUrl(host: String): String =
+    "https://$host/api/v1/repos/zapretdiscordyoutube/magisk-zapret2/releases/latest"
 
 /** Exact network boundary for files published by this project's Forgejo releases. */
 internal fun isTrustedReleaseAssetUrl(value: String): Boolean {
@@ -35,7 +43,7 @@ internal fun isTrustedReleaseAssetUrl(value: String): Boolean {
         val parsed = URL(value)
         val host = parsed.host.lowercase(Locale.ROOT)
         parsed.protocol == "https" &&
-            host == FORGEJO_RELEASE_HOST &&
+            host in FORGEJO_RELEASE_HOSTS &&
             parsed.path.startsWith(RELEASE_DOWNLOAD_PATH_PREFIX) &&
             parsed.userInfo == null &&
             parsed.ref == null &&
@@ -244,7 +252,6 @@ private fun comparePreRelease(left: String, right: String): Int {
 class UpdateManager(private val context: Context) {
 
     companion object {
-        private const val FORGEJO_API_URL = "https://git.zapret.moe/api/v1/repos/zapretdiscordyoutube/magisk-zapret2/releases/latest"
         private const val CONNECT_TIMEOUT = 15000
         private const val READ_TIMEOUT = 30000
         private const val BUFFER_SIZE = 8192
@@ -370,9 +377,20 @@ class UpdateManager(private val context: Context) {
      * @return A typed release or presentation-safe failure reason
      */
     private suspend fun fetchLatestRelease(): ReleaseFetchResult = withContext(Dispatchers.IO) {
+        // The first name that answers wins; a network failure or a non-200 answer moves on to
+        // the next name, and the failure of the last name is the one reported.
+        var result: ReleaseFetchResult = ReleaseFetchResult.Failure(UpdateCheckFailure.RequestFailed)
+        for (host in FORGEJO_RELEASE_HOSTS) {
+            result = fetchLatestReleaseFrom(host)
+            if (result is ReleaseFetchResult.Success) return@withContext result
+        }
+        result
+    }
+
+    private fun fetchLatestReleaseFrom(host: String): ReleaseFetchResult {
         var connection: HttpURLConnection? = null
-        try {
-            val url = URL(FORGEJO_API_URL)
+        return try {
+            val url = URL(releaseApiUrl(host))
             connection = url.openConnection() as HttpURLConnection
             connection.apply {
                 requestMethod = "GET"
@@ -385,17 +403,17 @@ class UpdateManager(private val context: Context) {
 
             val responseCode = connection.responseCode
             if (responseCode != HttpURLConnection.HTTP_OK) {
-                return@withContext ReleaseFetchResult.Failure(
+                return ReleaseFetchResult.Failure(
                     UpdateCheckFailure.ServerResponse(responseCode),
                 )
             }
 
             val response = connection.inputStream.use { stream ->
                 stream.readBoundedBytes(MAX_RELEASE_RESPONSE_BYTES)?.toString(Charsets.UTF_8)
-            } ?: return@withContext ReleaseFetchResult.Failure(UpdateCheckFailure.MetadataTooLarge)
+            } ?: return ReleaseFetchResult.Failure(UpdateCheckFailure.MetadataTooLarge)
 
             if (response.isBlank()) {
-                return@withContext ReleaseFetchResult.Failure(UpdateCheckFailure.EmptyResponse)
+                return ReleaseFetchResult.Failure(UpdateCheckFailure.EmptyResponse)
             }
 
             val release = parseReleaseJson(response)
