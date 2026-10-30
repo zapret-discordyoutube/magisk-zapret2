@@ -26,13 +26,6 @@ private const val RELEASE_DOWNLOAD_PATH_PREFIX =
     "/zapretdiscordyoutube/magisk-zapret2/releases/download/"
 private const val MAX_DOWNLOAD_BYTES = 512L * 1024L * 1024L
 
-/**
- * Names of the project's Forgejo: one site under several names. git.zapret.moe is dropped by
- * name (TLS SNI) in Russia, so the numbered mirrors go first; the API answered under a mirror
- * returns asset URLs on that same mirror.
- */
-internal val FORGEJO_RELEASE_HOSTS = listOf("git2.zapret.moe", "git3.zapret.moe", "git4.zapret.moe", "git.zapret.moe")
-
 internal fun releaseApiUrl(host: String): String =
     "https://$host/api/v1/repos/zapretdiscordyoutube/magisk-zapret2/releases/latest"
 
@@ -43,10 +36,24 @@ internal fun isTrustedReleaseAssetUrl(value: String): Boolean {
         val parsed = URL(value)
         val host = parsed.host.lowercase(Locale.ROOT)
         parsed.protocol == "https" &&
-            host in FORGEJO_RELEASE_HOSTS &&
+            ForgejoHosts.isKnown(host) &&
             parsed.path.startsWith(RELEASE_DOWNLOAD_PATH_PREFIX) &&
             parsed.userInfo == null &&
             parsed.ref == null &&
+            parsed.port in setOf(-1, 443)
+    } catch (_: Exception) {
+        false
+    }
+}
+
+/** An entry list address: HTTPS on one of [ForgejoHosts.ENTRY_HOSTS], default port, no credentials. */
+internal fun isEntryListUrl(value: String): Boolean {
+    if (value.isEmpty() || value.length > 2_048 || value.any(Char::isISOControl)) return false
+    return try {
+        val parsed = URL(value)
+        parsed.protocol == "https" &&
+            parsed.host.lowercase(Locale.ROOT) in ForgejoHosts.ENTRY_HOSTS &&
+            parsed.userInfo == null &&
             parsed.port in setOf(-1, 443)
     } catch (_: Exception) {
         false
@@ -256,6 +263,8 @@ class UpdateManager(private val context: Context) {
         private const val READ_TIMEOUT = 30000
         private const val BUFFER_SIZE = 8192
         private const val MAX_RELEASE_RESPONSE_BYTES = 2 * 1024 * 1024
+        private const val MAX_ENTRY_LIST_BYTES = 64 * 1024
+        private const val MAX_ENTRY_REDIRECTS = 3
         private const val MAX_CHECKSUM_RESPONSE_BYTES = 4 * 1024
         private const val MAX_CHANGELOG_CHARS = 64 * 1024
         private const val MAX_RELEASE_ASSETS = 1_000
@@ -378,13 +387,60 @@ class UpdateManager(private val context: Context) {
      */
     private suspend fun fetchLatestRelease(): ReleaseFetchResult = withContext(Dispatchers.IO) {
         // The first name that answers wins; a network failure or a non-200 answer moves on to
-        // the next name, and the failure of the last name is the one reported.
+        // the next name, and the failure of the last name is the one reported. When every known
+        // name is silent, the names handed out now come from an entry list (ForgejoHosts).
+        val known = ForgejoHosts.all()
         var result: ReleaseFetchResult = ReleaseFetchResult.Failure(UpdateCheckFailure.RequestFailed)
-        for (host in FORGEJO_RELEASE_HOSTS) {
+        for (host in known) {
             result = fetchLatestReleaseFrom(host)
             if (result is ReleaseFetchResult.Success) return@withContext result
         }
+        for (url in ForgejoHosts.ENTRY_LISTS) {
+            val text = fetchEntryList(url) ?: continue
+            val fresh = ForgejoHosts.learnFromEntry(text).filter { it !in known }
+            for (host in fresh) {
+                result = fetchLatestReleaseFrom(host)
+                if (result is ReleaseFetchResult.Success) return@withContext result
+            }
+            if (fresh.isNotEmpty()) break
+        }
         result
+    }
+
+    /** An entry list as text, or null; redirects are followed only between [ForgejoHosts.ENTRY_HOSTS]. */
+    private fun fetchEntryList(start: String): String? {
+        var current = start
+        repeat(MAX_ENTRY_REDIRECTS + 1) {
+            if (!isEntryListUrl(current)) return null
+            var connection: HttpURLConnection? = null
+            try {
+                connection = URL(current).openConnection() as HttpURLConnection
+                connection.apply {
+                    requestMethod = "GET"
+                    connectTimeout = CONNECT_TIMEOUT
+                    readTimeout = READ_TIMEOUT
+                    instanceFollowRedirects = false
+                    setRequestProperty("Accept", "application/json")
+                    setRequestProperty("User-Agent", "Zapret2-Android/${BuildConfig.VERSION_NAME}")
+                }
+                val code = connection.responseCode
+                if (isSupportedDownloadRedirectStatus(code)) {
+                    current = URL(URL(current), connection.getHeaderField("Location") ?: return null).toExternalForm()
+                    return@repeat
+                }
+                if (code != HttpURLConnection.HTTP_OK) return null
+                return connection.inputStream.use { stream ->
+                    stream.readBoundedBytes(MAX_ENTRY_LIST_BYTES)?.toString(Charsets.UTF_8)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: java.io.IOException) {
+                return null   // network boundary: this list is unreachable, the next one is tried
+            } finally {
+                disconnectBestEffort(connection)
+            }
+        }
+        return null
     }
 
     private fun fetchLatestReleaseFrom(host: String): ReleaseFetchResult {

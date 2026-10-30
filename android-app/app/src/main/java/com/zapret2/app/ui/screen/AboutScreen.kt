@@ -165,8 +165,10 @@ private enum class AboutDestination(val httpsUrl: String) {
     TELEGRAM_GROUP("https://t.me/bypassblock"),
     VPN_BOT("https://t.me/zapretvpns_bot?start=z2app_about"),
     UPSTREAM_REPOSITORY("https://github.com/bol-van/zapret2"),
-    MAINTAINER("https://git2.zapret.moe/zapretdiscordyoutube"),
-    LICENSING("https://git2.zapret.moe/zapretdiscordyoutube/magisk-zapret2/blob/main/docs/LICENSING.md"),
+    // The project's Forgejo through its permanent entry page (it opens a working mirror): the names
+    // of the site change when they are blocked, this link does not.
+    MAINTAINER("https://script.google.com/macros/s/AKfycbzcEPk67WW6fYC0vPVm397QyDFHd4m-SrfKDBnfvG8jAD-n_HXVv8AqQnEHZ6A42oIh/exec?s=git&p=zapretdiscordyoutube"),
+    LICENSING("https://script.google.com/macros/s/AKfycbzcEPk67WW6fYC0vPVm397QyDFHd4m-SrfKDBnfvG8jAD-n_HXVv8AqQnEHZ6A42oIh/exec?s=git&p=zapretdiscordyoutube/magisk-zapret2/src/branch/main/docs/LICENSING.md"),
 }
 
 @Composable
