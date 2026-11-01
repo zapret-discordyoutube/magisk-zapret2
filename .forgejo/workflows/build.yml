@@ -303,7 +303,9 @@ jobs:
           # Set module version from CI metadata
           sed -i "s/^version=.*/version=v${VERSION}/" module.prop
           sed -i "s/^versionCode=.*/versionCode=${VERSION_CODE}/" module.prop
-          sed -i "s|^updateJson=.*|updateJson=https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/latest/download/update.json|" module.prop
+          # The update channel is part of the package contract (zapret2/scripts/package-contract.sh): one address, not a copy here.
+          . ./zapret2/scripts/package-contract.sh
+          sed -i "s|^updateJson=.*|updateJson=${PACKAGE_CONTRACT_UPDATE_JSON}|" module.prop
 
           # Validate custom Lua files against upstream API
           echo "Validating custom Lua compatibility with upstream..."
@@ -399,7 +401,9 @@ jobs:
           # Update update.json with current version and direct asset URL
           sed -i "s/\"version\": \"v[^\"]*\"/\"version\": \"${VERSION_TAG}\"/" update.json
           sed -i "s/\"versionCode\": [0-9]*/\"versionCode\": ${VERSION_CODE}/" update.json
-          sed -i "s|\"zipUrl\": \"[^\"]*\"|\"zipUrl\": \"https://git.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/download/${VERSION_TAG}/${ZIP_NAME}\"|" update.json
+          . ./zapret2/scripts/package-contract.sh
+          RELEASE_WEB_ROOT="${PACKAGE_CONTRACT_UPDATE_JSON%/releases/latest/download/update.json}"
+          sed -i "s|\"zipUrl\": \"[^\"]*\"|\"zipUrl\": \"${RELEASE_WEB_ROOT}/releases/download/${VERSION_TAG}/${ZIP_NAME}\"|" update.json
 
           . ./zapret2/scripts/package-contract.sh
           PACKAGE_ASSEMBLY_ROOT="$(mktemp -d)"
