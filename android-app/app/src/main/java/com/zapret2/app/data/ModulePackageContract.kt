@@ -9,6 +9,16 @@ internal object ModulePackageContract {
     private const val MODULE_ID = RootModuleContract.MODULE_ID
     internal const val MODULE_UPDATE_JSON =
         "https://git2.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/latest/download/update.json"
+
+    /**
+     * The permanent update channel the next module switches to (owner 2026-11-01): Magisk fetches updateJson
+     * itself and cannot try other names, and git2.zapret.moe is blocked. zapret-links keeps this file in the
+     * project's gist with links on a working git name. This app accepts both, so a module that already names
+     * the gist passes here before the module switches (the app installs the module before itself).
+     */
+    internal const val MODULE_UPDATE_JSON_GIST =
+        "https://gist.githubusercontent.com/fuckyourkn/ecb9b6a03f53bddcdd47023ebc12d4f9/raw/magisk-zapret2-update.json"
+    internal val ACCEPTED_MODULE_UPDATE_JSON = setOf(MODULE_UPDATE_JSON, MODULE_UPDATE_JSON_GIST)
     internal const val MAX_MODULE_PROP_BYTES = 4 * 1024
     internal const val MAX_RUNTIME_MANIFEST_BYTES = 256 * 1024
     private const val RUNTIME_MANIFEST_SCHEMA = "schema|1|zapret2-runtime"
@@ -549,7 +559,7 @@ internal object ModulePackageContract {
         if (parsedVersionCode.toLong() != embeddedVersionCode) {
             return "module.prop versionCode does not match its version"
         }
-        if (properties.getValue("updateJson") != MODULE_UPDATE_JSON) {
+        if (properties.getValue("updateJson") !in ACCEPTED_MODULE_UPDATE_JSON) {
             return "module.prop has an unexpected update channel"
         }
         return null

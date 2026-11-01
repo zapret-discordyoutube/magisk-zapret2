@@ -335,6 +335,15 @@ class ModulePackageContractTest {
             ),
         )
         assertNotNull(ModulePackageContract.validateStaging(stage, "arm64-v8a", "1.0.100"))
+
+        // The next module names the permanent gist channel (owner 2026-11-01); this app must already accept it.
+        moduleProp.writeText(
+            validModuleProp().replace(
+                "https://git2.zapret.moe/zapretdiscordyoutube/magisk-zapret2/releases/latest/download/update.json",
+                ModulePackageContract.MODULE_UPDATE_JSON_GIST,
+            ),
+        )
+        assertNull(ModulePackageContract.validateStaging(stage, "arm64-v8a", "1.0.100"))
     }
 
     @Test
