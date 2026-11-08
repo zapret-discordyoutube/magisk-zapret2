@@ -3,8 +3,8 @@
 set -euo pipefail
 umask 077
 
-readonly DEFAULT_SIGNING_DIR="/home/codex-pve/.config/zapret2-signing"
-readonly DEFAULT_TOKEN_FILE="/home/codex-pve/.config/forgejo/release-token"
+readonly DEFAULT_SIGNING_DIR="${HOME}/.config/zapret2-signing"
+readonly DEFAULT_TOKEN_FILE="${HOME}/.config/forgejo/release-token"
 readonly DEFAULT_SDK_DIR="/opt/android-sdk"
 readonly FORGEJO_API_ROOT="https://git.zapret.moe/api/v1"
 readonly RELEASE_REPO="zapretdiscordyoutube/magisk-zapret2"

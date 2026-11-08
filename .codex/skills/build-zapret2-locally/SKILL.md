@@ -18,7 +18,7 @@ source commit.
 
 ## Protect signing state
 
-- Treat `/home/codex-pve/.config/zapret2-signing` as durable private state.
+- Treat `$HOME/.config/zapret2-signing` as durable private state.
 - Never delete, move, regenerate, overwrite, commit, upload, or print its contents.
 - Read individual JSON values only with `jq`; never enable shell tracing.
 - Require mode `700` on the directory and `600` on confidential files.
@@ -51,15 +51,15 @@ produce production-signed APK/ZIP artifacts plus `build-info.json`. Never create
 Run exactly one channel:
 
 ```bash
-SKILL_DIR=/home/codex-pve/magisk-zapret2/.codex/skills/build-zapret2-locally
+SKILL_DIR=$HOME/magisk-zapret2/.codex/skills/build-zapret2-locally
 
 "$SKILL_DIR/scripts/build-local-release.sh" \
   --channel stable \
-  --repo /home/codex-pve/magisk-zapret2
+  --repo $HOME/magisk-zapret2
 
 "$SKILL_DIR/scripts/build-local-release.sh" \
   --channel dev \
-  --repo /home/codex-pve/magisk-zapret2
+  --repo $HOME/magisk-zapret2
 ```
 
 Require source/release policy, full shell tests, Android unit tests, release lint,
@@ -77,8 +77,8 @@ checksums, qualification results, and public signer digest.
 Publish only after the user explicitly asks to release/deploy stable:
 
 ```bash
-/home/codex-pve/magisk-zapret2/.codex/skills/build-zapret2-locally/scripts/publish-stable-release.sh \
-  --repo /home/codex-pve/magisk-zapret2
+$HOME/magisk-zapret2/.codex/skills/build-zapret2-locally/scripts/publish-stable-release.sh \
+  --repo $HOME/magisk-zapret2
 ```
 
 Require an increasing `versionCode`, an absent immutable `v<VERSION>` tag/Release,
@@ -101,7 +101,7 @@ production-signed control APK to the self-hosted F-Droid repository:
 /usr/local/bin/zapret-fdroid publish-local \
   --source zapret2 \
   --tag v<VERSION> \
-  /home/codex-pve/magisk-zapret2/.artifacts/local-releases/v<VERSION>/zapret2-control-v<VERSION>.apk
+  $HOME/magisk-zapret2/.artifacts/local-releases/v<VERSION>/zapret2-control-v<VERSION>.apk
 /usr/local/bin/zapret-fdroid verify
 ```
 

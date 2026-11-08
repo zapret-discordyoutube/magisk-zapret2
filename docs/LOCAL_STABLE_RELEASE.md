@@ -13,7 +13,7 @@ push в `main` в фоне повторяет тесты и сборку и со
    ```bash
    .codex/skills/build-zapret2-locally/scripts/build-local-release.sh \
      --channel stable \
-     --repo /home/codex-pve/magisk-zapret2
+     --repo $HOME/magisk-zapret2
    ```
 
    Сборка завершается только после source/release-policy проверок, полного shell
@@ -25,7 +25,7 @@ push в `main` в фоне повторяет тесты и сборку и со
 
    ```bash
    .codex/skills/build-zapret2-locally/scripts/publish-stable-release.sh \
-     --repo /home/codex-pve/magisk-zapret2
+     --repo $HOME/magisk-zapret2
    ```
 
 Publisher повторно проверяет точный `origin/main`, монотонность `versionCode`,
@@ -43,7 +43,7 @@ Publisher повторно проверяет точный `origin/main`, мон
 ```bash
 .codex/skills/build-zapret2-locally/scripts/build-local-release.sh \
   --channel dev \
-  --repo /home/codex-pve/magisk-zapret2
+  --repo $HOME/magisk-zapret2
 ```
 
 Dev-сборка включает tracked, изменённые и новые non-ignored файлы в приватный

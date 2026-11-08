@@ -3,7 +3,7 @@
 set -euo pipefail
 umask 077
 
-readonly DEFAULT_SIGNING_DIR="/home/codex-pve/.config/zapret2-signing"
+readonly DEFAULT_SIGNING_DIR="${HOME}/.config/zapret2-signing"
 readonly DEFAULT_SDK_DIR="/opt/android-sdk"
 readonly RELEASE_REPO="zapretdiscordyoutube/magisk-zapret2"
 readonly RELEASE_WEB_ROOT="https://git2.zapret.moe/$RELEASE_REPO"  # адреса в update.json — для людей: рабочее имя git (git.zapret.moe режут по TLS)
