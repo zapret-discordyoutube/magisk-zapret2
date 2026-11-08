@@ -315,11 +315,31 @@ SHA-256 всего файла, а не поиском по имени.
 - `--ipset-exclude=...`.
 
 `--filter-l7` принимает полный набор имён протоколов, опубликованный проверенной
-версией upstream `v1.0.6`: `all`, `unknown`, `known`, `http`, `tls`, `dtls`,
+версией upstream `v1.0.7`: `all`, `unknown`, `known`, `http`, `tls`, `dtls`,
 `quic`, `wireguard`, `dht`, `discord`, `stun`, `xmpp`, `dns`, `mtproto`, `bt`,
 `utp_bt`. Несколько имён разделяются запятыми. L7-фильтр уточняет транспортный
 фильтр и сам по себе не делает профиль смешанным: например,
 `--filter-tcp=443` вместе с `--filter-l7=tls` остаётся TCP-профилем.
+
+### Ревизия грамматики upstream v1.0.7 (2026-11-08)
+
+Сравнение `v1.0.6..v1.0.7` (исходники `nfq2/`, `lua/`, `docs/changes.txt`) дало
+следующее; имена L7-протоколов не менялись (`nfq2/protocol.c` без изменений):
+
+- `!` в начале записи hostlist — локальное исключение; префиксы `^` и `!` можно
+  ставить в любом порядке. Это содержимое списков и значений
+  `--hostlist-domains=`, `--hostlist-exclude-domains=`: компилятор значения не
+  разбирает, а передаёт бинарнику как есть. Поставляемые списки записей с `!` не
+  содержат.
+- Один и тот же файл списка нельзя регистрировать дважды в одном профиле для
+  одного типа списка: `nfqws2` v1.0.7 не запускается. Валидатор отклоняет такой
+  пресет кодом `INVALID_OPTION_VALUE`. Один файл под разными типами
+  (`--hostlist` и `--hostlist-exclude`) или в разных профилях допустим.
+- `--wf-priority` и остальные `--wf-*` есть только в `winws2`; для Android они
+  остаются запрещёнными (`WINDOWS_OPTION_FORBIDDEN`).
+- `udp2icmp` получил необязательные аргументы `cgnat` и `id_lifetime`; они
+  передаются в `--lua-desync` без разбора.
+- `init.d` и ограничение длины фильтра WinDivert к Android не относятся.
 
 Профиль ДОЛЖЕН иметь хотя бы один явный положительный фильтр. Намеренный профиль
 для всего TCP или UDP задаётся явно (`--filter-tcp=*` или `--filter-udp=*`), а не
@@ -1010,9 +1030,9 @@ TCP-, UDP- и L7-профиля.
   <https://github.com/bol-van/zapret2/releases/latest>
 - Upstream `nfqws2`: `--new` начинает новый профиль, `--name` задаёт имя, а
   `--skip` игнорирует профиль; CI читает manual выбранного release:
-  <https://github.com/bol-van/zapret2/blob/v1.0.6/docs/manual.md>
+  <https://github.com/bol-van/zapret2/blob/v1.0.7/docs/manual.md>
 - Upstream `nfqws2`: `@config_file` явно не поддерживается Android-сборкой;
   Android использует собственный compiler + launcher:
-  <https://github.com/bol-van/zapret2/blob/v1.0.6/docs/manual.md#общие-принципы-задания-параметров>
+  <https://github.com/bol-van/zapret2/blob/v1.0.7/docs/manual.md#общие-принципы-задания-параметров>
 - Формат именованных профилей, используемый исходными winws2-пресетами:
   <https://git2.zapret.moe/zapretdiscordyoutube/zapretgui/tree/eb98b501acd22623d1570be28574c0110f10df11/src/presets/builtin/winws2>

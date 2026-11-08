@@ -256,6 +256,29 @@ write_valid_candidate
 sed -i 's/--filter-tcp=443/--filter-tcp=80:443/' "$candidate"
 assert_invalid_code INVALID_FILTER validate_candidate
 
+# nfqws2 v1.0.7 refuses to start when one profile registers the same file twice
+# for the same list type.  The validator has to reject that up front.  The same
+# file under another list type, or in another profile, remains valid upstream.
+write_valid_candidate
+sed -i '/^--hostlist=/a --hostlist=lists/list.txt' "$candidate"
+assert_invalid_code INVALID_OPTION_VALUE validate_candidate
+write_valid_candidate
+sed -i '/^--hostlist=/a --hostlist-exclude=lists/list.txt' "$candidate"
+validate_candidate >/dev/null || fail "same file as hostlist and hostlist-exclude was rejected"
+write_valid_candidate
+printf '%s\n' '--new=Second' '--filter-tcp=80' '--hostlist=lists/list.txt' '--lua-desync=pass' >> "$candidate"
+validate_candidate >/dev/null || fail "same list in two profiles was rejected"
+# v1.0.7 local exemption prefix and udp2icmp cgnat arguments pass through to the binary.
+write_valid_candidate
+sed -i '/^--hostlist=/a --hostlist-domains=com,!vk.com,^!sub.example.org' "$candidate"
+validate_candidate >/dev/null || fail "v1.0.7 hostlist exemption prefix was rejected"
+write_valid_candidate
+sed -i 's/--lua-desync=pass/--lua-desync=udp2icmp:cgnat:id_lifetime=30/' "$candidate"
+validate_candidate >/dev/null || fail "v1.0.7 udp2icmp cgnat arguments were rejected"
+# --wf-priority exists only in winws2.
+printf '%s\n' '--wf-priority=5' > "$candidate"
+assert_invalid_code WINDOWS_OPTION_FORBIDDEN validate_candidate
+
 printf '%s\n' '--ipcache-hostname=0' > "$candidate"
 assert_invalid_code FORBIDDEN_IPCACHE_OPTION validate_candidate
 printf '%s\n' '--ipcache-lifetime=1' > "$candidate"

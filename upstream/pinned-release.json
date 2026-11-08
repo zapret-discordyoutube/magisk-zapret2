@@ -1,14 +1,14 @@
 {
-  "tag": "v1.0.6",
-  "source_commit": "221d7dff24bfec0cd5ac0a5070b8acef2008af3d",
+  "tag": "v1.0.7",
+  "source_commit": "038c97e5819df10f8e8c22a2f1fffe57f2f7379b",
   "assets": {
     "archive": {
-      "name": "zapret2-v1.0.6.tar.gz",
-      "sha256": "eb412aebc82cdef1f09b6aa9df45c8ff60fb88683b6663e6c4a9275d87ea2db4"
+      "name": "zapret2-v1.0.7.tar.gz",
+      "sha256": "547a5dce3f4820721a425680ea3f7f3971b7e9c772b8c795dd2d623148da0928"
     },
     "checksums": {
       "name": "sha256sum.txt",
-      "sha256": "82121805feb71d23ee38b0e5ac3222f6208a5d20e89d92f7cdeb8330efd52448"
+      "sha256": "cb5dee44baa75b0b0095782b8daa2ca341f1005bad2458ff043b1d2ef1a09cbd"
     }
   }
 }

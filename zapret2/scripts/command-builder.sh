@@ -241,7 +241,7 @@ validate_l7_filter() {
     old_ifs="$IFS"; IFS=,; set -- $value; IFS="$old_ifs"
     [ "$#" -gt 0 ] || return 1
     for token in "$@"; do
-        # Reviewed against bol-van/zapret2 v1.0.6 protocol_name[].  Keeping the
+        # Reviewed against bol-van/zapret2 v1.0.7 protocol_name[] (unchanged since v1.0.6).  Keeping the
         # complete upstream set here prevents the Android wrapper from
         # inventing a smaller language than the nfqws2 binary it launches.
         case "$token" in
@@ -279,7 +279,7 @@ validate_capture_packet_count() {
 
 validate_preset_file() {
     local preset_file="$1" logical_name="$2" candidate_name line cr size
-    local in_profiles=0 profile_open=0 profile_name=0 profile_filter=0 profile_strategy=0 profile_skip=0
+    local in_profiles=0 profile_open=0 profile_name=0 profile_filter=0 profile_strategy=0 profile_skip=0 profile_lists='|'
     local profiles=0 lua_count=0 blob_count=0 raw option blob_name
     local capture_tcp_out= capture_tcp_in= capture_udp_out= capture_udp_in=
     local seen_capture_tcp_out=0 seen_capture_tcp_in=0 seen_capture_udp_out=0 seen_capture_udp_in=0
@@ -420,6 +420,13 @@ validate_preset_file() {
                 in_profiles=1; profile_open=1
                 option="${line%%=*}"; raw="${line#*=}"
                 validate_preset_dependency list "$raw" || return 1
+                # nfqws2 v1.0.7 refuses to start when one profile registers the same
+                # file twice for the same list type; reject it here instead of
+                # accepting a preset the binary cannot launch.
+                case "$profile_lists" in
+                    *"|$option=$raw|"*) preset_validation_fail INVALID_OPTION_VALUE "$logical_name"; return 1 ;;
+                esac
+                profile_lists="$profile_lists$option=$raw|"
                 ;;
             --hostlist-domains=*|--hostlist-exclude-domains=*|--ipset-ip=*|--ipset-exclude-ip=*|--out-range=*|--in-range=*|--payload=*)
                 in_profiles=1; profile_open=1
@@ -439,7 +446,7 @@ validate_preset_file() {
                 [ "$profile_open" -eq 1 ] || { preset_validation_fail EMPTY_PROFILE "$logical_name"; return 1; }
                 [ "$profile_filter" -gt 0 ] || { preset_validation_fail PROFILE_FILTER_MISSING "$logical_name"; return 1; }
                 [ "$profile_strategy" -gt 0 ] || { preset_validation_fail PROFILE_STRATEGY_MISSING "$logical_name"; return 1; }
-                profiles=$((profiles + 1)); profile_open=0; profile_name=0; profile_filter=0; profile_strategy=0; profile_skip=0
+                profiles=$((profiles + 1)); profile_open=0; profile_name=0; profile_filter=0; profile_strategy=0; profile_skip=0; profile_lists='|'
                 case "$line" in
                     --new=*)
                         [ -n "${line#--new=}" ] || { preset_validation_fail PROFILE_NAME_MISSING "$logical_name"; return 1; }
