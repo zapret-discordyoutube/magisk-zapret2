@@ -9,14 +9,26 @@ import java.util.Locale
  * (TLS SNI) in Russia, so the numbered mirrors go first; the API answered under a name returns asset
  * URLs on that same name.
  *
+ * Since 2026-11-14 the whole zapret.moe domain is filtered by name in most Russian networks, new random
+ * labels included, so the project also runs on a second domain, fuckingspeedtest.com. Its two permanent
+ * git seeds go first in [BUILT_IN]; the zapret.moe names stay behind them for networks where that
+ * domain still opens.
+ *
  * When every known name is silent (they are blocked too), the names handed out now (random labels
  * since 2026-10-30) are read from an entry page on a big platform: the Apps Script page of the project
  * on script.google.com and the project's gist (schema 1, `families.git.hosts`). The same lists serve
- * ZapretGUI and Zapret KVN. Only `*.zapret.moe` names that are not another site's numbered names are
- * learned, so a list can never point the updater outside the project's domain.
+ * ZapretGUI and Zapret KVN. Only names under the two project domains that are not another site's
+ * numbered names are learned, so a list can never point the updater outside the project's domains.
  */
 internal object ForgejoHosts {
-    val BUILT_IN = listOf("git2.zapret.moe", "git3.zapret.moe", "git4.zapret.moe", "git.zapret.moe")
+    val BUILT_IN = listOf(
+        "adrlneccyo.fuckingspeedtest.com",
+        "uayozmcsbx.fuckingspeedtest.com",
+        "git2.zapret.moe",
+        "git3.zapret.moe",
+        "git4.zapret.moe",
+        "git.zapret.moe",
+    )
     val ENTRY_LISTS = listOf(
         "https://script.google.com/macros/s/AKfycbzcEPk67WW6fYC0vPVm397QyDFHd4m-SrfKDBnfvG8jAD-n_HXVv8AqQnEHZ6A42oIh/exec?format=json",
         "https://gist.githubusercontent.com/fuckyourkn/ecb9b6a03f53bddcdd47023ebc12d4f9/raw/targets.json",
@@ -24,7 +36,7 @@ internal object ForgejoHosts {
 
     /** Hosts an entry list may be read from (Apps Script answers through a redirect to googleusercontent). */
     val ENTRY_HOSTS = setOf("script.google.com", "script.googleusercontent.com", "gist.githubusercontent.com")
-    private val NAME = Regex("[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.zapret\\.moe")
+    private val NAME = Regex("[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.(?:zapret\\.moe|fuckingspeedtest\\.com)")
     private val PREFIXED = Regex("(git|wiki)\\d*\\.zapret\\.moe")
 
     @Volatile

@@ -33,6 +33,38 @@ class ForgejoHostsTest {
     }
 
     @Test
+    fun theSecondDomainIsBuiltInFirstAndLearnedFromAnEntryList() {
+        assertEquals(
+            listOf("adrlneccyo.fuckingspeedtest.com", "uayozmcsbx.fuckingspeedtest.com"),
+            ForgejoHosts.BUILT_IN.take(2),
+        )
+        assertTrue(ForgejoHosts.BUILT_IN.contains("git.zapret.moe"))
+        assertTrue(isTrustedReleaseAssetUrl("https://adrlneccyo.fuckingspeedtest.com$asset"))
+        assertFalse(isTrustedReleaseAssetUrl("https://zzzzzzzzzz.fuckingspeedtest.com$asset"))
+        val learned = ForgejoHosts.learn(listOf("zzzzzzzzzz.fuckingspeedtest.com", "git2.zapret.moe"))
+        assertEquals(listOf("zzzzzzzzzz.fuckingspeedtest.com", "git2.zapret.moe"), learned)
+        assertEquals("zzzzzzzzzz.fuckingspeedtest.com", ForgejoHosts.all().first())
+        assertTrue(isTrustedReleaseAssetUrl("https://zzzzzzzzzz.fuckingspeedtest.com$asset"))
+    }
+
+    @Test
+    fun theSecondDomainDoesNotWidenTheTrustToLookalikes() {
+        val learned = ForgejoHosts.learn(
+            listOf(
+                "fuckingspeedtest.com",
+                "evilfuckingspeedtest.com",
+                "git.fuckingspeedtest.com.evil.test",
+                "a b.fuckingspeedtest.com",
+                "ok1.fuckingspeedtest.com",
+                " OK2.FuckingSpeedTest.Com ",
+            ),
+        )
+        assertEquals(listOf("ok1.fuckingspeedtest.com", "ok2.fuckingspeedtest.com"), learned)
+        assertFalse(ForgejoHosts.isKnown("evilfuckingspeedtest.com"))
+        assertFalse(isTrustedReleaseAssetUrl("https://evilfuckingspeedtest.com$asset"))
+    }
+
+    @Test
     fun aListWithoutAcceptedNamesKeepsTheBuiltInOnes() {
         assertEquals(emptyList<String>(), ForgejoHosts.learn(listOf("evil.example", "wiki3.zapret.moe")))
         assertEquals(ForgejoHosts.BUILT_IN, ForgejoHosts.all())
