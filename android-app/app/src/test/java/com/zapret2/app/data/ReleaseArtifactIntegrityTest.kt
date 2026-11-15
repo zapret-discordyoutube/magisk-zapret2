@@ -304,7 +304,7 @@ class ReleaseArtifactIntegrityTest {
 
     @Test
     fun releaseApi_triesTheMirrorsBeforeTheBlockedMainName() {
-        assertEquals("git2.zapret.moe", ForgejoHosts.BUILT_IN.first())
+        assertEquals("adrlneccyo.fuckingspeedtest.com", ForgejoHosts.BUILT_IN.first())
         assertEquals("git.zapret.moe", ForgejoHosts.BUILT_IN.last())
         assertEquals(
             "https://git3.zapret.moe/api/v1/repos/zapretdiscordyoutube/magisk-zapret2/releases/latest",
