@@ -1,4 +1,4 @@
-# shellcheck shell=sh
+# shellcheck shell=bash
 # One build at a time on this machine (owner decision 2026-11-16).
 #
 # On 2026-11-15 two parallel Gradle builds in the build container loaded the
@@ -13,6 +13,12 @@
 #                          builds it starts itself (they must not wait for it)
 #
 # The lock lives on file descriptor 9 until the build process exits.
+#
+# Where the machine provides `us2-build-lock` (CT 210 on US2-7), the build also
+# takes the server-wide lock it shares with the Android CI jobs of the Forgejo
+# runner (CT 206): heavy builds of both containers use the same disks. Without
+# that command (CI, other machines) only this machine's lock applies; when the
+# runner cannot be reached, the build warns and goes on with the local lock.
 
 zapret2_build_lock() {
     if [ "${ZAPRET2_BUILD_LOCK_HELD:-}" = 1 ]; then
@@ -50,6 +56,39 @@ zapret2_build_lock() {
             return 1
         fi
     fi
+    if [ -n "${BASH_VERSION:-}" ] && command -v us2-build-lock >/dev/null 2>&1; then
+        zapret2_shared_build_lock || { exec 9<&-; return 1; }
+    fi
     ZAPRET2_BUILD_LOCK_HELD=1
     export ZAPRET2_BUILD_LOCK_HELD
+}
+
+# Server-wide lock (us2-build-lock hold): held by a helper process while this
+# build process ($$) lives; its answers arrive line by line.
+zapret2_shared_build_lock() {
+    local state rest
+    # fd 9 (this machine's lock) is closed in the helper: it must not keep the
+    # local lock after the build itself has exited.
+    coproc ZAPRET2_US2_LOCK {
+        exec 9<&-
+        US2_BUILD_LOCK_WAIT=${ZAPRET2_BUILD_LOCK_WAIT:-5400} \
+            us2-build-lock hold "$$" "magisk-zapret2-$(basename "$0")-$$"
+    }
+    state=""
+    while IFS=' ' read -r state rest <&"${ZAPRET2_US2_LOCK[0]}"; do
+        case "$state" in
+            WAIT)
+                printf 'Another heavy build on this server is running (%s); waiting up to %s s...\n' \
+                    "${rest:-?}" "${ZAPRET2_BUILD_LOCK_WAIT:-5400}" >&2 ;;
+            HELD) return 0 ;;
+            TIMEOUT)
+                printf 'ERROR: the other build on this server still runs after %s s; not starting a second one\n' \
+                    "${ZAPRET2_BUILD_LOCK_WAIT:-5400}" >&2
+                return 1 ;;
+            *) break ;;
+        esac
+    done
+    printf 'WARNING: the server-wide build lock is unavailable (%s); only this machine waits for other builds\n' \
+        "${state:+$state }${rest:-no answer}" >&2
+    return 0
 }

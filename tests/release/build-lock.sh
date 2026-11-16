@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Behaviour of tools/build-lock.sh: a second build waits, then gives up;
-# builds started by the lock holder pass; the lock frees when the build exits.
+# builds started by the lock holder pass; the lock frees when the build exits;
+# the server-wide lock (us2-build-lock, stubbed here) is waited for, refuses on
+# timeout and only warns when it cannot be reached.
 set -euo pipefail
 
 ROOT="$(cd -- "${1:-$(dirname "$0")/../..}" && pwd -P)"
@@ -33,6 +35,24 @@ cleanup() {
 trap cleanup EXIT
 export ZAPRET2_BUILD_LOCK_FILE="$TMP/build.lock"
 unset ZAPRET2_BUILD_LOCK_HELD
+
+# A stand-in for the server-wide lock client (us2-build-lock on CT 210), so the
+# test never touches a real server lock; STUB_ANSWER picks its answer.
+mkdir "$TMP/bin"
+cat >"$TMP/bin/us2-build-lock" <<'STUB'
+#!/usr/bin/env bash
+[ "$1" = hold ] || exit 2
+case "${STUB_ANSWER:-HELD}" in
+    HELD) echo HELD ;;
+    WAIT) echo "WAIT CI job demo"; echo HELD ;;
+    TIMEOUT) echo "WAIT CI job demo"; echo TIMEOUT ;;
+    UNAVAILABLE) echo "UNAVAILABLE ssh to demo failed" ;;
+    SILENT) ;;
+    LINGER) echo HELD; exec 0<&- 1>&-; sleep 3 ;;
+esac
+STUB
+chmod +x "$TMP/bin/us2-build-lock"
+export PATH="$TMP/bin:$PATH"
 
 take_lock() {
     bash -c '. "$1"; zapret2_build_lock' _ "$HELPER"
@@ -67,5 +87,30 @@ kill "$holder"
 wait "$holder" 2>/dev/null || true
 holder=""
 ZAPRET2_BUILD_LOCK_WAIT=5 take_lock || fail "the lock did not free when the holder exited"
+
+# Server-wide lock answers (the local lock is free here).
+STUB_ANSWER=HELD take_lock 2>"$TMP/err" || fail "a free server-wide lock was not taken"
+[[ ! -s "$TMP/err" ]] || fail "a free server-wide lock printed: $(cat "$TMP/err")"
+STUB_ANSWER=WAIT take_lock 2>"$TMP/err" || fail "the build did not go on after waiting for the server-wide lock"
+grep -Fq 'Another heavy build on this server is running (CI job demo)' "$TMP/err" ||
+    fail "waiting for the server-wide lock is not shown"
+if STUB_ANSWER=TIMEOUT take_lock 2>"$TMP/err"; then
+    fail "a build started while the server-wide lock stayed busy"
+fi
+grep -Fq 'not starting a second one' "$TMP/err" || fail "the server-wide refusal does not say why"
+STUB_ANSWER=TIMEOUT bash -c '. "$1"; zapret2_build_lock 2>/dev/null && exit 9
+    flock -n "$ZAPRET2_BUILD_LOCK_FILE" true' _ "$HELPER" ||
+    fail "a refused build kept this machine's lock"
+for answer in UNAVAILABLE SILENT; do
+    STUB_ANSWER=$answer take_lock 2>"$TMP/err" ||
+        fail "an unreachable server-wide lock ($answer) stopped the build"
+    grep -Fq 'server-wide build lock is unavailable' "$TMP/err" ||
+        fail "an unreachable server-wide lock ($answer) is not reported"
+done
+STUB_ANSWER=LINGER take_lock || fail "a lingering server-wide helper stopped the build"
+flock -n "$ZAPRET2_BUILD_LOCK_FILE" true ||
+    fail "the server-wide helper kept this machine's lock after the build ended"
+STUB_ANSWER=TIMEOUT ZAPRET2_BUILD_LOCK_HELD=1 take_lock ||
+    fail "a child build of the lock holder waited for the server-wide lock"
 
 printf 'build-lock contract: passed\n'
