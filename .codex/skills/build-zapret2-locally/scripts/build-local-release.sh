@@ -94,6 +94,13 @@ readonly REPO
     || fail "--repo must identify the repository root"
 [[ -f "$REPO/AGENTS.md" ]] || fail "repository AGENTS.md is missing"
 
+# One build at a time on this machine. The Gradle runs and the module build
+# below are children of this builder and pass under the lock it holds.
+[[ -f "$REPO/tools/build-lock.sh" ]] || fail "tools/build-lock.sh is missing"
+# shellcheck source=../../../../tools/build-lock.sh
+. "$REPO/tools/build-lock.sh"
+zapret2_build_lock || fail "another build is still running on this machine"
+
 # Stable sources come from git archive and therefore intentionally contain no
 # ignored local.properties. Resolve and export the trusted SDK before any
 # Gradle invocation so qualification never depends on checkout-local residue.
@@ -349,7 +356,7 @@ fi
 MODULE_LOG="$WORK_ROOT/module-build.log"
 sudo chown -R root:root "$MODULE_SOURCE"
 run_module_build() {
-    sudo bash -c 'cd "$1" && bash ./build.sh "$2" artifacts "$3"' \
+    sudo env ZAPRET2_BUILD_LOCK_HELD=1 bash -c 'cd "$1" && bash ./build.sh "$2" artifacts "$3"' \
         _ "$MODULE_SOURCE" "$VERSION" "$PRERELEASE_ID"
 }
 if ! run_module_build >"$MODULE_LOG" 2>&1; then

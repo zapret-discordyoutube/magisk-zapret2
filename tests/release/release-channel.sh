@@ -68,4 +68,7 @@ if grep -Eq '(forgejo-cli release create|api_json POST)' "$BUILDER"; then
     fail "local builder can publish instead of remaining build-only"
 fi
 
+bash "$ROOT/tests/release/build-lock.sh" "$ROOT" ||
+    fail "one-build lock contract failed"
+
 printf 'release-channel contract: passed\n'

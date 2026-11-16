@@ -5,6 +5,10 @@
 
 set -e
 
+# One build at a time on this machine (tools/build-lock.sh).
+. "$(dirname "$0")/tools/build-lock.sh"
+zapret2_build_lock || exit 1
+
 REQUESTED_VERSION="${1:-}"
 OUTPUT_DIR="${2:-.artifacts/module}"
 PRERELEASE_ID="${3:-}"
